@@ -78,6 +78,12 @@ static volatile struct limine_executable_address_request g_exec_addr_request = {
 };
 
 REQUESTS
+static volatile struct limine_rsdp_request g_rsdp_request = {
+    .id = LIMINE_RSDP_REQUEST_ID,
+    .revision = 0,
+};
+
+REQUESTS
 static volatile struct limine_executable_cmdline_request g_cmdline_request = {
     .id = LIMINE_EXECUTABLE_CMDLINE_REQUEST_ID,
     .revision = 0,
@@ -160,6 +166,13 @@ struct limine_framebuffer *bootinfo_framebuffer(void)
     if (g_framebuffer_request.response->framebuffer_count == 0)
         return NULL;
     return g_framebuffer_request.response->framebuffers[0];
+}
+
+void *bootinfo_rsdp(void)
+{
+    if (!g_rsdp_request.response)
+        return NULL;
+    return g_rsdp_request.response->address;
 }
 
 uint64_t bootinfo_kernel_physical_base(void)

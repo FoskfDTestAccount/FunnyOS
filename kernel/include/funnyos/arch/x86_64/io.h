@@ -4,6 +4,7 @@
 #ifndef FUNNYOS_ARCH_X86_64_IO_H
 #define FUNNYOS_ARCH_X86_64_IO_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 static inline void outb(uint16_t port, uint8_t value)
@@ -38,6 +39,14 @@ static inline void interrupts_enable(void)
 static inline void interrupts_disable(void)
 {
     __asm__ volatile("cli");
+}
+
+/* Whether maskable interrupts are currently accepted (RFLAGS.IF). */
+static inline bool interrupts_enabled(void)
+{
+    uint64_t flags;
+    __asm__ volatile("pushfq; popq %0" : "=r"(flags));
+    return (flags & (1ULL << 9)) != 0;
 }
 
 #endif /* FUNNYOS_ARCH_X86_64_IO_H */

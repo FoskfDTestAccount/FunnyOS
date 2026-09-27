@@ -5,31 +5,18 @@
  * fault and a silent reboot; the goal here is that a fault instead names
  * itself, points at the instruction that caused it, and dumps enough state
  * to work out why.
+ *
+ * Device interrupts arrive through the same entry stub and pass through
+ * here on their way to their registered handler. They are tried first:
+ * once drivers exist, a claimed vector is the common case, while every
+ * path below this point is terminal.
  */
+#include <funnyos/arch/x86_64/irq.h>
 #include <funnyos/kprintf.h>
 #include <funnyos/panic.h>
 
 #include <stdint.h>
 #include <stddef.h>
-
-/*
- * Must match the order isr_common pushes registers in, followed by what
- * the stub and then the CPU leave on the stack. See isr.asm.
- */
-struct interrupt_frame {
-    uint64_t r15, r14, r13, r12, r11, r10, r9, r8;
-    uint64_t rbp, rdi, rsi, rdx, rcx, rbx, rax;
-
-    uint64_t vector;
-    uint64_t error_code;
-
-    /* Pushed by the CPU */
-    uint64_t rip;
-    uint64_t cs;
-    uint64_t rflags;
-    uint64_t rsp;
-    uint64_t ss;
-};
 
 /* --- Control registers ------------------------------------------- */
 
@@ -149,6 +136,11 @@ void isr_dispatch(struct interrupt_frame *f);
 
 void isr_dispatch(struct interrupt_frame *f)
 {
+    /* A registered device interrupt completes here and the interrupted
+     * code resumes. Everything past this point is fatal. */
+    if (irq_dispatch(f))
+        return;
+
     kprintf("\n");
     kprintf("==================== CPU EXCEPTION ====================\n");
     kprintf("  Vector     : %llu  %s\n",

@@ -165,6 +165,21 @@ expect_present "Total frames   :"                     "memory map consumed"
 expect_present "Largest free   :"                     "kernel heap initialised"
 expect_present "Memory subsystem: all checks passed"  "memory self-test passed"
 
+# M1: interrupt controllers. These come from firmware rather than from
+# constants, so a pass means the ACPI tables were found, checksummed and
+# parsed -- not that a hardcoded address happened to work on this machine.
+expect_present "ACPI           : MADT parsed"         "ACPI MADT found and parsed"
+expect_present "Local APIC     : id"                  "local APIC located and mapped"
+expect_present "I/O APIC       : id"                  "IO APIC located and mapped"
+expect_absent  "NOT AVAILABLE"                        "no interrupt controller failed to map"
+
+# M1: the time base. The kernel times its own tick against the TSC and
+# prints PASS only when the measured rate matches the programmed one, so
+# this catches a miscalibrated timer rather than merely a running one.
+expect_present "Calibration    :"                     "LAPIC timer calibrated against the PIT"
+expect_present "Tick rate      : PASS"                "timer ticks at the programmed rate"
+expect_absent  "unhandled interrupt"                  "no interrupt arrived unclaimed"
+
 # These two guard the VMware boot failure: when Limine cannot match the
 # device it booted from with a readable volume, it warns and then fails to
 # resolve a boot()-relative kernel path. The config now locates the kernel

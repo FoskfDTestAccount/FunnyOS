@@ -24,7 +24,22 @@
 #define VMM_CACHE_DISABLE  (1ULL << 4)
 #define VMM_ACCESSED       (1ULL << 5)
 #define VMM_DIRTY          (1ULL << 6)
-#define VMM_HUGE           (1ULL << 7)
+
+/*
+ * Bit 7 means two different things depending on the entry.
+ *
+ * In a page-directory or page-directory-pointer entry it is PS, the bit
+ * that says "this entry maps a large page rather than pointing at the
+ * next table down". In a leaf 4 KiB entry it is PAT, the cache type
+ * selector. One name cannot honestly cover both, so it has two, and code
+ * that converts between the two entry formats has to say which it means.
+ */
+#define VMM_HUGE           (1ULL << 7)   /* PS, in a PDE or PDPTE */
+#define VMM_PAT_4K         (1ULL << 7)   /* PAT, in a 4 KiB PTE */
+
+/* And bit 12 is PAT in a large-page entry -- 2 MiB or 1 GiB. */
+#define VMM_PAT_HUGE       (1ULL << 12)
+
 #define VMM_GLOBAL         (1ULL << 8)
 #define VMM_NO_EXECUTE     (1ULL << 63)
 

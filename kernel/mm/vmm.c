@@ -45,9 +45,18 @@ static inline void tlb_invalidate(uint64_t virt)
 /*
  * Fetch the table one level down, creating it when asked and possible.
  *
- * `level` is the level of `parent`: 3 = PML4, 2 = PDPT, 1 = PD. It matters
- * because a 2 MiB page can only be split once we are at the PD looking
- * down into a PT.
+ * `level` is the level of `parent`: 3 = PML4, 2 = PDPT, 1 = PD.
+ *
+ * A large page in the way is broken up rather than reported as an error.
+ * This matters more than it looks: the bootloader maps the HHDM with the
+ * largest pages it can, and mapping a device register -- the local APIC
+ * or an IO APIC -- lands squarely inside one of those. Without splitting,
+ * every MMIO mapping in the kernel would depend on firmware happening not
+ * to have covered that range with a 1 GiB page.
+ *
+ * Only a mapping request may split. A lookup or an unmap must not: it
+ * would allocate frames as a side effect of a read-only query, and it
+ * would silently convert one mapping into 512 for no reason.
  */
 static uint64_t *descend(uint64_t *parent, uint64_t index, uint64_t flags,
                          bool create, int level)
@@ -58,38 +67,67 @@ static uint64_t *descend(uint64_t *parent, uint64_t index, uint64_t flags,
         if (!(entry & VMM_HUGE))
             return phys_to_ptr(ENTRY_ADDR(entry));
 
-        /*
-         * A large page is already mapped here. Splitting a 2 MiB page into
-         * a table of 4 KiB pages is mechanical and worth doing; splitting
-         * a 1 GiB page would have to cascade two levels, and nothing in
-         * M1 maps at that granularity in the ranges we touch.
-         */
-        if (level != 1 || !create) {
-            kprintf("vmm: %s page in the way at level %d, cannot descend\n",
-                    "large", level);
+        if (!create)
+            return NULL;
+
+        if (level != 1 && level != 2) {
+            /* Only a PD or a PDPT can hold a large-page entry. Anywhere
+             * else the bit is a reserved-bit violation that the CPU would
+             * fault on, so it is not a mapping we can work with. */
+            kprintf("vmm: large page at level %d, which cannot carry one\n",
+                    level);
             return NULL;
         }
-
-        uint64_t base  = ENTRY_ADDR(entry);            /* 2 MiB aligned */
-        uint64_t pflags = entry & ~VMM_ADDR_MASK & ~VMM_HUGE;
 
         uint64_t frame = pmm_alloc_page();
         if (!frame) {
-            kprintf("vmm: out of memory splitting a 2 MiB page\n");
+            kprintf("vmm: out of memory splitting a large page\n");
             return NULL;
         }
 
-        uint64_t *pt = phys_to_ptr(frame);
-        memset(pt, 0, PAGE_SIZE);
+        uint64_t *table      = phys_to_ptr(frame);
+        uint64_t  base       = ENTRY_ADDR(entry);
+        uint64_t  child_size = (level == 2) ? (1ULL << 21) : PAGE_SIZE;
+        uint64_t  child_flags;
+        uint64_t  pat        = (entry & VMM_PAT_HUGE) ? 1u : 0u;
+
+        /* Everything except the address, the PS bit and whatever else the
+         * parent format defines differently. */
+        uint64_t common = entry & ~VMM_ADDR_MASK & ~VMM_HUGE;
+
+        if (level == 2) {
+            /* 1 GiB -> 512 x 2 MiB. PAT sits in bit 12 in both formats and
+             * the children are large pages themselves, so the flags carry
+             * across unchanged. */
+            child_flags = common | VMM_PRESENT | VMM_HUGE;
+        } else {
+            /* 2 MiB -> 512 x 4 KiB. PAT moves from bit 12 to bit 7, and
+             * bit 7 is also where the parent format keeps PS -- so the
+             * two have to be handled one at a time rather than masked off
+             * together, which is exactly how this goes wrong. */
+            child_flags = (common & ~VMM_PAT_HUGE) | VMM_PRESENT;
+            if (pat)
+                child_flags |= VMM_PAT_4K;
+        }
 
         for (uint64_t i = 0; i < ENTRIES_PER_TABLE; i++)
-            pt[i] = (base + i * PAGE_SIZE) | pflags | VMM_PRESENT;
+            table[i] = (base + i * child_size) | child_flags;
 
+        /*
+         * The entry that used to name a large page now names a table, so
+         * PS has to be clear and bit 12 stops being PAT and becomes an
+         * ignored bit in a table reference. The permission bits carry
+         * over from the large page, not from the caller's request: the
+         * caller is describing the one leaf it is about to install, while
+         * these bits describe the whole region being split.
+         */
         parent[index] = frame |
-                        (pflags & (VMM_WRITABLE | VMM_USER)) |
+                        (child_flags & (VMM_WRITABLE | VMM_USER |
+                                        VMM_CACHE_DISABLE | VMM_WRITE_THROUGH)) |
                         VMM_PRESENT;
+
         tlb_invalidate(base);
-        return pt;
+        return table;
     }
 
     if (!create)

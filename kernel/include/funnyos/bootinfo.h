@@ -43,6 +43,16 @@ uint64_t bootinfo_memory_total_by_type(uint64_t type);
 /* Preferred framebuffer, or NULL when none is available. */
 struct limine_framebuffer *bootinfo_framebuffer(void);
 
+/*
+ * Root System Description Pointer, the entry point to every ACPI table.
+ * Returns NULL when firmware did not supply one.
+ *
+ * ACPI 1.0 systems have no RDSP at all, so a NULL here is not necessarily
+ * an error -- it means the machine predates the tables or the firmware
+ * chose not to expose them.
+ */
+void *bootinfo_rsdp(void);
+
 /* Physical base address the kernel image was loaded at. */
 uint64_t bootinfo_kernel_physical_base(void);
 

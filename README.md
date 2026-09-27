@@ -16,9 +16,11 @@ DOS 在这里扮演两重角色：**设计参照系**（继承小内核、直白
 
 内核经 Limine 进入 64 位长模式，引导协议的请求全部解析正确。**GDT/TSS 与 256 项 IDT 已装载**，CPU 异常会被完整诊断——错误码解码、CR2 故障地址、控制寄存器、全部通用寄存器——而不是三重故障后静默重启。**物理页帧分配器、页表管理与内核堆**均已就位，每次启动都跑一遍自检。
 
+**中断已上线。** 内核解析 ACPI MADT 找出中断控制器（而不是硬编码地址），初始化本地 APIC 与 I/O APIC，并把 8259 PIC 重新映射出异常向量区间后屏蔽。时间基准是 **LAPIC 定时器**，100 Hz；它的频率无法自报，因此以 8254 PIT 的晶振为参考**实测标定**，同一窗口顺便标定 TSC。每次启动都会用 TSC 复核，只有测得速率与编程速率相符才报告 PASS。
+
 输出同时送往两条通道：**串口**（QEMU 可无头捕获，供自动化断言）和**帧缓冲文本控制台**（内建 8×16 点阵字体的字符网格，带光标与滚屏），所以在 VMware、VirtualBox 或真机上直接开机就能看到画面，不需要串口线。
 
-测试规模：正常启动 14 项断言 × 两条固件路径，外加一次故障注入测试（9 项断言），全部由 `make` 驱动。
+测试规模：正常启动 25 项断言 × 两条固件路径，外加一次故障注入测试（9 项断言），全部由 `make` 驱动。
 
 | | 正常启动 | 故障注入 |
 |---|---|---|
@@ -66,8 +68,18 @@ FunnyOS/
 │   ├── limine.conf              引导配置
 │   └── limine/                  Limine 二进制与协议头文件（由脚本获取，不入库）
 ├── kernel/
-│   ├── arch/x86_64/entry.asm    长模式入口（建立内核栈）
+│   ├── arch/x86_64/
+│   │   ├── entry.asm            长模式入口（建立内核栈）
+│   │   ├── gdt.c  idt.c  isr.c  描述符表与 CPU 异常诊断
+│   │   ├── irq.c                中断处理程序登记、分发与 EOI
+│   │   ├── acpi.c               ACPI MADT 解析（找出中断控制器）
+│   │   ├── apic.c               本地 APIC 与 I/O APIC
+│   │   └── timer.c              LAPIC 定时器 + PIT 标定 + TSC
 │   ├── boot/bootinfo.c          Limine 引导请求与访问接口
+│   ├── mm/
+│   │   ├── pmm.c                物理页帧分配器（位图）
+│   │   ├── vmm.c                页表管理（含大页拆分）
+│   │   └── heap.c               内核堆
 │   ├── console/
 │   │   ├── serial.c             16550 UART 驱动（含回环自检）
 │   │   ├── fb.c                 帧缓冲文本控制台（光标、滚屏）
@@ -174,9 +186,11 @@ See [docs/DESIGN.md](docs/DESIGN.md) for the full architecture (written in Chine
 
 The kernel enters 64-bit long mode via Limine, and every boot protocol request parses correctly. A **GDT/TSS and a 256-vector IDT** are installed, so a CPU exception is fully diagnosed -- error code decoded, CR2 reported, control registers and every general-purpose register dumped -- instead of becoming a triple fault and a silent reboot. A **physical frame allocator, page table management and a kernel heap** are in place, and a self-test exercises all of them on every boot.
 
+**Interrupts are live.** The kernel parses the ACPI MADT to find the interrupt controllers rather than hardcoding their addresses, brings up the local APIC and the I/O APIC, and remaps the 8259 PIC pair out of the exception vector range before masking it. The time base is the **LAPIC timer** at 100 Hz; it cannot report its own frequency, so that is *measured* against the 8254 PIT's crystal, and the TSC is calibrated in the same window. Every boot re-checks the rate against the TSC and reports PASS only when the measured rate matches the programmed one.
+
 Output goes to two channels at once: **serial** (QEMU captures it headlessly for the automated assertions) and a **framebuffer text console** (a character grid backed by a built-in 8x16 bitmap font, with cursor and scrolling). Booting it in VMware, VirtualBox or on real hardware shows something immediately, with no serial cable required.
 
-Test coverage is 14 assertions per boot path across both firmware types, plus a fault-injection test with 9 more, all driven by `make`.
+Test coverage is 25 assertions per boot path across both firmware types, plus a fault-injection test with 9 more, all driven by `make`.
 
 | | Normal boot | Fault injection |
 |---|---|---|
@@ -224,8 +238,18 @@ FunnyOS/
 │   ├── limine.conf              Boot configuration
 │   └── limine/                  Limine binaries and protocol header (fetched, not committed)
 ├── kernel/
-│   ├── arch/x86_64/entry.asm    Long mode entry point (sets up the kernel stack)
+│   ├── arch/x86_64/
+│   │   ├── entry.asm            Long mode entry point (sets up the kernel stack)
+│   │   ├── gdt.c  idt.c  isr.c  Descriptor tables and CPU exception reporting
+│   │   ├── irq.c                Interrupt handler registration, dispatch and EOI
+│   │   ├── acpi.c               ACPI MADT parsing (locating the interrupt controllers)
+│   │   ├── apic.c               Local APIC and I/O APIC
+│   │   └── timer.c              LAPIC timer, PIT calibration, TSC
 │   ├── boot/bootinfo.c          Limine boot requests and accessor interface
+│   ├── mm/
+│   │   ├── pmm.c                Physical frame allocator (bitmap)
+│   │   ├── vmm.c                Page tables, including large-page splitting
+│   │   └── heap.c               Kernel heap
 │   ├── console/
 │   │   ├── serial.c             16550 UART driver with loopback self-test
 │   │   ├── fb.c                 Framebuffer text console (cursor, scrolling)

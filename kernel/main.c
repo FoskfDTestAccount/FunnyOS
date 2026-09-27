@@ -23,8 +23,13 @@
 #include <funnyos/panic.h>
 #include <funnyos/serial.h>
 
+#include <funnyos/arch/x86_64/acpi.h>
+#include <funnyos/arch/x86_64/apic.h>
 #include <funnyos/arch/x86_64/gdt.h>
 #include <funnyos/arch/x86_64/idt.h>
+#include <funnyos/arch/x86_64/io.h>
+#include <funnyos/arch/x86_64/irq.h>
+#include <funnyos/arch/x86_64/timer.h>
 
 #include <funnyos/heap.h>
 #include <funnyos/pmm.h>
@@ -112,6 +117,70 @@ static void print_framebuffer_info(void)
             fb->red_mask_size,   fb->red_mask_shift,
             fb->green_mask_size, fb->green_mask_shift,
             fb->blue_mask_size,  fb->blue_mask_shift);
+}
+
+/* Print a value in megahertz with three decimals, without floating point:
+ * the kernel is compiled with -mgeneral-regs-only and has no FPU state to
+ * save. */
+static void print_mhz(uint64_t hz)
+{
+    kprintf("%llu.%03llu MHz",
+            (unsigned long long)(hz / 1000000ull),
+            (unsigned long long)((hz % 1000000ull) / 1000ull));
+}
+
+static void print_interrupt_info(void)
+{
+    kprintf("\n[interrupts]\n");
+
+    if (acpi_madt_found()) {
+        kprintf("  ACPI           : MADT parsed, %llu IO APIC(s)\n",
+                (unsigned long long)acpi_ioapic_count());
+    } else {
+        kprintf("  ACPI           : no usable MADT, using default addresses\n");
+    }
+
+    if (lapic_ready()) {
+        kprintf("  Local APIC     : id %u, v%u, base %p (mapped uncached)\n",
+                (unsigned)lapic_id(), (unsigned)lapic_version(),
+                (void *)lapic_base_physical());
+    } else {
+        kprintf("  Local APIC     : NOT AVAILABLE\n");
+    }
+
+    if (ioapic_ready()) {
+        kprintf("  I/O APIC       : id %u, v%u, base %p, %u lines\n",
+                (unsigned)ioapic_id(), (unsigned)ioapic_version(),
+                (void *)ioapic_address(), (unsigned)ioapic_entry_count());
+    } else {
+        kprintf("  I/O APIC       : NOT AVAILABLE\n");
+    }
+
+    /* Historical note rather than a live component: the 8259 pair is
+     * remapped out of the exception vector range and masked, and nothing
+     * ever unmasks it. */
+    kprintf("  Legacy PIC     : remapped to 0x20/0x28 and masked\n");
+}
+
+static void print_timer_info(void)
+{
+    kprintf("\n[timer]\n");
+
+    if (!timer_ready()) {
+        kprintf("  Source         : none, no time base available\n");
+        return;
+    }
+
+    kprintf("  Source         : LAPIC timer, %u Hz periodic on vector %u\n",
+            (unsigned)timer_hz(), (unsigned)IRQ_VECTOR_TIMER);
+    kprintf("  Calibration    : %llu counts/s at divide 16 (PIT reference)\n",
+            (unsigned long long)timer_lapic_hz());
+    kprintf("  Tick period    : %llu counts\n",
+            (unsigned long long)(timer_lapic_hz() / timer_hz()));
+
+    kprintf("  Timestamp ctr  : ");
+    print_mhz(timer_tsc_hz());
+    kprintf("\n");
 }
 
 /*
@@ -250,6 +319,25 @@ void kmain(void)
     vmm_init();
     heap_init();
 
+    /*
+     * Interrupt controllers last, because everything above them needs
+     * memory to be working: finding the LAPIC means mapping its registers,
+     * and mapping needs page tables, which need frames.
+     *
+     * The order within this group is a dependency chain. The handler table
+     * comes first so a driver can claim a vector. ACPI comes next because
+     * it is where firmware says where the controllers are. The LAPIC is
+     * then enabled -- and it has to be, because the IO APIC delivers
+     * *through* it. Only then can the IO APIC be programmed. The timer
+     * needs both: the LAPIC to tick, and the PIT as a reference to
+     * calibrate against.
+     */
+    irq_init();
+    acpi_init();
+    lapic_init();
+    ioapic_init();
+    timer_init();
+
     kprintf("\n");
     kprintf("==================================================\n");
     kprintf("  FunnyOS -- x86-64 kernel\n");
@@ -307,6 +395,9 @@ void kmain(void)
     kprintf("\n[display]\n");
     print_framebuffer_info();
 
+    print_interrupt_info();
+    print_timer_info();
+
     /*
      * Report the output channels last. Even when the serial loopback
      * check fails, everything above still made it out -- which means the
@@ -351,9 +442,34 @@ void kmain(void)
         panic("fault injection did not fault at %p", (void *)FAULT_TEST_ADDRESS);
     }
 
+    /*
+     * From here on the kernel is interrupt-driven. Enabling interrupts is
+     * the last step of every bring-up sequence, and deliberately so:
+     * before this line, an interrupt arriving would find handlers
+     * registered against a half-initialised machine.
+     */
+    kprintf("\n[timer check]\n");
+    interrupts_enable();
+    kprintf("  Interrupts     : enabled\n");
+
+    uint32_t measured_x10 = 0;
+    bool timer_ok = timer_selftest(&measured_x10);
+
+    if (!timer_ready()) {
+        kprintf("  Tick rate      : SKIPPED (no time base)\n");
+    } else {
+        kprintf("  Tick rate      : %s (%u.%u Hz measured against the TSC)\n",
+                timer_ok ? "PASS" : "FAIL",
+                (unsigned)(measured_x10 / 10), (unsigned)(measured_x10 % 10));
+    }
+
+    kprintf("  Interrupt count: %llu\n",
+            (unsigned long long)irq_total_count());
+
     kprintf("\nThis output is mirrored to COM1. The kernel has no scheduler\n");
-    kprintf("yet, so it halts here by design.\n");
-    __asm__ volatile("cli");
+    kprintf("yet, so it idles here by design, ticking at %u Hz.\n",
+            (unsigned)timer_hz());
+
     for (;;)
         __asm__ volatile("hlt");
 }
