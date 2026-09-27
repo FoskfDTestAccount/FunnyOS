@@ -36,6 +36,10 @@ DOS 在这里扮演两重角色：**设计参照系**（继承小内核、直白
 |---|---|---|
 | 画面 | ![Shell](docs/screenshot-m2-shell.png) | ![异常报告](docs/screenshot-m1-fault.png) |
 
+同一个 ISO 在 **VMware Workstation** 里跑（BIOS 路径，非 QEMU）：
+
+![VMware](docs/screenshot-m2-vmware.png)
+
 `make run` 可交互运行；`bash tools/screenshot.sh` 与 `bash tools/screenshot-shell.sh` 可无头截图。
 
 下一步是 M3：8086 解释器核心。
@@ -249,6 +253,10 @@ Test coverage: 25 assertions per boot path across both firmware types, 9 more fo
 | | Interactive shell | Program crash |
 |---|---|---|
 | Screen | ![Shell](docs/screenshot-m2-shell.png) | ![Exception report](docs/screenshot-m1-fault.png) |
+
+The same ISO in **VMware Workstation** (BIOS path, not QEMU):
+
+![VMware](docs/screenshot-m2-vmware.png)
 
 `make run` boots interactively; `bash tools/screenshot.sh` and `bash tools/screenshot-shell.sh` capture the screen headlessly.
 
