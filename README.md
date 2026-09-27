@@ -12,15 +12,21 @@ DOS 在这里扮演两重角色：**设计参照系**（继承小内核、直白
 
 ## 当前状态
 
-**M0（引导闭环）已完成并通过验证。**
+**M0（引导闭环）与 M1（内核基础设施）已完成并通过验证。**
 
-内核能通过 Limine 进入 64 位长模式，引导协议的全部请求（内存映射、HHDM、帧缓冲、固件类型、内核映像地址）解析正确。输出同时送往两条通道：**串口**（QEMU 可无头捕获，供自动化断言）和**帧缓冲文本控制台**（内建 8×16 点阵字体的字符网格，带光标与滚屏），所以在 VMware、VirtualBox 或真机上直接开机就能看到画面，不需要串口线。
+内核经 Limine 进入 64 位长模式，引导协议的请求全部解析正确。**GDT/TSS 与 256 项 IDT 已装载**，CPU 异常会被完整诊断——错误码解码、CR2 故障地址、控制寄存器、全部通用寄存器——而不是三重故障后静默重启。**物理页帧分配器、页表管理与内核堆**均已就位，每次启动都跑一遍自检。
 
-传统 BIOS 与 UEFI 两条引导路径均有自动化测试覆盖并通过（各 9 项断言），两条路径的屏幕输出也都有人工截图确认。`make run` 可交互运行，`bash tools/screenshot.sh` 可无头截图。
+输出同时送往两条通道：**串口**（QEMU 可无头捕获，供自动化断言）和**帧缓冲文本控制台**（内建 8×16 点阵字体的字符网格，带光标与滚屏），所以在 VMware、VirtualBox 或真机上直接开机就能看到画面，不需要串口线。
 
-![FunnyOS M0 启动画面（UEFI）](docs/screenshot-m0-uefi.png)
+测试规模：正常启动 14 项断言 × 两条固件路径，外加一次故障注入测试（9 项断言），全部由 `make` 驱动。
 
-下一步是 M1：内核基础设施（物理内存管理、页表、IDT、异常处理、APIC 与定时器）。
+| | 正常启动 | 故障注入 |
+|---|---|---|
+| 画面 | ![正常启动](docs/screenshot-m1-uefi.png) | ![异常报告](docs/screenshot-m1-fault.png) |
+
+`make run` 可交互运行，`bash tools/screenshot.sh` 可无头截图。
+
+下一步是 M2：帧缓冲控制台完善、键盘驱动、系统调用雏形与用户态进程，验收标准是开机进入一个能敲命令的交互式 Shell。
 
 ## 构建环境
 
@@ -86,9 +92,9 @@ FunnyOS/
 └── Makefile
 ```
 
-## 三个必须知道的坑
+## 四个必须知道的坑
 
-以下三点都是实际踩出来的，不是理论风险。
+以下四点都是实际踩出来的，不是理论风险。
 
 ### 1. 构建产物不在项目目录里
 
@@ -129,6 +135,16 @@ PANIC: Failed to open executable with path `boot():/boot/funyos.elf`
 
 同理，构建**不做** `limine bios-install`、也**不加** `--protective-msdos-label`：那是为"写入 U 盘当硬盘启动"准备的，会给镜像留下 DOS 分区表，让固件有机会把光盘误判成硬盘。需要 U 盘启动版本的话，把这两步加回去即可（`Makefile` 里有说明）。
 
+### 4. 帧缓冲是 write-combining 内存：只能写，不能读
+
+Limine 把所有 HHDM 区域映射为 write-back，**唯独帧缓冲区域用 write-combining (WC)**。这对帧缓冲是正确的选择，但有个锋利的副作用：**从 WC 内存读取会绕过缓存，每次读都是一次独立的、直通内存的事务。**
+
+最自然的滚屏实现是把帧缓冲向上搬一行，也就是 `memmove` 3 MiB。最初就是这么写的，结果这个控制台打印一份启动日志要花大约 **60 秒**——因为光是"读"那一半，就是每滚一行约 300 万次不可缓存事务。
+
+所以这里的帧缓冲是**只写**的。屏幕内容的权威副本保存在普通缓存数组 `g_cells` 里；滚屏只移动这个 6 KiB 的数组（几乎免费），然后整体重绘——重绘是纯写操作，正好是 WC 内存的快路径。同样一份日志现在 1 秒内打完。
+
+往 [kernel/console/fb.c](kernel/console/fb.c) 里加任何东西都要守住这条：**永远不要读 `g_addr`。**
+
 ## 设计要点速查
 
 几个已经定死、后续不该反复推翻的决策（完整论证见 [docs/DESIGN.md](docs/DESIGN.md)）：
@@ -154,15 +170,21 @@ See [docs/DESIGN.md](docs/DESIGN.md) for the full architecture (written in Chine
 
 ## Status
 
-**M0 (boot chain) is complete and verified.**
+**M0 (boot chain) and M1 (kernel infrastructure) are complete and verified.**
 
-The kernel enters 64-bit long mode via Limine, and every boot protocol request (memory map, HHDM, framebuffer, firmware type, kernel image address) parses correctly. Output goes to two channels at once: **serial** (QEMU captures it headlessly for the automated assertions) and a **framebuffer text console** (a character grid backed by a built-in 8x16 bitmap font, with cursor and scrolling). That means booting it in VMware, VirtualBox or on real hardware shows something immediately, with no serial cable required.
+The kernel enters 64-bit long mode via Limine, and every boot protocol request parses correctly. A **GDT/TSS and a 256-vector IDT** are installed, so a CPU exception is fully diagnosed -- error code decoded, CR2 reported, control registers and every general-purpose register dumped -- instead of becoming a triple fault and a silent reboot. A **physical frame allocator, page table management and a kernel heap** are in place, and a self-test exercises all of them on every boot.
 
-Both legacy BIOS and UEFI boot paths are covered by automated tests and pass (9 assertions each), and the on-screen output of both paths has been confirmed by manual screenshot. `make run` boots interactively; `bash tools/screenshot.sh` captures the screen headlessly.
+Output goes to two channels at once: **serial** (QEMU captures it headlessly for the automated assertions) and a **framebuffer text console** (a character grid backed by a built-in 8x16 bitmap font, with cursor and scrolling). Booting it in VMware, VirtualBox or on real hardware shows something immediately, with no serial cable required.
 
-![FunnyOS M0 boot screen (UEFI)](docs/screenshot-m0-uefi.png)
+Test coverage is 14 assertions per boot path across both firmware types, plus a fault-injection test with 9 more, all driven by `make`.
 
-Next up is M1: kernel infrastructure (physical memory management, page tables, IDT, exception handling, APIC and timers).
+| | Normal boot | Fault injection |
+|---|---|---|
+| Screen | ![Normal boot](docs/screenshot-m1-uefi.png) | ![Exception report](docs/screenshot-m1-fault.png) |
+
+`make run` boots interactively; `bash tools/screenshot.sh` captures the screen headlessly.
+
+Next up is M2: finishing the framebuffer console, a keyboard driver, the first system calls and user-space processes -- with an interactive shell as the acceptance criterion.
 
 ## Build environment
 
@@ -228,9 +250,9 @@ FunnyOS/
 └── Makefile
 ```
 
-## Three things you need to know
+## Four things you need to know
 
-All three were hit in practice, not theorised.
+All four were hit in practice, not theorised.
 
 ### 1. Build artifacts do not live in the project directory
 
@@ -270,6 +292,16 @@ This was observed on VMware Workstation. The same image booted fine under QEMU, 
 The label comes from `VOLID` in the `Makefile`, and the build verifies the image actually carries it — because a mismatched label produces an image that compiles, passes every test, and then refuses to boot, which is the nastiest failure mode there is.
 
 For the same reason the build does **not** run `limine bios-install` and does **not** pass `--protective-msdos-label`: those exist to make an image bootable as a hard disk (a USB stick), and they leave a DOS partition table behind that gives firmware the chance to mistake the optical disc for a hard drive. If you do want a USB-bootable image, add both back (`Makefile` explains where).
+
+### 4. Framebuffer memory is write-combining: write it, never read it
+
+Limine maps every HHDM region as write-back, with one exception: **framebuffer regions are mapped write-combining (WC)**. That is the right choice for a framebuffer, but it has a sharp edge: **reads from WC memory bypass the cache entirely and cost a full uncached transaction each.**
+
+The obvious way to scroll is to move the framebuffer up by one text row, i.e. `memmove` 3 MiB. That is how this console was first written, and it took roughly **60 seconds** to print one boot log -- because the read half alone was about 3 million uncached transactions per scrolled line.
+
+So the framebuffer here is **write-only**. The authoritative screen content lives in an ordinary cached array, `g_cells`; scrolling moves that 6 KiB array (effectively free) and then repaints, which is pure writes and therefore the fast path for WC memory. The same boot log now prints in under a second.
+
+Anything added to [kernel/console/fb.c](kernel/console/fb.c) has to respect that: **never read from `g_addr`.**
 
 ## Design decisions at a glance
 

@@ -157,6 +157,14 @@ expect_present "GDT/TSS        : installed"           "GDT and TSS loaded"
 expect_present "IDT            : 256 vectors"         "IDT installed"
 expect_present "Fault handling : active"              "exception reporting enabled"
 
+# M1: memory management. The self-test exercises frame allocation, mapping,
+# unmapping and the heap, so a pass here means those actually work rather
+# than merely having initialised without complaint.
+expect_present "Page size      : 4096 bytes"          "frame allocator initialised"
+expect_present "Total frames   :"                     "memory map consumed"
+expect_present "Largest free   :"                     "kernel heap initialised"
+expect_present "Memory subsystem: all checks passed"  "memory self-test passed"
+
 # These two guard the VMware boot failure: when Limine cannot match the
 # device it booted from with a readable volume, it warns and then fails to
 # resolve a boot()-relative kernel path. The config now locates the kernel

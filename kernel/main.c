@@ -26,10 +26,18 @@
 #include <funnyos/arch/x86_64/gdt.h>
 #include <funnyos/arch/x86_64/idt.h>
 
+#include <funnyos/heap.h>
+#include <funnyos/pmm.h>
+#include <funnyos/vmm.h>
+
 #include <stdbool.h>
 #include <libk/string.h>
 
 extern char __kernel_end[];
+
+/* Scratch address for the mapping self-test below. Far above the kernel
+ * image and outside both the heap range and the HHDM. */
+#define MEMTEST_VADDR 0xffffffffd0000000ULL
 
 /*
  * Below the kernel and outside the HHDM, so it is guaranteed unmapped
@@ -106,6 +114,112 @@ static void print_framebuffer_info(void)
             fb->blue_mask_size,  fb->blue_mask_shift);
 }
 
+/*
+ * Exercise the memory subsystem end to end.
+ *
+ * This runs on every boot rather than only under a test flag: it is fast,
+ * side-effect free once it unwinds, and the failure it guards against --
+ * page tables that map nothing, or a heap that hands out memory twice --
+ * would otherwise not show up until much later, in code far from the
+ * cause.
+ */
+static bool run_memory_selftest(void)
+{
+    bool ok = true;
+
+    /* --- Frames and page tables --- */
+    uint64_t frame = pmm_alloc_page();
+    if (!frame) {
+        kprintf("    frames      : FAILED, no frame available\n");
+        return false;
+    }
+
+    if (!vmm_map_page(MEMTEST_VADDR, frame, VMM_KERNEL_RW)) {
+        kprintf("    mapping     : FAILED to map %p\n", (void *)MEMTEST_VADDR);
+        pmm_free_page(frame);
+        return false;
+    }
+
+    /*
+     * Write at both ends of the page. A single write would not notice a
+     * mapping that only covers part of the frame.
+     */
+    volatile uint64_t *page = (volatile uint64_t *)MEMTEST_VADDR;
+    page[0]   = 0x0123456789ABCDEFULL;
+    page[511] = 0xFEDCBA9876543210ULL;
+
+    if (page[0] != 0x0123456789ABCDEFULL ||
+        page[511] != 0xFEDCBA9876543210ULL) {
+        kprintf("    mapping     : FAILED, data did not round-trip\n");
+        ok = false;
+    }
+
+    if (vmm_get_physical(MEMTEST_VADDR) != frame) {
+        kprintf("    reverse map : FAILED, virt resolves to the wrong frame\n");
+        ok = false;
+    }
+
+    vmm_unmap_page(MEMTEST_VADDR);
+
+    if (vmm_is_mapped(MEMTEST_VADDR)) {
+        kprintf("    unmap       : FAILED, still mapped after unmap\n");
+        ok = false;
+    }
+
+    pmm_free_page(frame);
+
+    /* --- Heap --- */
+    uint8_t *small = kmalloc(100);
+    uint8_t *large = kmalloc(4000);
+    uint8_t *big   = kmalloc(70000);   /* forces a growth step */
+
+    if (!small || !large || !big) {
+        kprintf("    heap alloc  : FAILED (small=%p large=%p big=%p)\n",
+                (void *)small, (void *)large, (void *)big);
+        ok = false;
+    } else {
+        memset(small, 0xAA, 100);
+        memset(large, 0xBB, 4000);
+        memset(big,   0xCC, 70000);
+
+        if (small[0] != 0xAA || small[99] != 0xAA ||
+            large[0] != 0xBB || large[3999] != 0xBB ||
+            big[0] != 0xCC || big[69999] != 0xCC) {
+            kprintf("    heap write  : FAILED, data did not round-trip\n");
+            ok = false;
+        }
+
+        /* Distinct allocations must not overlap. */
+        if (small == large || small == big || large == big) {
+            kprintf("    heap alloc  : FAILED, allocations overlap\n");
+            ok = false;
+        }
+
+        kfree(small);
+        kfree(large);
+        kfree(big);
+    }
+
+    /* --- Coalescing --- */
+    size_t before = heap_largest_free();
+    uint8_t *a = kmalloc(4096);
+    uint8_t *b = kmalloc(4096);
+    uint8_t *c = kmalloc(4096);
+    if (a && b && c) {
+        kfree(b);
+        kfree(a);
+        kfree(c);
+        if (heap_largest_free() < before) {
+            kprintf("    coalescing  : FAILED, largest free block shrank\n");
+            ok = false;
+        }
+    } else {
+        ok = false;
+    }
+
+    return ok;
+}
+
 void kmain(void)
 {
     /* Serial comes first: it is the channel of last resort, and it still
@@ -126,6 +240,15 @@ void kmain(void)
      */
     gdt_init();
     idt_init();
+
+    /*
+     * Then memory, in dependency order: the frame allocator reads the
+     * bootloader's memory map, the page table code needs frames for any
+     * new table, and the heap needs both to grow itself.
+     */
+    pmm_init();
+    vmm_init();
+    heap_init();
 
     kprintf("\n");
     kprintf("==================================================\n");
@@ -164,6 +287,23 @@ void kmain(void)
     kprintf("  HHDM offset    : %p\n", (void *)bootinfo_hhdm_offset());
     print_memory_summary();
 
+    kprintf("\n[page frames]\n");
+    kprintf("  Page size      : %llu bytes\n", (unsigned long long)PAGE_SIZE);
+    kprintf("  Total frames   : %llu\n", (unsigned long long)pmm_total_pages());
+    kprintf("  Free frames    : %llu (%llu MiB)\n",
+            (unsigned long long)pmm_free_frame_count(),
+            (unsigned long long)(pmm_free_frame_count() * PAGE_SIZE / (1024 * 1024)));
+    kprintf("  In use         : %llu frames\n",
+            (unsigned long long)pmm_used_pages());
+
+    kprintf("\n[kernel heap]\n");
+    kprintf("  Mapped         : %llu KiB\n",
+            (unsigned long long)(heap_capacity() / 1024));
+    kprintf("  In use         : %llu bytes\n",
+            (unsigned long long)heap_in_use());
+    kprintf("  Largest free   : %llu bytes\n",
+            (unsigned long long)heap_largest_free());
+
     kprintf("\n[display]\n");
     print_framebuffer_info();
 
@@ -181,9 +321,14 @@ void kmain(void)
             serial_is_ready() ? "loopback self-test passed"
                               : "transmit works, loopback self-test failed");
 
+    kprintf("\n[self-test]\n");
+    bool mem_ok = run_memory_selftest();
+    kprintf("  Memory subsystem: %s\n",
+            mem_ok ? "all checks passed" : "FAILURES, see above");
+
     kprintf("\n");
     kprintf("==================================================\n");
-    kprintf("  Boot verification PASSED.\n");
+    kprintf("  Boot verification %s.\n", mem_ok ? "PASSED" : "FAILED");
     kprintf("==================================================\n");
 
     /*
