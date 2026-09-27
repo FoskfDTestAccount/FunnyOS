@@ -1,16 +1,23 @@
 #include <funnyos/kprintf.h>
 #include <funnyos/serial.h>
+#include <funnyos/fb.h>
 
 #include <libk/printf.h>
 
 /*
- * Current output backend. Once the framebuffer console lands in M2 this
- * becomes a dual write (serial + framebuffer).
+ * Output fans out to both channels.
+ *
+ * Serial is the machine-readable channel: QEMU captures it headlessly and
+ * the boot test asserts against it. The framebuffer is the human channel:
+ * it is what shows up on a real screen, or in VMware/VMPlayer. Keeping
+ * both means the automated tests keep working while a physical boot is
+ * still visible without a serial cable.
  */
 static void console_backend_putc(void *ctx, char c)
 {
     (void)ctx;
     serial_putc(c);
+    fb_putc(c);
 }
 
 void kputc(char c)

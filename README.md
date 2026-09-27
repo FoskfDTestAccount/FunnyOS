@@ -14,7 +14,11 @@ DOS 在这里扮演两重角色：**设计参照系**（继承小内核、直白
 
 **M0（引导闭环）已完成并通过验证。**
 
-内核能通过 Limine 进入 64 位长模式，串口输出正常，引导协议的全部请求（内存映射、HHDM、帧缓冲、固件类型、内核映像地址）解析正确。传统 BIOS 与 UEFI 两条引导路径均有自动化测试覆盖并通过（各 9 项断言）。
+内核能通过 Limine 进入 64 位长模式，引导协议的全部请求（内存映射、HHDM、帧缓冲、固件类型、内核映像地址）解析正确。输出同时送往两条通道：**串口**（QEMU 可无头捕获，供自动化断言）和**帧缓冲文本控制台**（内建 8×16 点阵字体的字符网格，带光标与滚屏），所以在 VMware、VirtualBox 或真机上直接开机就能看到画面，不需要串口线。
+
+传统 BIOS 与 UEFI 两条引导路径均有自动化测试覆盖并通过（各 9 项断言），两条路径的屏幕输出也都有人工截图确认。`make run` 可交互运行，`bash tools/screenshot.sh` 可无头截图。
+
+![FunnyOS M0 启动画面（UEFI）](docs/screenshot-m0-uefi.png)
 
 下一步是 M1：内核基础设施（物理内存管理、页表、IDT、异常处理、APIC 与定时器）。
 
@@ -58,7 +62,11 @@ FunnyOS/
 ├── kernel/
 │   ├── arch/x86_64/entry.asm    长模式入口（建立内核栈）
 │   ├── boot/bootinfo.c          Limine 引导请求与访问接口
-│   ├── console/                 串口驱动、格式化输出
+│   ├── console/
+│   │   ├── serial.c             16550 UART 驱动（含回环自检）
+│   │   ├── fb.c                 帧缓冲文本控制台（光标、滚屏）
+│   │   ├── font8x16.c           内建点阵字库（由脚本生成，勿手改）
+│   │   └── kprintf.c            输出分发：串口 + 帧缓冲双写
 │   ├── include/funnyos/         内核头文件
 │   ├── main.c                   内核入口
 │   └── panic.c                  致命错误处理
@@ -69,6 +77,8 @@ FunnyOS/
 ├── tools/
 │   ├── setup-limine.sh          获取 Limine（幂等）
 │   ├── run-qemu-test.sh         启动测试与断言
+│   ├── screenshot.sh            无头截图（验证帧缓冲实际渲染）
+│   ├── gen-font.py              从 TTF 生成 8x16 点阵字库
 │   ├── github-setup.sh          GitHub 仓库初始化
 │   ├── fix-line-endings.sh      行尾符诊断与修复
 │   └── wsl-env-check.sh         构建环境自检
@@ -126,7 +136,11 @@ See [docs/DESIGN.md](docs/DESIGN.md) for the full architecture (written in Chine
 
 **M0 (boot chain) is complete and verified.**
 
-The kernel enters 64-bit long mode via Limine, serial output works, and every boot protocol request (memory map, HHDM, framebuffer, firmware type, kernel image address) parses correctly. Both legacy BIOS and UEFI boot paths are covered by automated tests and pass (9 assertions each).
+The kernel enters 64-bit long mode via Limine, and every boot protocol request (memory map, HHDM, framebuffer, firmware type, kernel image address) parses correctly. Output goes to two channels at once: **serial** (QEMU captures it headlessly for the automated assertions) and a **framebuffer text console** (a character grid backed by a built-in 8x16 bitmap font, with cursor and scrolling). That means booting it in VMware, VirtualBox or on real hardware shows something immediately, with no serial cable required.
+
+Both legacy BIOS and UEFI boot paths are covered by automated tests and pass (9 assertions each), and the on-screen output of both paths has been confirmed by manual screenshot. `make run` boots interactively; `bash tools/screenshot.sh` captures the screen headlessly.
+
+![FunnyOS M0 boot screen (UEFI)](docs/screenshot-m0-uefi.png)
 
 Next up is M1: kernel infrastructure (physical memory management, page tables, IDT, exception handling, APIC and timers).
 
@@ -170,7 +184,11 @@ FunnyOS/
 ├── kernel/
 │   ├── arch/x86_64/entry.asm    Long mode entry point (sets up the kernel stack)
 │   ├── boot/bootinfo.c          Limine boot requests and accessor interface
-│   ├── console/                 Serial driver and formatted output
+│   ├── console/
+│   │   ├── serial.c             16550 UART driver with loopback self-test
+│   │   ├── fb.c                 Framebuffer text console (cursor, scrolling)
+│   │   ├── font8x16.c           Built-in bitmap font (generated; do not edit)
+│   │   └── kprintf.c            Output fan-out: serial + framebuffer
 │   ├── include/funnyos/         Kernel headers
 │   ├── main.c                   Kernel entry point
 │   └── panic.c                  Fatal error handling
@@ -181,6 +199,8 @@ FunnyOS/
 ├── tools/
 │   ├── setup-limine.sh          Fetch Limine (idempotent)
 │   ├── run-qemu-test.sh         Boot test and assertions
+│   ├── screenshot.sh            Headless screendump (verifies actual rendering)
+│   ├── gen-font.py              Rasterise a TTF into the 8x16 bitmap font
 │   ├── github-setup.sh          GitHub repository bootstrap
 │   ├── fix-line-endings.sh      Line ending diagnostics and repair
 │   └── wsl-env-check.sh         Build environment self-check

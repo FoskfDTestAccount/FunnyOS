@@ -12,10 +12,12 @@
  *      framebuffer information is readable.
  */
 #include <funnyos/bootinfo.h>
+#include <funnyos/fb.h>
 #include <funnyos/kprintf.h>
 #include <funnyos/panic.h>
 #include <funnyos/serial.h>
 
+#include <stdbool.h>
 #include <libk/string.h>
 
 extern char __kernel_end[];
@@ -89,9 +91,13 @@ static void print_framebuffer_info(void)
 
 void kmain(void)
 {
-    /* Serial must come first: it is the channel for every diagnostic
-     * message that follows. */
+    /* Serial comes first: it is the channel of last resort, and it still
+     * works even if the framebuffer turns out to be unusable. */
     serial_init();
+
+    /* Then the visible console. A failure here is not fatal -- output
+     * simply stays serial-only, which the summary below reports. */
+    bool fb_ok = fb_init();
 
     kprintf("\n");
     kprintf("==================================================\n");
@@ -128,12 +134,15 @@ void kmain(void)
     print_framebuffer_info();
 
     /*
-     * Report the serial loopback result last. Even when loopback fails,
-     * everything above still made it out -- which means the transmit
-     * direction works and only receive is broken. That distinction is
-     * itself diagnostically useful.
+     * Report the output channels last. Even when the serial loopback
+     * check fails, everything above still made it out -- which means the
+     * transmit direction works and only receive is broken. That
+     * distinction is itself diagnostically useful.
      */
-    kprintf("\n[serial]\n");
+    kprintf("\n[console]\n");
+    kprintf("  Text console   : %s\n",
+            fb_ok ? "active (8x16 cell grid)"
+                  : "unavailable, output is serial only");
     kprintf("  COM1 (115200 8N1): %s\n",
             serial_is_ready() ? "loopback self-test passed"
                               : "transmit works, loopback self-test failed");
@@ -142,10 +151,11 @@ void kmain(void)
     kprintf("==================================================\n");
     kprintf("  M0 boot verification PASSED. Halting.\n");
     kprintf("==================================================\n");
+    kprintf("\nThis output is mirrored to COM1. The kernel has no scheduler\n");
+    kprintf("yet, so it halts here by design after proving the boot chain.\n");
 
     /* M0 stops here. M1 will install the IDT, page tables and physical
      * memory manager at this point. */
-    kprintf("\nHalting...\n");
     __asm__ volatile("cli");
     for (;;)
         __asm__ volatile("hlt");
