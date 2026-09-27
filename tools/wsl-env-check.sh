@@ -1,15 +1,15 @@
 #!/bin/bash
-# FunnyOS WSL 环境检查
-echo "=== 身份 ==="
+# FunnyOS WSL environment check.
+echo "=== Identity ==="
 whoami
 echo
-echo "=== 发行版 ==="
+echo "=== Distribution ==="
 grep PRETTY_NAME /etc/os-release
 echo
-echo "=== 内核 ==="
+echo "=== Kernel ==="
 uname -r
 echo
-echo "=== 工具检查 ==="
+echo "=== Toolchain ==="
 for t in gcc cc ld nasm make qemu-system-x86_64 xorriso mcopy mtools git curl wget gdb objcopy python3; do
     p=$(command -v "$t" 2>/dev/null)
     if [ -n "$p" ]; then
@@ -19,29 +19,37 @@ for t in gcc cc ld nasm make qemu-system-x86_64 xorriso mcopy mtools git curl wg
     fi
 done
 echo
-echo "=== 网络（apt 源可达性）==="
-if timeout 10 curl -sI http://archive.ubuntu.com/ubuntu/ >/dev/null 2>&1; then
-    echo "archive.ubuntu.com 可达"
+echo "=== UEFI firmware (needed by make test-uefi) ==="
+if [ -f /usr/share/OVMF/OVMF_CODE_4M.fd ]; then
+    echo "OVMF present"
 else
-    echo "archive.ubuntu.com 不可达"
+    echo "OVMF missing (apt-get install ovmf)"
+fi
+echo
+echo "=== Network ==="
+if timeout 10 curl -sI http://archive.ubuntu.com/ubuntu/ >/dev/null 2>&1; then
+    echo "archive.ubuntu.com reachable"
+else
+    echo "archive.ubuntu.com unreachable"
 fi
 if timeout 10 curl -sI https://github.com >/dev/null 2>&1; then
-    echo "github.com 可达"
+    echo "github.com reachable"
 else
-    echo "github.com 不可达"
+    echo "github.com unreachable"
 fi
 echo
-echo "=== KVM 嵌套虚拟化 ==="
+echo "=== KVM nested virtualisation ==="
 if [ -e /dev/kvm ]; then
-    echo "/dev/kvm 存在（QEMU 可硬件加速）"
+    echo "/dev/kvm present (QEMU can use hardware acceleration)"
 else
-    echo "/dev/kvm 不存在（QEMU 将使用 TCG 软件模拟，对本项目足够）"
+    echo "/dev/kvm absent (QEMU falls back to TCG; fine for this project)"
 fi
 echo
-echo "=== /mnt/c 可写性 ==="
+echo "=== Project directory writability ==="
 if touch /mnt/c/FunnyOS/.wsl-write-test 2>/dev/null; then
     rm -f /mnt/c/FunnyOS/.wsl-write-test
-    echo "/mnt/c/FunnyOS 可写"
+    echo "/mnt/c/FunnyOS writable"
+    echo "Note: build artifacts still belong in WSL-native storage. See README."
 else
-    echo "/mnt/c/FunnyOS 不可写"
+    echo "/mnt/c/FunnyOS NOT writable"
 fi

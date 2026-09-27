@@ -1,14 +1,16 @@
 /*
- * 内核致命错误处理
+ * Kernel fatal error handling.
  *
- * M0 阶段没有 IDT，任何异常都会三重故障并重启机器，
- * 因此 panic() 只能在软件检出错误时主动调用（例如引导协议版本不符）。
- * M1 接入 IDT 后，异常处理程序也会汇入这里。
+ * At M0 there is no IDT, so any CPU exception triple-faults and reboots
+ * the machine. panic() can therefore only be reached through software
+ * detection of an unrecoverable condition (e.g. an unsupported boot
+ * protocol revision). Once the IDT lands in M1, the exception handlers
+ * will funnel into here as well.
  */
 #ifndef FUNNYOS_PANIC_H
 #define FUNNYOS_PANIC_H
 
-/* 打印诊断信息后永久停机。不会返回。 */
+/* Print diagnostics, then halt forever. Does not return. */
 void panic(const char *fmt, ...)
     __attribute__((noreturn, format(printf, 1, 2)));
 

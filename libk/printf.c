@@ -3,7 +3,8 @@
 
 #include <stdint.h>
 
-/* 数字输出的临时缓冲。64 位二进制最长 64 字符，留足空间。 */
+/* Scratch buffer for numeric output. A 64-bit binary number is at most
+ * 64 digits, so this leaves generous headroom. */
 #define NUMBUF_SIZE 72
 
 static void emit_padding(putchar_fn out, void *ctx, char pad, int count)
@@ -13,8 +14,8 @@ static void emit_padding(putchar_fn out, void *ctx, char pad, int count)
 }
 
 /*
- * 无符号整数转字符串。base 取 2/8/10/16。
- * 返回写入缓冲的字符数，字符串右对齐放在缓冲尾部。
+ * Convert an unsigned integer to a string in the given base (2/8/10/16).
+ * Returns the digit count; the string is right-aligned within buf.
  */
 static int utoa(unsigned long long value, unsigned base, int uppercase,
                 char *buf, int bufsize)
@@ -32,7 +33,8 @@ static int utoa(unsigned long long value, unsigned base, int uppercase,
         }
     }
 
-    /* tmp 中是个位的逆序，反转进调用者缓冲的尾部 */
+    /* tmp holds the digits in reverse; flip them into the tail of the
+     * caller's buffer. */
     if (n > bufsize)
         n = bufsize;
     for (int i = 0; i < n; i++)
@@ -58,7 +60,7 @@ void kvformat(putchar_fn out, void *ctx, const char *fmt, va_list ap)
         if (*p == '\0')
             break;
 
-        /* 解析标志 */
+        /* Parse flags */
         int left_align = 0;
         int zero_pad = 0;
         for (;;) {
@@ -73,14 +75,16 @@ void kvformat(putchar_fn out, void *ctx, const char *fmt, va_list ap)
             }
         }
 
-        /* 解析宽度 */
+        /* Parse width */
         int width = 0;
         while (*p >= '0' && *p <= '9') {
             width = width * 10 + (*p - '0');
             p++;
         }
 
-        /* 解析长度修饰符 */
+        /* Parse length modifiers. This implementation treats 'l', 'll'
+         * and 'z' identically: all promote to 64-bit, which is what the
+         * x86-64 calling convention passes in a single register anyway. */
         int is_long = 0;
         while (*p == 'l' || *p == 'z') {
             if (*p == 'l')
@@ -103,8 +107,8 @@ void kvformat(putchar_fn out, void *ctx, const char *fmt, va_list ap)
             total = slen;
             break;
 
-        case 'c': {
-            /* 字符走通用路径：先放进 cbuf */
+        case 'c':
+            /* Characters take the generic path via cbuf. */
             cbuf[0] = (char)va_arg(ap, int);
             cbuf[1] = '\0';
             str = cbuf;
@@ -112,7 +116,6 @@ void kvformat(putchar_fn out, void *ctx, const char *fmt, va_list ap)
             total = 1;
             padchar = ' ';
             break;
-        }
 
         case 'd':
         case 'i': {
@@ -120,7 +123,8 @@ void kvformat(putchar_fn out, void *ctx, const char *fmt, va_list ap)
             unsigned long long mag;
             if (v < 0) {
                 prefix = '-';
-                mag = (unsigned long long)(-(v + 1)) + 1ULL; /* 避免 INT64_MIN 溢出 */
+                /* Negate via -(v+1)+1 so that INT64_MIN cannot overflow. */
+                mag = (unsigned long long)(-(v + 1)) + 1ULL;
             } else {
                 mag = (unsigned long long)v;
             }
@@ -158,7 +162,7 @@ void kvformat(putchar_fn out, void *ctx, const char *fmt, va_list ap)
             str = numbuf + (NUMBUF_SIZE - n);
             slen = n;
             total = n + 2;
-            prefix = 'x'; /* 配合下面的 '0' 输出 "0x" */
+            prefix = 'x'; /* combined with the '0' below to print "0x" */
             break;
         }
 
@@ -167,7 +171,8 @@ void kvformat(putchar_fn out, void *ctx, const char *fmt, va_list ap)
             continue;
 
         default:
-            /* 未知转换：原样输出，便于发现格式化串写错 */
+            /* Unknown conversion: echo it verbatim, which makes a typo
+             * in a format string immediately visible. */
             out(ctx, '%');
             out(ctx, *p);
             continue;
@@ -177,7 +182,8 @@ void kvformat(putchar_fn out, void *ctx, const char *fmt, va_list ap)
 
         if (!left_align) {
             if (padchar == '0' && prefix) {
-                /* 零填充时符号/前缀必须在填充之前 */
+                /* With zero padding the sign or prefix must come before
+                 * the padding, not after it. */
                 if (prefix == 'x') {
                     out(ctx, '0');
                     out(ctx, 'x');

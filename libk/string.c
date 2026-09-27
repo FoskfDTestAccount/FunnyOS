@@ -25,7 +25,8 @@ void *memmove(void *dst, const void *src, size_t n)
     if (d == s || n == 0)
         return dst;
 
-    /* 目标在源之后且区域重叠时必须倒序拷贝 */
+    /* When the destination is above the source and the regions overlap,
+     * the copy has to run backwards. */
     if (d < s) {
         while (n--)
             *d++ = *s++;

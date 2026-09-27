@@ -1,9 +1,9 @@
 /*
- * libk —— 内核基础库：内存与字符串操作
+ * libk -- kernel support library: memory and string operations.
  *
- * 注意：使用 -ffreestanding 编译时，GCC 仍会为结构体赋值、大块拷贝等
- * 生成对 memcpy/memset/memmove/memcmp 的调用。这些函数必须由内核自己
- * 提供，否则链接会失败。
+ * Note: even when compiling with -ffreestanding, GCC still emits calls to
+ * memcpy/memset/memmove/memcmp for struct assignment and bulk copies.
+ * The kernel must provide these itself, or linking fails.
  */
 #ifndef FUNNYOS_LIBK_STRING_H
 #define FUNNYOS_LIBK_STRING_H

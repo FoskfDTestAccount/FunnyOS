@@ -1,35 +1,41 @@
 # =====================================================================
-#  FunnyOS 构建系统
+#  FunnyOS build system
 #
-#  目标：
-#    make            构建内核与可引导 ISO
-#    make run        在有显示的 QEMU 中交互运行
-#    make test       无头运行，捕获串口输出并断言
-#    make export     把 ISO 复制到项目目录，便于在 Windows 侧使用
-#    make clean      清除构建产物
-#    make distclean  clean + 清除下载缓存
+#  Targets:
+#    make            Build the kernel and a bootable ISO
+#    make run        Run interactively in QEMU (with display)
+#    make test       Run headless and assert (BIOS path)
+#    make test-uefi  Run headless and assert (UEFI path)
+#    make test-all   Run both boot paths
+#    make export     Copy the ISO into the project directory
+#    make clean      Remove build artifacts
+#    make distclean  clean + remove the download cache
 #
 #  ---------------------------------------------------------------------
-#  关于构建目录的重要说明
+#  About the build directory
 #
-#  构建产物默认放在 WSL 原生文件系统 /var/tmp/funyos-build 下，
-#  而不是项目目录里。这不是洁癖，是踩坑后的结论：
+#  Build artifacts go to the WSL-native path /var/tmp/funyos-build rather
+#  than into the project directory. This is not tidiness, it is the
+#  conclusion of hitting a real problem:
 #
-#    在 /mnt/c（9p 协议挂载）上由 WSL 创建的文件，如果 WSL 在数据
-#    真正落盘之前被终止，会留下一种损坏状态——Win32 API（dir、
-#    PowerShell）能列出文件、长度也正确，但 WSL 与 MSYS 的 stat()
-#    一律返回 ENOENT，且 Remove-Item 也删不掉。实测已经产生过两个
-#    这样的幽灵文件（funyos.elf / funyos.iso）。
+#    A file created by WSL on /mnt/c (a 9p mount) becomes corrupted if
+#    WSL is terminated before the data actually reaches disk. The result
+#    is a file that Win32 APIs (dir, PowerShell) list with a correct
+#    size, but that WSL and MSYS stat() report as ENOENT -- and that
+#    del / Remove-Item cannot remove either. Two such phantom files were
+#    produced here in practice (funyos.elf / funyos.iso).
 #
-#  除此之外，9p 上编译大量小文件也明显慢于原生文件系统。
+#  Separately, compiling many small files over 9p is noticeably slower
+#  than on a native filesystem.
 #
-#  源码仍然留在项目目录里（Windows 侧可见、可版本控制），
-#  只有构建产物在 WSL 内部。需要 ISO 时用 make export。
+#  Sources stay in the project directory (visible from Windows, suitable
+#  for version control); only build output lives inside WSL. Use
+#  `make export` when you need the ISO outside.
 # =====================================================================
 
 PROJECT := FunnyOS
 
-# 允许通过环境变量 BUILD_DIR=... 覆盖
+# Override with: make BUILD_DIR=/somewhere/else
 BUILD_DIR ?= /var/tmp/funyos-build
 
 OBJ_DIR  := $(BUILD_DIR)/obj
@@ -44,7 +50,7 @@ TOOLS_DIR := tools
 RUN_TEST  := $(TOOLS_DIR)/run-qemu-test.sh
 
 # ---------------------------------------------------------------------
-# 工具链
+# Toolchain
 # ---------------------------------------------------------------------
 CC   := gcc
 LD   := ld
@@ -52,17 +58,22 @@ NASM := nasm
 
 INCLUDES := -Ikernel/include -Ilibk/include -Iboot/limine
 
-# 关键标志说明：
-#   -ffreestanding        无宿主标准库，这是裸机代码
-#   -fno-stack-protector  栈保护依赖宿主 libc 的 __stack_chk_fail
-#   -fno-pic -fno-pie     内核不使用位置无关代码（链接到固定高地址）
-#   -mno-red-zone         关掉 x86-64 的 128 字节 red zone。该特性假设
-#                         存在有效栈，中断处理会破坏这个假设，
-#                         内核必须在编译期禁用。
-#   -mcmodel=kernel       代码模型落在地址空间上半区
-#   -mgeneral-regs-only   只用通用寄存器，禁止生成 SSE/MMX 指令。
-#                         内核不保存 FPU 状态，任何浮点/向量指令都会
-#                         在后续上下文切换时静默损坏数据。
+# Notes on the less obvious flags:
+#   -ffreestanding        No hosted standard library; this is bare metal.
+#   -fno-stack-protector  Stack protection needs the host libc's
+#                         __stack_chk_fail, which does not exist here.
+#   -fno-pic -fno-pie     The kernel is linked at a fixed high address and
+#                         does not use position-independent code.
+#   -mno-red-zone         Disable the x86-64 128-byte red zone. That
+#                         feature assumes a valid stack below rsp, which
+#                         interrupt handlers will clobber. The kernel must
+#                         turn it off at compile time.
+#   -mcmodel=kernel       Code model for the upper half of the address space.
+#   -mgeneral-regs-only   Restrict the compiler to general-purpose
+#                         registers, forbidding SSE/MMX codegen. The kernel
+#                         does not save FPU state, so any floating point or
+#                         vector instruction emitted here would silently
+#                         corrupt data on the next context switch.
 CFLAGS := -std=c17 -g -O2 \
           -ffreestanding -fno-stack-protector -fno-pic -fno-pie \
           -mno-red-zone -mcmodel=kernel -mgeneral-regs-only \
@@ -71,12 +82,12 @@ CFLAGS := -std=c17 -g -O2 \
 
 NASMFLAGS := -f elf64 -g -F dwarf
 
-# -z max-page-size 让链接器按 4 KiB 对齐段，
-# 这也是 linker.ld 里 CONSTANT(MAXPAGESIZE) 的取值来源。
+# -z max-page-size forces 4 KiB section alignment, which is also what
+# CONSTANT(MAXPAGESIZE) resolves to inside linker.ld.
 LDFLAGS := -T linker.ld -nostdlib -z max-page-size=0x1000
 
 # ---------------------------------------------------------------------
-# 源文件枚举
+# Source discovery
 # ---------------------------------------------------------------------
 C_SOURCES   := $(shell find kernel libk -name '*.c'   | sort)
 ASM_SOURCES := $(shell find kernel      -name '*.asm' | sort)
@@ -86,7 +97,7 @@ ASM_OBJS := $(patsubst %.asm,$(OBJ_DIR)/%.o,$(ASM_SOURCES))
 OBJS     := $(C_OBJS) $(ASM_OBJS)
 
 # ---------------------------------------------------------------------
-# 目标
+# Targets
 # ---------------------------------------------------------------------
 .PHONY: all run test test-uefi test-all export clean distclean help
 
@@ -106,9 +117,9 @@ $(OBJ_DIR)/%.o: %.asm
 	@echo "  NASM    $<"
 	@$(NASM) $(NASMFLAGS) $< -o $@
 
-# 构造可引导 ISO（BIOS + UEFI 双路）
+# Build the bootable ISO (hybrid: BIOS + UEFI in one image)
 $(ISO): $(KERNEL)
-	@echo "  准备 ISO 目录结构"
+	@echo "  Preparing ISO tree"
 	@rm -rf $(ISO_ROOT)
 	@mkdir -p $(ISO_ROOT)/boot
 	@cp $(KERNEL)                          $(ISO_ROOT)/boot/funyos.elf
@@ -123,13 +134,13 @@ $(ISO): $(KERNEL)
 	    --efi-boot boot/limine-uefi-cd.bin \
 	    -efi-boot-part --efi-boot-image --protective-msdos-label \
 	    $(ISO_ROOT) -o $@ 2>/dev/null
-	@echo "  写入 BIOS 引导阶段"
+	@echo "  Installing BIOS boot stages"
 	@$(LIMINE) bios-install $@ >/dev/null
 	@echo ""
-	@echo "  构建完成：$@"
+	@echo "  Built: $@"
 
 run: $(ISO)
-	@echo "  启动 QEMU（有显示模式）"
+	@echo "  Starting QEMU (with display)"
 	@qemu-system-x86_64 \
 	    -m 512 -cdrom $(ISO) -boot d \
 	    -serial stdio -vga std
@@ -140,37 +151,38 @@ test: $(ISO)
 test-uefi: $(ISO)
 	@bash $(RUN_TEST) $(ISO) uefi
 
-# 两条引导路径都跑。BIOS 与 UEFI 走的是完全不同的固件栈，
-# 只在其中一条上通过不代表另一条可用。
+# Exercise both boot paths. BIOS and UEFI go through completely different
+# firmware stacks, so passing on one says nothing about the other.
 test-all: $(ISO)
 	@bash $(RUN_TEST) $(ISO) bios
 	@bash $(RUN_TEST) $(ISO) uefi
 
-# 把 ISO 复制到项目目录，方便在 Windows 侧用其它模拟器打开。
-# 输出到 dist/ 而不是项目根目录——根目录下有两个因 9p 写入丢失
-# 而产生的幽灵文件（funyos.iso / funyos.elf），无法被覆盖或删除。
+# Copy the ISO into the project directory so other emulators on Windows
+# can open it. Output goes to dist/ rather than the project root because
+# the root holds two phantom files (funyos.iso / funnyos.elf) left behind
+# by a lost 9p write, which cannot be overwritten or deleted.
 export: $(ISO)
 	@mkdir -p dist
 	@cp $(ISO) dist/funyos.iso
 	@sync
-	@echo "  已导出到 dist/funyos.iso"
-	@echo "  注意：该文件由 WSL 写入 /mnt/c，请在确认写入完成前不要终止 WSL。"
+	@echo "  Exported to dist/funyos.iso"
+	@echo "  Note: WSL wrote this to /mnt/c; do not terminate WSL until the write has settled."
 
 clean:
 	@rm -rf $(BUILD_DIR)
-	@echo "  已清除构建产物（$(BUILD_DIR)）"
+	@echo "  Removed build artifacts ($(BUILD_DIR))"
 
 distclean: clean
 	@rm -rf .cache
-	@echo "  已清除下载缓存"
+	@echo "  Removed download cache"
 
 help:
-	@echo "FunnyOS 构建目标："
-	@echo "  make            构建内核与 ISO（输出到 $(BUILD_DIR)）"
-	@echo "  make run        在 QEMU 中交互运行"
-	@echo "  make test       无头运行并断言（BIOS 路径）"
-	@echo "  make test-uefi  无头运行并断言（UEFI 路径）"
-	@echo "  make test-all   两条引导路径都测"
-	@echo "  make export     把 ISO 复制到项目目录"
-	@echo "  make clean      清除构建产物"
-	@echo "  make distclean  清除构建产物与下载缓存"
+	@echo "FunnyOS build targets:"
+	@echo "  make            Build kernel and ISO (output in $(BUILD_DIR))"
+	@echo "  make run        Run interactively in QEMU"
+	@echo "  make test       Run headless and assert (BIOS path)"
+	@echo "  make test-uefi  Run headless and assert (UEFI path)"
+	@echo "  make test-all   Run both boot paths"
+	@echo "  make export     Copy the ISO into the project directory"
+	@echo "  make clean      Remove build artifacts"
+	@echo "  make distclean  Remove build artifacts and download cache"

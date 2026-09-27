@@ -20,9 +20,10 @@ void panic(const char *fmt, ...)
     kvformat(panic_putc, NULL, fmt, ap);
     va_end(ap);
 
-    kputs("\n系统已停止。\n");
+    kputs("\nSystem halted.\n");
 
-    /* 关中断并永久停机。用 hlt 循环而不是忙等，避免空转烧 CPU。 */
+    /* Mask interrupts and halt forever. Using hlt in a loop rather than
+     * spinning keeps the CPU from burning power for no reason. */
     interrupts_disable();
     for (;;)
         cpu_halt();

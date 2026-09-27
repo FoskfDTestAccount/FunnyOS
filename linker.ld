@@ -1,10 +1,13 @@
 /*
- * FunnyOS 内核链接脚本
+ * FunnyOS kernel linker script.
  *
- * 关键约束（来自 Limine 引导协议）：
- *   - 内核必须链接到地址空间高半区 0xffffffff80000000 及以上
- *   - .limine_requests 段必须存在，且被 start/end 标记包裹
- *   - 每个段单独分配 program header，以便引导器设置正确的 MMU 权限
+ * Constraints imposed by the Limine boot protocol:
+ *   - The kernel must be linked into the higher half, at or above
+ *     0xffffffff80000000.
+ *   - A .limine_requests section must exist, wrapped by the start/end
+ *     markers.
+ *   - Each section gets its own program header so the bootloader can map
+ *     them with the correct MMU permissions.
  */
 
 OUTPUT_FORMAT(elf64-x86-64)
@@ -20,10 +23,11 @@ PHDRS
 
 SECTIONS
 {
-    /* 高半区起点。Limine 规定内核必须落在最高 2 GiB 内 */
+    /* Start of the higher half. Limine requires the kernel to sit within
+     * the topmost 2 GiB of the address space. */
     . = 0xffffffff80000000;
 
-    /* 引导请求区。KEEP 防止 --gc-sections 把它优化掉 */
+    /* Boot request area. KEEP stops --gc-sections from discarding it. */
     .limine_requests : {
         KEEP(*(.limine_requests_start))
         KEEP(*(.limine_requests))
@@ -49,19 +53,20 @@ SECTIONS
         *(.got .got.*)
     } :data
 
-    /* .bss 归入 data 的 program header，但标记为 NOBITS 不占文件空间 */
+    /* .bss shares the data program header but is marked NOBITS, so it
+     * occupies no space in the file. */
     .bss : {
         *(.bss .bss.*)
         *(COMMON)
     } :data
 
-    /* 这两个段在某些宿主机上会引发问题，丢弃 */
+    /* These cause problems on some hosts; drop them. */
     /DISCARD/ : {
         *(.eh_frame*)
         *(.note .note.*)
     }
 
-    /* 供内核自检使用的链接期符号 */
+    /* Link-time symbol used by the kernel for self-reporting. */
     . = ALIGN(4096);
     __kernel_end = .;
 }

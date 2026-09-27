@@ -1,16 +1,19 @@
-; FunnyOS x86-64 内核入口
+; FunnyOS x86-64 kernel entry point
 ;
-; Limine 已完成的准备工作（见 limine-protocol.md "Machine State at Entry"）：
-;   - 已进入 64 位长模式，分页已开启（PG/PAE/LME/LMA 置位）
-;   - CS = 0x28（64 位代码段），DS/ES/SS/FS/GS = 0x30（64 位数据段）
-;   - IF 已清除，DF 已清除
-;   - 内核已映射到高半区 0xffffffff80000000 以上
-;   - A20 已打开，传统 PIC 全部屏蔽
+; State established by Limine before jumping here (see limine-protocol.md,
+; "Machine State at Entry"):
+;   - CPU is already in 64-bit long mode with paging enabled
+;     (PG/PAE/LME/LMA are all set)
+;   - CS = 0x28 (64-bit code segment), DS/ES/SS/FS/GS = 0x30 (64-bit data)
+;   - IF is cleared, DF is cleared
+;   - Kernel is mapped in the higher half, at or above 0xffffffff80000000
+;   - A20 is open, legacy PICs are fully masked
 ;
-; Limine 未做的、必须由内核自己做的：
-;   - 没有设置栈指针（rsp 值未定义）  <-- 本文件的第一件事
-;   - 没有加载 IDT（rev5 以下状态未定义；rev5+ 为 base 0/limit 0）
-;   - 没有建立 GDT 之外的任务状态段
+; What Limine does NOT do, and the kernel must therefore handle itself:
+;   - It does not set up a stack (rsp is undefined)   <-- first job here
+;   - It does not load an IDT (undefined below base revision 5;
+;     base revision 5+ guarantees base 0 / limit 0, i.e. still unusable)
+;   - It does not install a TSS beyond the GDT it provides
 
 bits 64
 
@@ -19,17 +22,19 @@ global _start
 extern kmain
 
 _start:
-    ; 立刻建立自己的栈。在此之前不能调用任何函数，也不能触发任何中断。
+    ; Establish our own stack immediately. Until this is done we cannot
+    ; safely call any function or take any interrupt.
     mov rsp, stack_top
 
-    ; 对齐栈帧并清掉 rbp，方便后续补栈回溯
+    ; Align the stack frame and clear rbp so stack unwinding later on
+    ; starts from a well-defined terminator.
     and rsp, ~0xF
     xor rbp, rbp
 
-    ; 进入 C 世界
+    ; Enter C.
     call kmain
 
-    ; kmain 正常情况不会返回。若返回则停在这里。
+    ; kmain is not expected to return. If it does, park here.
 .hang:
     cli
     hlt
@@ -38,5 +43,7 @@ _start:
 section .bss
 align 16
 stack_bottom:
-    resb 65536                  ; 64 KiB 内核栈（M0 足够，M1 接中断时会重新评估）
+    resb 65536                  ; 64 KiB kernel stack.
+                                ; Enough for M0; will be revisited once
+                                ; interrupts are enabled in M1.
 stack_top:

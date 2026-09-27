@@ -1,5 +1,5 @@
 /*
- * x86-64 端口 I/O 与底层内联汇编封装
+ * x86-64 port I/O and low-level inline assembly helpers.
  */
 #ifndef FUNNYOS_ARCH_X86_64_IO_H
 #define FUNNYOS_ARCH_X86_64_IO_H
@@ -20,7 +20,8 @@ static inline uint8_t inb(uint16_t port)
 
 static inline void io_wait(void)
 {
-    /* 向未使用的端口 0x80 写 0 是一种标准的、约 1 微秒的延迟手段 */
+    /* Writing to the unused port 0x80 is the standard way to burn
+     * roughly one microsecond of I/O bus time. */
     outb(0x80, 0);
 }
 

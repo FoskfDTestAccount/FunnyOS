@@ -1,8 +1,9 @@
 /*
- * libk —— 极简格式化输出
+ * libk -- minimal formatted output.
  *
- * 不依赖任何 libc。格式化结果写入调用者提供的字符输出回调，
- * 这样同一份实现既可用于串口，也可用于后续的帧缓冲控制台。
+ * Depends on nothing from a hosted libc. Output is written through a
+ * caller-supplied character callback so that one implementation serves
+ * both the serial port and, later, the framebuffer console.
  */
 #ifndef FUNNYOS_LIBK_PRINTF_H
 #define FUNNYOS_LIBK_PRINTF_H
@@ -10,17 +11,17 @@
 #include <stdarg.h>
 #include <stddef.h>
 
-/* 字符输出回调：把 c 写到某个目标（串口、控制台、缓冲区） */
+/* Character sink: writes c to some destination (serial, console, buffer). */
 typedef void (*putchar_fn)(void *ctx, char c);
 
 /*
- * 格式化到回调。
- * 支持的转换：%s %c %d %i %u %x %X %p %%
- * 支持的标志：- （左对齐）、0 （零填充）、数字宽度
+ * Format into a callback.
+ * Supported conversions: %s %c %d %i %u %x %X %p %%
+ * Supported flags: '-' (left align), '0' (zero pad), numeric width
  */
 void kvformat(putchar_fn out, void *ctx, const char *fmt, va_list ap);
 
-/* 便捷包装：可变参数版本 */
+/* Convenience wrapper: variadic form. */
 void kformat(putchar_fn out, void *ctx, const char *fmt, ...)
     __attribute__((format(printf, 3, 4)));
 

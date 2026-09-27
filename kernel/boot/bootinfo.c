@@ -1,14 +1,16 @@
 /*
- * Limine 引导协议请求
+ * Limine boot protocol requests.
  *
- * 这些结构体必须放在 .limine_requests 段内，且被 start/end 标记包裹。
- * 链接脚本负责把它们聚到一起。引导器在启动时扫描这段内存，
- * 找到它认识的请求并填充对应的 response 指针。
+ * These structures must live in the .limine_requests section, wrapped by
+ * the start/end markers. The linker script groups them together. At boot
+ * the bootloader scans that memory range, recognises the requests it
+ * understands, and fills in the matching response pointers.
  *
- * 三个必须遵守的约束：
- *   1. 变量必须带 used 属性——否则编译器会认为无人引用而删除
- *   2. 变量必须位于 .limine_requests 段——见 linker.ld
- *   3. 变量不能是 const——引导器要往里写数据
+ * Three constraints that must be respected:
+ *   1. The variables need the `used` attribute, or the compiler will
+ *      discard them as unreferenced.
+ *   2. They must be placed in .limine_requests -- see linker.ld.
+ *   3. They must not be const -- the bootloader writes into them.
  */
 #include <funnyos/bootinfo.h>
 
@@ -20,20 +22,21 @@
 #define REQUESTS_END   __attribute__((used, section(".limine_requests_end")))
 
 /* ------------------------------------------------------------------ */
-/* 请求定义                                                            */
+/* Request definitions                                                 */
 /* ------------------------------------------------------------------ */
 
 REQUESTS_START
 static volatile uint64_t g_requests_start_marker[] = LIMINE_REQUESTS_START_MARKER;
 
 /*
- * 基版本。我们请求版本 3 —— 这是 Limine 保证支持的基线，
- * 且 HHDM 与内存映射语义已经稳定。
+ * Base revision. We request revision 3: the baseline every Limine build
+ * guarantees support for, with settled HHDM and memory map semantics.
  *
- * 引导器会修改这个数组：
- *   [1] 被写入它实际使用的基版本
- *   [2] 若它不支持我们请求的版本则保持非 0
- * 因此必须用 LIMINE_BASE_REVISION_SUPPORTED 检查，不能假定成功。
+ * The bootloader mutates this array:
+ *   [1] receives the base revision it actually honoured
+ *   [2] stays non-zero if it does not support the revision we asked for
+ * So this must be validated with LIMINE_BASE_REVISION_SUPPORTED rather
+ * than assumed.
  */
 REQUESTS
 static volatile uint64_t g_base_revision[] = LIMINE_BASE_REVISION(3);
@@ -78,7 +81,7 @@ REQUESTS_END
 static volatile uint64_t g_requests_end_marker[] = LIMINE_REQUESTS_END_MARKER;
 
 /* ------------------------------------------------------------------ */
-/* 访问接口                                                            */
+/* Accessors                                                           */
 /* ------------------------------------------------------------------ */
 
 bool bootinfo_base_revision_ok(void)
@@ -89,14 +92,14 @@ bool bootinfo_base_revision_ok(void)
 const char *bootinfo_loader_name(void)
 {
     if (!g_bootloader_info_request.response)
-        return "(未知)";
+        return "(unknown)";
     return g_bootloader_info_request.response->name;
 }
 
 const char *bootinfo_loader_version(void)
 {
     if (!g_bootloader_info_request.response)
-        return "(未知)";
+        return "(unknown)";
     return g_bootloader_info_request.response->version;
 }
 

@@ -4,7 +4,8 @@
 #include <libk/printf.h>
 
 /*
- * 当前输出后端。M2 接入帧缓冲控制台后，这里会变成"串口 + 帧缓冲"双写。
+ * Current output backend. Once the framebuffer console lands in M2 this
+ * becomes a dual write (serial + framebuffer).
  */
 static void console_backend_putc(void *ctx, char c)
 {

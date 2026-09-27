@@ -1,17 +1,19 @@
 #!/bin/bash
 #
-# FunnyOS 启动测试
+# FunnyOS boot test.
 #
-# 无头启动 QEMU，把串口输出重定向到文件，然后对输出做断言。
-# 这是整个项目的自动化回归测试基座——后续每个里程碑都在这里
-# 增加新的断言。
+# Boots QEMU headless, redirects the serial port to a file, then asserts
+# against that output. This is the automated regression harness for the
+# whole project -- every later milestone adds its assertions here.
 #
-# 用法：bash tools/run-qemu-test.sh [ISO 路径] [bios|uefi]
+# Usage: bash tools/run-qemu-test.sh [ISO path] [bios|uefi]
 #
-# 两种引导路径都要测，因为它们走的是完全不同的固件栈：
-#   BIOS 路径：Limine 的 BIOS 阶段（stage1/stage2）经 El Torito 加载
-#   UEFI 路径：Limine 的 EFI 可执行体经 El Torito 加载
-# 现代机器基本都是纯 UEFI，所以 UEFI 路径才是最终交付要用的那条。
+# Both boot paths are worth testing because they go through completely
+# different firmware stacks:
+#   BIOS path: Limine's BIOS stage (stage1/stage2) loaded via El Torito
+#   UEFI path: Limine's EFI executable loaded via El Torito
+# Modern machines are essentially UEFI-only, so the UEFI path is the one
+# that ultimately matters for shipping.
 #
 set -u
 
@@ -21,13 +23,13 @@ MODE="${2:-bios}"
 TIMEOUT_SECS="${QEMU_TIMEOUT:-20}"
 
 if [ ! -f "$ISO" ]; then
-    echo "错误：找不到 ISO：$ISO" >&2
-    echo "      请先运行 make" >&2
+    echo "ERROR: ISO not found: $ISO" >&2
+    echo "       Run make first." >&2
     exit 1
 fi
 
 if [ "$MODE" != "bios" ] && [ "$MODE" != "uefi" ]; then
-    echo "错误：引导模式必须是 bios 或 uefi，收到：$MODE" >&2
+    echo "ERROR: boot mode must be bios or uefi, got: $MODE" >&2
     exit 1
 fi
 
@@ -35,47 +37,47 @@ LOG="$BUILD_DIR/serial-$MODE.log"
 mkdir -p "$BUILD_DIR"
 rm -f "$LOG"
 
-# ---------------------------------------------------------------- 加速
+# ------------------------------------------------------------- accel
 if [ -e /dev/kvm ] && [ -w /dev/kvm ]; then
     ACCEL="-enable-kvm -cpu host"
-    echo "  加速      ：KVM（硬件）"
+    echo "  Acceleration : KVM (hardware)"
 else
     ACCEL="-cpu max"
-    echo "  加速      ：TCG（软件模拟，较慢）"
+    echo "  Acceleration : TCG (software emulation, slow)"
 fi
 
-# ---------------------------------------------------------------- 固件
+# ------------------------------------------------------------- firmware
 if [ "$MODE" = "uefi" ]; then
     OVMF_CODE="/usr/share/OVMF/OVMF_CODE_4M.fd"
     OVMF_VARS_SRC="/usr/share/OVMF/OVMF_VARS_4M.fd"
     OVMF_VARS="$BUILD_DIR/OVMF_VARS_4M.fd"
 
     if [ ! -f "$OVMF_CODE" ] || [ ! -f "$OVMF_VARS_SRC" ]; then
-        echo "错误：未找到 OVMF 固件（$OVMF_CODE）" >&2
-        echo "      请安装：apt-get install ovmf" >&2
+        echo "ERROR: OVMF firmware not found ($OVMF_CODE)" >&2
+        echo "       Install with: apt-get install ovmf" >&2
         exit 1
     fi
 
-    # UEFI 变量存储必须是可写的，而 /usr/share 下的原文件不可写，
-    # 所以每次测试都从模板复制一份。
+    # The UEFI variable store must be writable, and the copy under
+    # /usr/share is not, so clone the template on every run.
     cp "$OVMF_VARS_SRC" "$OVMF_VARS"
 
     FIRMWARE_ARGS="-M q35 \
         -drive if=pflash,format=raw,unit=0,readonly=on,file=$OVMF_CODE \
         -drive if=pflash,format=raw,unit=1,file=$OVMF_VARS"
     BOOT_ARGS=""
-    echo "  固件      ：OVMF (UEFI)"
+    echo "  Firmware     : OVMF (UEFI)"
 else
     FIRMWARE_ARGS=""
-    # 传统 BIOS 下显式指定从光驱启动
+    # Under legacy BIOS the boot device must be named explicitly.
     BOOT_ARGS="-boot d"
-    echo "  固件      ：SeaBIOS (传统 BIOS)"
+    echo "  Firmware     : SeaBIOS (legacy BIOS)"
 fi
 
-echo "  引导模式  ：$MODE"
-echo "  ISO       ：$ISO"
-echo "  串口日志  ：$LOG"
-echo "  超时上限  ：${TIMEOUT_SECS} 秒"
+echo "  Boot mode    : $MODE"
+echo "  ISO          : $ISO"
+echo "  Serial log   : $LOG"
+echo "  Timeout      : ${TIMEOUT_SECS}s"
 echo
 
 # shellcheck disable=SC2086
@@ -91,69 +93,70 @@ timeout "$TIMEOUT_SECS" qemu-system-x86_64 \
     >/dev/null 2>&1
 
 QEMU_STATUS=$?
-# 124 = timeout 命令杀掉了 QEMU。内核停机后本就该一直运行，
-# 所以超时是预期结果，不是错误。
+# 124 means timeout killed QEMU. The kernel halts and never exits on its
+# own, so a timeout is the expected outcome, not an error.
 if [ "$QEMU_STATUS" -eq 124 ]; then
-    echo "  QEMU 因超时被终止（预期：内核停机后不会自行退出）"
+    echo "  QEMU killed by timeout (expected: kernel halts and does not exit)"
 else
-    echo "  QEMU 自行退出，状态码 $QEMU_STATUS（可能发生了三重故障）"
+    echo "  QEMU exited on its own, status $QEMU_STATUS (possible triple fault)"
 fi
 
 echo
-echo "=================== 串口输出 ==================="
+echo "=================== serial output ==================="
 if [ -s "$LOG" ]; then
-    # UEFI 路径下 OVMF 会把它自己的控制台输出（含大量 ANSI 光标定位序列）
-    # 一并写到串口。这里仅为显示整洁而剥离，断言仍然针对原始日志文件。
+    # On the UEFI path OVMF writes its own console output (full of ANSI
+    # cursor positioning sequences) to the serial port as well. Strip it
+    # for readability only; assertions still run against the raw log.
     sed -e 's/\x1b\[[0-9;]*[a-zA-Z]//g' "$LOG" | cat -s
 else
-    echo "(串口无任何输出)"
+    echo "(no serial output at all)"
 fi
-echo "================================================"
+echo "====================================================="
 echo
 
-# ------------------------------------------------------------------ 断言
+# ------------------------------------------------------------- assertions
 FAILED=0
 
 expect_present() {
     if grep -q "$1" "$LOG" 2>/dev/null; then
-        printf '  [通过] %s\n' "$2"
+        printf '  [ok]   %s\n' "$2"
     else
-        printf '  [失败] %s\n' "$2"
+        printf '  [FAIL] %s\n' "$2"
         FAILED=1
     fi
 }
 
 expect_absent() {
     if grep -q "$1" "$LOG" 2>/dev/null; then
-        printf '  [失败] %s\n' "$2"
+        printf '  [FAIL] %s\n' "$2"
         FAILED=1
     else
-        printf '  [通过] %s\n' "$2"
+        printf '  [ok]   %s\n' "$2"
     fi
 }
 
 if [ "$MODE" = "uefi" ]; then
-    FW_EXPECT="UEFI 64-bit"
+    FW_EXPECT="Firmware       : UEFI 64-bit"
 else
-    FW_EXPECT="x86 BIOS (传统)"
+    FW_EXPECT="Firmware       : x86 BIOS (legacy)"
 fi
 
-echo "断言结果（$MODE 路径）："
-expect_present "M0 引导闭环验证"                 "内核入口已执行，串口输出可用"
-expect_present "引导器        : Limine"          "引导器信息请求已解析"
-expect_present "$FW_EXPECT"                      "固件类型确认为 $MODE"
-expect_present "协议基版本    : 3 (已确认支持)"  "引导协议基版本检查通过"
-expect_present "HHDM 偏移"                       "HHDM 请求已解析"
-expect_present "可用内存"                        "内存映射请求已解析并汇总"
-expect_present "帧缓冲"                          "帧缓冲请求已解析"
-expect_present "M0 引导闭环验证通过"             "完成标记出现"
-expect_absent  "PANIC"                           "未发生内核 panic"
+echo "Assertions ($MODE path):"
+expect_present "x86-64 kernel, M0 boot verification"  "kernel entry ran, serial output works"
+expect_present "Bootloader     : Limine"               "bootloader info request parsed"
+expect_present "$FW_EXPECT"                           "firmware type confirmed as $MODE"
+expect_present "Base revision  : 3 (confirmed"        "boot protocol base revision accepted"
+expect_present "HHDM offset"                          "HHDM request parsed"
+expect_present "Usable memory"                        "memory map request parsed and summarised"
+expect_present "Framebuffer    :"                     "framebuffer request parsed"
+expect_present "M0 boot verification PASSED"          "completion marker present"
+expect_absent  "PANIC"                                "no kernel panic"
 
 echo
 if [ "$FAILED" -eq 0 ]; then
-    echo "====> M0 测试通过（$MODE）"
+    echo "====> M0 test PASSED ($MODE)"
     exit 0
 else
-    echo "====> M0 测试失败（$MODE）"
+    echo "====> M0 test FAILED ($MODE)"
     exit 1
 fi
