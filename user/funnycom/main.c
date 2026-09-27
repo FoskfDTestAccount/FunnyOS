@@ -1,0 +1,306 @@
+/*
+ * funnycom -- the FunnyOS shell.
+ *
+ * A Ring 3 program. Nothing here is privileged: every file it lists, every
+ * byte it prints and every key it reads goes through a system call, which
+ * is the point. The shell is the first thing in the project that has to
+ * work from outside the kernel, and it is the acceptance criterion for
+ * M2.
+ *
+ * It is deliberately shaped like a DOS shell rather than a Unix one --
+ * case-insensitive commands, `dir` and `type` rather than `ls` and `cat`,
+ * and "Bad command or file name" when it does not recognise what was
+ * typed. That is the reference this project is built against, and the
+ * muscle memory it is aiming at is worth more than the consistency of
+ * borrowing command names from somewhere else.
+ */
+#include <libu/libu.h>
+#include <libk/string.h>
+
+#define SHELL_NAME    "FunnyCOM"
+#define SHELL_VERSION "0.1"
+
+#define LINE_MAX 128
+#define ARGV_MAX 8
+
+/*
+ * The kernel passes one argument at startup: there is no argument vector
+ * yet, and the test suite needs to start the same image in different
+ * modes without building it three times.
+ */
+#define ARG_NORMAL     0
+#define ARG_FAULT_TEST 1
+#define ARG_EXIT_TEST  2
+
+/* Exit code for the exit test. Deliberately not zero, so that a test
+ * which passes has proved the code travelled back through the kernel
+ * rather than the kernel reporting whatever it had to hand. */
+#define EXIT_TEST_CODE 7
+
+/* ------------------------------------------------------------------ */
+/* Helpers                                                             */
+/* ------------------------------------------------------------------ */
+
+/* Compare without regard to case, because a DOS command line is
+ * case-insensitive and pretending otherwise would make `DIR` fail. */
+static int same_command(const char *a, const char *b)
+{
+    for (;;) {
+        char x = *a++;
+        char y = *b++;
+
+        if (x >= 'A' && x <= 'Z') x = (char)(x - 'A' + 'a');
+        if (y >= 'A' && y <= 'Z') y = (char)(y - 'A' + 'a');
+
+        if (x != y)
+            return 0;
+        if (x == '\0')
+            return 1;
+    }
+}
+
+/*
+ * Split a line into words in place, writing NULs over the separators.
+ *
+ * Returns the number of words. Extra spaces are skipped rather than
+ * producing empty arguments, so `type  NOTES.TXT` and `type NOTES.TXT`
+ * behave the same.
+ */
+static int split(char *line, char **argv, int max)
+{
+    int argc = 0;
+    char *p = line;
+
+    while (*p && argc < max) {
+        while (*p == ' ' || *p == '\t')
+            p++;
+        if (*p == '\0')
+            break;
+
+        argv[argc++] = p;
+
+        while (*p && *p != ' ' && *p != '\t')
+            p++;
+        if (*p)
+            *p++ = '\0';
+    }
+
+    return argc;
+}
+
+/* ------------------------------------------------------------------ */
+/* Commands                                                            */
+/* ------------------------------------------------------------------ */
+
+static void cmd_help(int argc, char **argv);
+
+static void cmd_ver(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    uprintf("%s %s\n", SHELL_NAME, SHELL_VERSION);
+    uprintf("FunnyOS, a native x86-64 system with a built-in 8086 emulator.\n");
+    uprintf("This shell runs in Ring 3 and is unprivileged; everything it\n");
+    uprintf("does goes through a system call.\n");
+}
+
+static void cmd_uptime(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    unsigned long ms = u_uptime_ms();
+    uprintf("Up %lu.%03lu seconds\n", ms / 1000, ms % 1000);
+}
+
+static void cmd_cls(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    u_clear();
+}
+
+static void cmd_echo(int argc, char **argv)
+{
+    for (int i = 1; i < argc; i++) {
+        if (i > 1)
+            uputc(' ');
+        uputs(argv[i]);
+    }
+    uputc('\n');
+}
+
+static void cmd_dir(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    struct dirent entry;
+    unsigned index = 0, files = 0, bytes = 0;
+
+    uputs("\n Volume in drive F has no label\n");
+    uputs(" Directory of F:\\\n\n");
+
+    while (u_readdir(index++, &entry) == 0) {
+        uprintf("%-16s %8u bytes\n", entry.name, entry.size);
+        files++;
+        bytes += entry.size;
+    }
+
+    uprintf("%16s %u file(s)   %u bytes\n", "", files, bytes);
+}
+
+static void cmd_type(int argc, char **argv)
+{
+    if (argc < 2) {
+        uputs("Syntax: TYPE <filename>\n");
+        return;
+    }
+
+    int fd = u_open(argv[1], O_RDONLY);
+    if (fd < 0) {
+        uprintf("File not found: %s\n", argv[1]);
+        return;
+    }
+
+    char buffer[256];
+    long count;
+
+    /* Reading until zero rather than asking for a size first: the size is
+     * knowable, but a program that trusts it has to be rewritten the day
+     * the file grows between the question and the answer. */
+    while ((count = u_read(fd, buffer, sizeof(buffer))) > 0)
+        u_write(U_STDOUT, buffer, (size_t)count);
+
+    u_close(fd);
+}
+
+static void cmd_exit(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    uputs("Goodbye.\n");
+    u_exit(0);
+}
+
+/* ------------------------------------------------------------------ */
+/* The command table                                                   */
+/* ------------------------------------------------------------------ */
+
+struct command {
+    const char *name;
+    const char *syntax;
+    const char *description;
+    void      (*run)(int argc, char **argv);
+};
+
+static const struct command g_commands[] = {
+    { "help",   "HELP",              "list the commands",              cmd_help   },
+    { "dir",    "DIR",               "list the files",                 cmd_dir    },
+    { "type",   "TYPE <file>",       "print a file",                   cmd_type   },
+    { "echo",   "ECHO <text>",       "print the text",                 cmd_echo   },
+    { "ver",    "VER",               "show version information",       cmd_ver    },
+    { "uptime", "UPTIME",            "time since the timer started",   cmd_uptime },
+    { "cls",    "CLS",               "clear the screen",               cmd_cls    },
+    { "exit",   "EXIT",              "end the shell",                  cmd_exit   },
+};
+
+#define COMMAND_COUNT ((int)(sizeof(g_commands) / sizeof(g_commands[0])))
+
+static void cmd_help(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    uputs("\nAvailable commands:\n\n");
+    for (int i = 0; i < COMMAND_COUNT; i++)
+        uprintf("  %-16s %s\n", g_commands[i].syntax, g_commands[i].description);
+    uputs("\n");
+}
+
+static const struct command *find_command(const char *name)
+{
+    for (int i = 0; i < COMMAND_COUNT; i++)
+        if (same_command(g_commands[i].name, name))
+            return &g_commands[i];
+    return NULL;
+}
+
+/* ------------------------------------------------------------------ */
+
+static void banner(void)
+{
+    uprintf("\n%s %s -- type HELP for a list of commands\n", SHELL_NAME, SHELL_VERSION);
+}
+
+static void run_fault_test(void)
+{
+    /*
+     * Deliberately touch an address the kernel never mapped for us. The
+     * claim this checks is the one FunnyOS makes against DOS: a program
+     * going wrong stops being a program, not a machine.
+     */
+    uputs("Fault self-test: writing to an address that is not mapped.\n");
+
+    volatile unsigned long *unmapped =
+        (volatile unsigned long *)0x00000000DEADB000UL;
+    *unmapped = 1;
+
+    /* Reached only if the write did not fault, which would mean the
+     * address space has a mapping it should not. */
+    uputs("FAILED: the write did not fault.\n");
+}
+
+int u_main(uint64_t arg)
+{
+    if (arg == ARG_FAULT_TEST) {
+        run_fault_test();
+        return 1;
+    }
+
+    if (arg == ARG_EXIT_TEST) {
+        /* Proves the other way a process can end: by deciding to, with a
+         * code, and with the kernel resuming as if it had been called. */
+        uputs("Exit self-test: returning a known code.\n");
+        return EXIT_TEST_CODE;
+    }
+
+    banner();
+
+    static char line[LINE_MAX];
+    static char *argv[ARGV_MAX];
+
+    for (;;) {
+        /*
+         * The prompt names a drive because that is the shape of the thing
+         * being imitated, and F is simply what this filesystem is
+         * called -- there is one, and there are no letters waiting behind
+         * it. When FAT images and their drive letters arrive, this stops
+         * being a naming convention and starts being a real one.
+         */
+        uputs("\nF:\\> ");
+
+        long length = u_read(U_STDIN, line, sizeof(line));
+        if (length < 0) {
+            /* A failed read would otherwise spin: the loop would ask
+             * again immediately and fail again. Say so and carry on. */
+            uprintf("Read failed (%ld)\n", length);
+            continue;
+        }
+
+        int argc = split(line, argv, ARGV_MAX);
+        if (argc == 0)
+            continue;
+
+        const struct command *command = find_command(argv[0]);
+        if (!command) {
+            uprintf("Bad command or file name: %s\n", argv[0]);
+            continue;
+        }
+
+        command->run(argc, argv);
+    }
+}

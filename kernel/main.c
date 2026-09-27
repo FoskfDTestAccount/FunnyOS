@@ -18,12 +18,14 @@
  * instead of waiting for a real bug.
  */
 #include <funnyos/bootinfo.h>
-#include <funnyos/console.h>
 #include <funnyos/fb.h>
+#include <funnyos/init_image.h>
 #include <funnyos/kbd.h>
 #include <funnyos/kprintf.h>
 #include <funnyos/panic.h>
+#include <funnyos/process.h>
 #include <funnyos/serial.h>
+#include <funnyos/syscall.h>
 
 #include <funnyos/arch/x86_64/acpi.h>
 #include <funnyos/arch/x86_64/apic.h>
@@ -346,6 +348,11 @@ void kmain(void)
      */
     bool kbd_ok = kbd_init();
 
+    /* Both need the interrupt registry, and process_init installs the
+     * hook that lets a system call end a process. */
+    syscall_init();
+    process_init();
+
     timer_init();
 
     kprintf("\n");
@@ -486,25 +493,53 @@ void kmain(void)
             (unsigned long long)irq_total_count());
 
     /*
-     * Scaffolding for M2.
+     * Hand over to the user program.
      *
-     * The interactive interface M2 calls for is FunnyCOM, a Ring 3 shell,
-     * which does not exist yet. Until it does, the kernel reads a line and
-     * echoes it back -- enough to exercise the whole input path end to
-     * end: the 8042 raises IRQ 1, the IO APIC routes it, the handler
-     * decodes the scancodes, the line discipline edits them, and the
-     * result comes back out on both output channels.
-     *
-     * This block is replaced by the shell, not kept as a fallback.
+     * Everything above this point was the kernel proving it works. This
+     * is the first code in the project that runs without privilege, in an
+     * address space of its own, and the whole point of the exercise is
+     * that whatever it does next cannot damage anything above it.
      */
-    kprintf("\n[console loop]\n");
-    kprintf("  Type a line and press Enter; the kernel echoes it back.\n");
+    kprintf("\n[user program]\n");
+    kprintf("  Image          : %llu bytes embedded in the kernel\n",
+            (unsigned long long)funnyos_init_image_size);
 
-    char line[128];
-    for (;;) {
-        console_prompt("  > ");
-        size_t length = console_read_line(line, sizeof(line));
-        kprintf("  echo (%llu bytes): \"%s\"\n",
-                (unsigned long long)length, line);
+    struct process *program = process_create("funnycom",
+                                             funnyos_init_image,
+                                             (size_t)funnyos_init_image_size);
+
+    if (!program) {
+        kprintf("  Result         : could not be loaded\n");
+    } else {
+        /*
+         * One argument, because there is no argument vector yet. The
+         * tests start the same image in three modes this way rather than
+         * building it three times.
+         */
+        uint64_t arg = 0;
+        if (strstr(cmdline, "selftest=userfault"))
+            arg = 1;
+        else if (strstr(cmdline, "selftest=userexit"))
+            arg = 2;
+
+        kprintf("  Loaded at      : 0x%llx, stack top 0x%llx\n",
+                (unsigned long long)PROCESS_CODE_BASE,
+                (unsigned long long)PROCESS_STACK_TOP);
+        kprintf("  Startup arg    : %llu\n", (unsigned long long)arg);
+
+        int code = process_run(program, arg);
+
+        if (code >= PROCESS_EXIT_FAULT_BASE) {
+            kprintf("  Result         : killed by fault %d\n",
+                    code - PROCESS_EXIT_FAULT_BASE);
+        } else {
+            kprintf("  Result         : exited with code %d\n", code);
+        }
+
+        process_destroy(program);
     }
+
+    kprintf("\nThe kernel has nothing left to run, so it idles here.\n");
+    for (;;)
+        __asm__ volatile("hlt");
 }

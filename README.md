@@ -12,23 +12,33 @@ DOS 在这里扮演两重角色：**设计参照系**（继承小内核、直白
 
 ## 当前状态
 
-**M0（引导闭环）与 M1（内核基础设施）已完成并通过验证。**
+**M0（引导闭环）、M1（内核基础设施）与 M2（控制台与 Shell）已完成并通过验证。**
 
-内核经 Limine 进入 64 位长模式，引导协议的请求全部解析正确。**GDT/TSS 与 256 项 IDT 已装载**，CPU 异常会被完整诊断——错误码解码、CR2 故障地址、控制寄存器、全部通用寄存器——而不是三重故障后静默重启。**物理页帧分配器、页表管理与内核堆**均已就位，每次启动都跑一遍自检。
+开机进入一个**交互式命令行**。Shell（FunnyCOM）是一个 **Ring 3 用户态进程**，跑在自己的地址空间里，所有能力都通过系统调用取得——它自己没有任何特权。
 
-**中断已上线。** 内核解析 ACPI MADT 找出中断控制器（而不是硬编码地址），初始化本地 APIC 与 I/O APIC，并把 8259 PIC 重新映射出异常向量区间后屏蔽。时间基准是 **LAPIC 定时器**，100 Hz；它的频率无法自报，因此以 8254 PIT 的晶振为参考**实测标定**，同一窗口顺便标定 TSC。每次启动都会用 TSC 复核，只有测得速率与编程速率相符才报告 PASS。
+已经能跑的东西：
 
-输出同时送往两条通道：**串口**（QEMU 可无头捕获，供自动化断言）和**帧缓冲文本控制台**（内建 8×16 点阵字体的字符网格，带光标与滚屏），所以在 VMware、VirtualBox 或真机上直接开机就能看到画面，不需要串口线。
+- **引导与内核**——Limine 双路径（BIOS/UEFI）进入 64 位长模式；GDT/TSS 与 256 项 IDT；CPU 异常被完整诊断（错误码解码、CR2、控制寄存器、全部通用寄存器），而不是三重故障后静默重启。
+- **内存**——物理页帧分配器、页表管理（含 1 GiB / 2 MiB 大页拆分）、内核堆，每次启动跑一遍自检。
+- **中断与时间**——解析 ACPI MADT 找出中断控制器（而非硬编码地址），初始化本地 APIC 与 I/O APIC，把 8259 PIC 重映射出异常向量区间后屏蔽；时间基准是 100 Hz 的 LAPIC 定时器，频率以 8254 PIT 晶振为参考**实测标定**，每次启动用 TSC 复核。
+- **输入**——PS/2 键盘驱动，以及带回显与退格的行编辑。
+- **进程**——Ring 3 执行、私有地址空间、`int 0x80` 系统调用、故障隔离。
+- **文件**——一个只读的内存文件系统，文件内容就是编译进内核的字符串。
+- **Shell**——`dir` / `type` / `echo` / `help` / `ver` / `uptime` / `cls` / `exit`。
 
-测试规模：正常启动 25 项断言 × 两条固件路径，外加一次故障注入测试（9 项断言），全部由 `make` 驱动。
+### 最重要的一点
 
-| | 正常启动 | 故障注入 |
+**一个程序崩溃只杀死它自己。** 这是 FunnyOS 明确背离 DOS 的地方，也是整套设计存在的理由。测试套件里有一个专门的用例：让 Shell 去写一块没有映射的地址，然后断言内核报告这次错误、结束那个进程、并继续运行。
+
+测试规模：正常启动 25 项断言 × 两条固件路径，故障注入 9 项，键盘与 Shell 交互 17 项，用户程序 21 项（三种结束方式：正常、崩溃、主动退出）。全部由 `make check` 驱动。
+
+| | 交互式 Shell | 程序崩溃 |
 |---|---|---|
-| 画面 | ![正常启动](docs/screenshot-m1-uefi.png) | ![异常报告](docs/screenshot-m1-fault.png) |
+| 画面 | ![Shell](docs/screenshot-m2-shell.png) | ![异常报告](docs/screenshot-m1-fault.png) |
 
-`make run` 可交互运行，`bash tools/screenshot.sh` 可无头截图。
+`make run` 可交互运行；`bash tools/screenshot.sh` 与 `bash tools/screenshot-shell.sh` 可无头截图。
 
-下一步是 M2：帧缓冲控制台完善、键盘驱动、系统调用雏形与用户态进程，验收标准是开机进入一个能敲命令的交互式 Shell。
+下一步是 M3：8086 解释器核心。
 
 ## 构建环境
 
@@ -51,11 +61,21 @@ bash tools/setup-limine.sh
 
 ```bash
 make            # 构建内核与可引导 ISO
-make test       # 无头启动并断言（BIOS 路径）
-make test-uefi  # 无头启动并断言（UEFI 路径）
-make test-all   # 两条路径都测
+make check      # 跑全部测试（推荐，提交前跑一次）
 make run        # 在带显示的 QEMU 中交互运行
 make export     # 把 ISO 复制到 dist/ 目录
+```
+
+单独跑某一项：
+
+```bash
+make test       # 无头启动并断言（BIOS 路径）
+make test-uefi  # 无头启动并断言（UEFI 路径）
+make test-all   # 两条固件路径都测
+make test-fault # 注入一次内核异常，检查诊断输出
+make test-input # 用 QEMU 的 sendkey 敲键盘，跑一遍 Shell 会话
+make test-user  # 三种方式结束一个用户进程：正常、崩溃、主动退出
+make user       # 只构建用户态程序，不构建内核
 ```
 
 `make test` 会自动优先使用 KVM 硬件加速，无 KVM 时回退到 TCG 软件模拟。
@@ -74,28 +94,44 @@ FunnyOS/
 │   │   ├── irq.c                中断处理程序登记、分发与 EOI
 │   │   ├── acpi.c               ACPI MADT 解析（找出中断控制器）
 │   │   ├── apic.c               本地 APIC 与 I/O APIC
-│   │   └── timer.c              LAPIC 定时器 + PIT 标定 + TSC
+│   │   ├── timer.c              LAPIC 定时器 + PIT 标定 + TSC
+│   │   └── usermode.asm         iretq 进入 Ring 3，以及退出时的上下文恢复
 │   ├── boot/bootinfo.c          Limine 引导请求与访问接口
 │   ├── mm/
 │   │   ├── pmm.c                物理页帧分配器（位图）
-│   │   ├── vmm.c                页表管理（含大页拆分）
+│   │   ├── vmm.c                页表管理、地址空间、大页拆分
 │   │   └── heap.c               内核堆
+│   ├── proc/
+│   │   ├── process.c            进程：地址空间、加载、运行、结束
+│   │   └── syscall.c            系统调用分发与用户指针校验
+│   ├── fs/ramfs.c               只读内存文件系统（文件内容编译进内核）
 │   ├── console/
 │   │   ├── serial.c             16550 UART 驱动（含回环自检）
 │   │   ├── fb.c                 帧缓冲文本控制台（光标、滚屏）
 │   │   ├── font8x16.c           内建点阵字库（由脚本生成，勿手改）
+│   │   ├── kbd.c                PS/2 键盘驱动与键码解码
+│   │   ├── console.c            行编辑：回显、退格、长度限制
 │   │   └── kprintf.c            输出分发：串口 + 帧缓冲双写
-│   ├── include/funnyos/         内核头文件
+│   ├── include/funnyos/         内核头文件（含 syscall.h —— 两端共享的 ABI）
 │   ├── main.c                   内核入口
 │   └── panic.c                  致命错误处理
-├── libk/                        内核基础库（memcpy/memset/printf 等）
+├── user/                        用户态程序（独立编译、链接，再嵌入内核）
+│   ├── libu/                    用户态库：系统调用封装、缓冲输出
+│   ├── funnycom/                FunnyCOM，就是那个 Shell
+│   └── link.ld                  用户态链接脚本（固定加载到 4 MiB）
+├── libk/                        内核基础库（内核与用户态各编译一次）
 ├── docs/
 │   ├── DESIGN.md                架构设计文档
 │   └── limine-*.md              Limine 协议、配置、用法文档（由脚本获取）
 ├── tools/
 │   ├── setup-limine.sh          获取 Limine（幂等）
 │   ├── run-qemu-test.sh         启动测试与断言
-│   ├── screenshot.sh            无头截图（验证帧缓冲实际渲染）
+│   ├── run-fault-test.sh        内核异常注入测试
+│   ├── run-input-test.sh        键盘与 Shell 交互测试
+│   ├── run-user-test.sh         用户进程三种结束方式的测试
+│   ├── screenshot.sh            无头截图（启动画面）
+│   ├── screenshot-shell.sh      无头截图（Shell 会话中）
+│   ├── bin2c.py                 把用户态程序转成内核里的字节数组
 │   ├── gen-font.py              从 TTF 生成 8x16 点阵字库
 │   ├── github-setup.sh          GitHub 仓库初始化
 │   ├── fix-line-endings.sh      行尾符诊断与修复
@@ -104,7 +140,7 @@ FunnyOS/
 └── Makefile
 ```
 
-## 四个必须知道的坑
+## 五个必须知道的坑
 
 以下四点都是实际踩出来的，不是理论风险。
 
@@ -157,6 +193,14 @@ Limine 把所有 HHDM 区域映射为 write-back，**唯独帧缓冲区域用 wr
 
 往 [kernel/console/fb.c](kernel/console/fb.c) 里加任何东西都要守住这条：**永远不要读 `g_addr`。**
 
+### 5. 暂时没有浮点：内核和用户态都没有
+
+`-mgeneral-regs-only` 同样写在用户程序的编译选项里，理由和内核那边是同一个：**内核收到中断时不保存 FPU/SSE 状态**，所以任何用到向量寄存器的代码，其寄存器内容都会被内核接下来做的事悄悄覆盖。
+
+连带的后果是**不能用 `float` / `double`**——SysV 调用约定用 XMM 寄存器传浮点参数，禁用向量寄存器就等于禁用了浮点。这不是"暂时不方便"，而是一条会实际影响设计的约束：M3 的 8087 协处理器模拟必须先把这件事解决掉（在上下文切换和内核入口处保存/恢复 FPU 状态），否则老游戏跑不起来。
+
+碰到需要小数的场合，目前的办法是用整数表示（比如把频率按毫赫兹、千分之一这样的定标整数来打印）。
+
 ## 设计要点速查
 
 几个已经定死、后续不该反复推翻的决策（完整论证见 [docs/DESIGN.md](docs/DESIGN.md)）：
@@ -182,23 +226,33 @@ See [docs/DESIGN.md](docs/DESIGN.md) for the full architecture (written in Chine
 
 ## Status
 
-**M0 (boot chain) and M1 (kernel infrastructure) are complete and verified.**
+**M0 (boot chain), M1 (kernel infrastructure) and M2 (console and shell) are complete and verified.**
 
-The kernel enters 64-bit long mode via Limine, and every boot protocol request parses correctly. A **GDT/TSS and a 256-vector IDT** are installed, so a CPU exception is fully diagnosed -- error code decoded, CR2 reported, control registers and every general-purpose register dumped -- instead of becoming a triple fault and a silent reboot. A **physical frame allocator, page table management and a kernel heap** are in place, and a self-test exercises all of them on every boot.
+The machine boots into an **interactive command line**. The shell, FunnyCOM, is a **Ring 3 user-space process** with its own address space and no privileges of its own -- everything it does goes through a system call.
 
-**Interrupts are live.** The kernel parses the ACPI MADT to find the interrupt controllers rather than hardcoding their addresses, brings up the local APIC and the I/O APIC, and remaps the 8259 PIC pair out of the exception vector range before masking it. The time base is the **LAPIC timer** at 100 Hz; it cannot report its own frequency, so that is *measured* against the 8254 PIT's crystal, and the TSC is calibrated in the same window. Every boot re-checks the rate against the TSC and reports PASS only when the measured rate matches the programmed one.
+What works:
 
-Output goes to two channels at once: **serial** (QEMU captures it headlessly for the automated assertions) and a **framebuffer text console** (a character grid backed by a built-in 8x16 bitmap font, with cursor and scrolling). Booting it in VMware, VirtualBox or on real hardware shows something immediately, with no serial cable required.
+- **Boot and kernel** -- Limine on both BIOS and UEFI into 64-bit long mode; a GDT/TSS and a 256-vector IDT; CPU exceptions fully diagnosed (error code decoded, CR2, control registers, every general-purpose register) rather than becoming a triple fault and a silent reboot.
+- **Memory** -- a physical frame allocator, page table management including 1 GiB and 2 MiB page splitting, and a kernel heap, all self-tested on every boot.
+- **Interrupts and time** -- the ACPI MADT is parsed to find the interrupt controllers rather than hardcoding their addresses, the local and I/O APICs are brought up, and the 8259 pair is remapped out of the exception vector range and masked. The time base is the LAPIC timer at 100 Hz, *measured* against the 8254 PIT's crystal and re-checked against the TSC on every boot.
+- **Input** -- a PS/2 keyboard driver, and a line discipline with echo and backspace.
+- **Processes** -- Ring 3 execution, private address spaces, `int 0x80` system calls, and fault isolation.
+- **Files** -- a read-only in-memory filesystem whose contents are string literals compiled into the kernel.
+- **Shell** -- `dir`, `type`, `echo`, `help`, `ver`, `uptime`, `cls`, `exit`.
 
-Test coverage is 25 assertions per boot path across both firmware types, plus a fault-injection test with 9 more, all driven by `make`.
+### The part that matters
 
-| | Normal boot | Fault injection |
+**A crashing program kills only itself.** This is where FunnyOS deliberately departs from DOS, and it is the reason for the whole design. There is a test that makes the shell write to an address it has no mapping for, and asserts that the kernel reports the fault, ends that process, and carries on.
+
+Test coverage: 25 assertions per boot path across both firmware types, 9 more for fault injection, 17 for keyboard and shell interaction, and 21 for user programs across three different ways of ending one (normal, fault, deliberate exit). All driven by `make check`.
+
+| | Interactive shell | Program crash |
 |---|---|---|
-| Screen | ![Normal boot](docs/screenshot-m1-uefi.png) | ![Exception report](docs/screenshot-m1-fault.png) |
+| Screen | ![Shell](docs/screenshot-m2-shell.png) | ![Exception report](docs/screenshot-m1-fault.png) |
 
-`make run` boots interactively; `bash tools/screenshot.sh` captures the screen headlessly.
+`make run` boots interactively; `bash tools/screenshot.sh` and `bash tools/screenshot-shell.sh` capture the screen headlessly.
 
-Next up is M2: finishing the framebuffer console, a keyboard driver, the first system calls and user-space processes -- with an interactive shell as the acceptance criterion.
+Next up is M3: the 8086 interpreter core.
 
 ## Build environment
 
@@ -221,11 +275,21 @@ bash tools/setup-limine.sh
 
 ```bash
 make            # Build the kernel and a bootable ISO
+make check      # Run every test (use this before committing)
+make run        # Run interactively in QEMU with a display
+make export     # Copy the ISO into dist/
+```
+
+Individually:
+
+```bash
 make test       # Boot headless and assert (BIOS path)
 make test-uefi  # Boot headless and assert (UEFI path)
 make test-all   # Run both boot paths
-make run        # Run interactively in QEMU with a display
-make export     # Copy the ISO into dist/
+make test-fault # Inject a kernel fault and check the diagnostic
+make test-input # Type a shell session through QEMU's sendkey
+make test-user  # End a user process three ways: normally, by fault, by exit
+make user       # Build just the user program, without the kernel
 ```
 
 `make test` prefers KVM hardware acceleration and falls back to TCG software emulation when KVM is unavailable.
@@ -244,28 +308,44 @@ FunnyOS/
 │   │   ├── irq.c                Interrupt handler registration, dispatch and EOI
 │   │   ├── acpi.c               ACPI MADT parsing (locating the interrupt controllers)
 │   │   ├── apic.c               Local APIC and I/O APIC
-│   │   └── timer.c              LAPIC timer, PIT calibration, TSC
+│   │   ├── timer.c              LAPIC timer, PIT calibration, TSC
+│   │   └── usermode.asm         iretq into Ring 3, and the context restore on exit
 │   ├── boot/bootinfo.c          Limine boot requests and accessor interface
 │   ├── mm/
 │   │   ├── pmm.c                Physical frame allocator (bitmap)
-│   │   ├── vmm.c                Page tables, including large-page splitting
+│   │   ├── vmm.c                Page tables, address spaces, large-page splitting
 │   │   └── heap.c               Kernel heap
+│   ├── proc/
+│   │   ├── process.c            Processes: address space, loading, running, ending
+│   │   └── syscall.c            System call dispatch and user pointer validation
+│   ├── fs/ramfs.c               Read-only in-memory filesystem
 │   ├── console/
 │   │   ├── serial.c             16550 UART driver with loopback self-test
 │   │   ├── fb.c                 Framebuffer text console (cursor, scrolling)
 │   │   ├── font8x16.c           Built-in bitmap font (generated; do not edit)
+│   │   ├── kbd.c                PS/2 keyboard driver and scancode decoding
+│   │   ├── console.c            Line discipline: echo, backspace, length limit
 │   │   └── kprintf.c            Output fan-out: serial + framebuffer
-│   ├── include/funnyos/         Kernel headers
+│   ├── include/funnyos/         Kernel headers, including the shared syscall ABI
 │   ├── main.c                   Kernel entry point
 │   └── panic.c                  Fatal error handling
-├── libk/                        Kernel support library (memcpy/memset/printf and friends)
+├── user/                        User programs, built and linked separately
+│   ├── libu/                    User library: syscall wrappers, buffered output
+│   ├── funnycom/                FunnyCOM, the shell
+│   └── link.ld                  User linker script (linked at 4 MiB)
+├── libk/                        Kernel support library (compiled for both sides)
 ├── docs/
 │   ├── DESIGN.md                Architecture and design decisions
 │   └── limine-*.md              Limine protocol, config and usage docs (fetched, not committed)
 ├── tools/
 │   ├── setup-limine.sh          Fetch Limine (idempotent)
 │   ├── run-qemu-test.sh         Boot test and assertions
-│   ├── screenshot.sh            Headless screendump (verifies actual rendering)
+│   ├── run-fault-test.sh        Kernel fault-injection test
+│   ├── run-input-test.sh        Keyboard and shell interaction test
+│   ├── run-user-test.sh         The three ways a user process can end
+│   ├── screenshot.sh            Headless screendump of the boot
+│   ├── screenshot-shell.sh      Headless screendump mid-shell-session
+│   ├── bin2c.py                 Turn a user program into a byte array
 │   ├── gen-font.py              Rasterise a TTF into the 8x16 bitmap font
 │   ├── github-setup.sh          GitHub repository bootstrap
 │   ├── fix-line-endings.sh      Line ending diagnostics and repair
@@ -274,7 +354,7 @@ FunnyOS/
 └── Makefile
 ```
 
-## Four things you need to know
+## Five things you need to know
 
 All four were hit in practice, not theorised.
 
@@ -326,6 +406,14 @@ The obvious way to scroll is to move the framebuffer up by one text row, i.e. `m
 So the framebuffer here is **write-only**. The authoritative screen content lives in an ordinary cached array, `g_cells`; scrolling moves that 6 KiB array (effectively free) and then repaints, which is pure writes and therefore the fast path for WC memory. The same boot log now prints in under a second.
 
 Anything added to [kernel/console/fb.c](kernel/console/fb.c) has to respect that: **never read from `g_addr`.**
+
+### 5. There is no floating point, in the kernel or in user programs
+
+`-mgeneral-regs-only` is in the user program flags too, for the same reason it is in the kernel's: **the kernel does not save FPU or SSE state when an interrupt arrives**, so any code using a vector register would have its contents silently overwritten by whatever the kernel did next.
+
+The consequence is that `float` and `double` are unusable -- the SysV calling convention passes them in XMM registers, so banning vector registers bans floating point. This is not a temporary inconvenience; it is a constraint that will shape a milestone. M3's 8087 emulation cannot be built without first fixing this properly, by saving and restoring FPU state on context switches and kernel entry.
+
+Where a fraction is needed in the meantime, it is carried as a scaled integer -- a frequency printed in millihertz, say, rather than as a double.
 
 ## Design decisions at a glance
 

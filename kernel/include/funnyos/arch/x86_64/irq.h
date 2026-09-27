@@ -96,4 +96,27 @@ uint64_t irq_count(uint8_t vector);
 /* Total across all vectors. */
 uint64_t irq_total_count(void);
 
+/*
+ * A hook called after every handled device interrupt, once the end of
+ * interrupt has been sent.
+ *
+ * It exists for the one thing a handler cannot do by returning. A handler
+ * can change the register state the interrupted code will resume with --
+ * that is how a system call returns a value -- but it cannot leave that
+ * context entirely, because the only way out of an interrupt is the iretq
+ * at the bottom of the entry stub.
+ *
+ * Ending a process needs exactly that. A process that exits must not
+ * resume; it must unwind to whoever started it. So the syscall handler
+ * sets a flag, returns normally, and this hook sees the flag and does not
+ * return.
+ *
+ * It runs with the interrupt still logically in service, which is why the
+ * end of interrupt is sent before it rather than after: an interrupt
+ * acknowledged after the CPU has been diverted elsewhere is an interrupt
+ * that stays in service forever.
+ */
+typedef void (*irq_post_hook_fn)(void);
+void irq_set_post_hook(irq_post_hook_fn hook);
+
 #endif /* FUNNYOS_ARCH_X86_64_IRQ_H */

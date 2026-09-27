@@ -12,6 +12,7 @@ struct irq_slot {
 static struct irq_slot g_handlers[256];
 static uint64_t       g_counts[256];
 static uint64_t       g_total;
+static irq_post_hook_fn g_post_hook;
 
 void irq_init(void)
 {
@@ -20,7 +21,13 @@ void irq_init(void)
         g_handlers[i].ctx = NULL;
         g_counts[i]       = 0;
     }
-    g_total = 0;
+    g_total     = 0;
+    g_post_hook = NULL;
+}
+
+void irq_set_post_hook(irq_post_hook_fn hook)
+{
+    g_post_hook = hook;
 }
 
 bool irq_register(uint8_t vector, irq_handler_fn fn, void *ctx)
@@ -79,6 +86,11 @@ bool irq_dispatch(struct interrupt_frame *frame)
     slot.fn(frame, slot.ctx);
 
     lapic_eoi();
+
+    /* The handler may have asked to leave this context entirely. */
+    if (g_post_hook)
+        g_post_hook();
+
     return true;
 }
 

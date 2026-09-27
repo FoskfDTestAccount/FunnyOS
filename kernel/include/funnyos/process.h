@@ -1,0 +1,176 @@
+/*
+ * Processes.
+ *
+ * "Process" here means something smaller than it does on a general-purpose
+ * system: an address space, a stack, a kernel stack to land on when it
+ * faults or calls a system call, and a place to resume the kernel when it
+ * exits. There is no scheduler, because there is nothing to schedule --
+ * a program runs until it exits, and its system calls block the CPU while
+ * they wait.
+ *
+ * That is not a shortcut so much as the truth about M2. The DOS programs
+ * this system exists to run are single-tasking, and the emulator that will
+ * run them has not been written yet. A scheduler arrives when there is
+ * more than one thing to run.
+ *
+ * The isolation is real, though, and it is the point: a program runs in
+ * Ring 3 under its own page tables, so a wild pointer faults in a context
+ * that cannot touch the kernel. DESIGN.md calls this out as the one place
+ * FunnyOS deliberately departs from DOS, and this file is where that
+ * promise is kept or broken.
+ */
+#ifndef FUNNYOS_PROCESS_H
+#define FUNNYOS_PROCESS_H
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+/* Where a program is loaded, and where its stack lives.
+ *
+ * Both are in the lower half, which is the half a process owns -- see
+ * VMM_KERNEL_PML4_INDEX. The stack top is a round number well clear of
+ * the program and of the top of the half, so a modest overrun grows into
+ * unmapped space rather than into anything else. */
+#define PROCESS_CODE_BASE   0x0000000000400000ULL   /* 4 MiB */
+#define PROCESS_STACK_TOP   0x0000000000800000ULL   /* 8 MiB */
+#define PROCESS_STACK_SIZE  (64 * 1024)
+
+/* Kernel stack used while the process is inside a system call or a fault
+ * handler. Reached through the TSS, so an interrupt taken in Ring 3 lands
+ * here rather than on the process's own stack -- which a process cannot
+ * be trusted to have left in any particular state. */
+#define PROCESS_KERNEL_STACK_SIZE (16 * 1024)
+
+/*
+ * Exit codes at or above this are not a program's choice: the value is
+ * this base plus the fault vector, so that a caller can tell "the program
+ * decided to stop" from "the program was stopped".
+ *
+ * The base is 128, matching the convention Unix uses for the same
+ * purpose. It is worth matching because it is a signal rather than a
+ * return value, and the two are exactly the things that should not look
+ * alike. The cost is that a program which deliberately exits with a code
+ * of 128 or more is indistinguishable from one that faulted, which is a
+ * trade Unix makes too.
+ */
+#define PROCESS_EXIT_FAULT_BASE 128
+
+/* Open files a process can hold at once. Deliberately small: the table
+ * lives inside the process structure and is zeroed with it, and eight is
+ * more than a shell or a DOS program working normally ever needs. */
+#define PROCESS_MAX_OPEN_FILES 8
+
+/*
+ * One open file.
+ *
+ * `file` is an index into the read-only filesystem, not a pointer: the
+ * number is what a program gets back and hands in again, and keeping the
+ * table to indices means a program cannot name something the kernel did
+ * not put there.
+ */
+struct open_file {
+    bool     used;
+    int      file;
+    uint64_t offset;
+};
+
+/*
+ * Where the kernel left off when it entered Ring 3.
+ *
+ * The field order is fixed by usermode.asm, which saves and restores it
+ * as raw offsets. Only the callee-saved registers are here, which is all
+ * the C calling convention requires across a longjmp.
+ */
+struct kernel_context {
+    uint64_t rbx, rbp, r12, r13, r14, r15;
+    uint64_t rsp;
+    uint64_t rip;
+};
+
+struct process {
+    const char *name;
+
+    uint64_t pml4;          /* physical address of the top-level table */
+    uint64_t entry;
+    uint64_t stack_top;
+
+    /* Size of the loaded image, so teardown knows how many frames the
+     * program occupies without having to guess. */
+    size_t   image_size;
+
+    void    *kernel_stack;
+    size_t   kernel_stack_size;
+
+    /* Set by SYS_EXIT, acted on by the interrupt post-hook. */
+    bool     exited;
+    int      exit_code;
+
+    struct kernel_context resume;
+
+    struct open_file files[PROCESS_MAX_OPEN_FILES];
+};
+
+/* Install the exit hook. Call once, after the interrupt registry exists. */
+void process_init(void);
+
+/*
+ * Load a flat binary into a fresh address space.
+ *
+ * Flat, not ELF: there is no dynamic loader, no shared libraries and no
+ * relocations to apply, so the two things ELF would buy -- section
+ * permissions and a symbol table -- are not worth a parser yet. The image
+ * is copied to PROCESS_CODE_BASE and that is the whole loader.
+ *
+ * Returns NULL on failure, having released anything it allocated.
+ */
+struct process *process_create(const char *name, const void *image, size_t size);
+
+/*
+ * Run a process to completion and return its exit code.
+ *
+ * `arg` is handed to the program as its first parameter. There is no
+ * argument vector and no environment block yet, so one value in a
+ * register is the whole of the interface between whoever starts a program
+ * and the program itself -- enough for a program to be started in more
+ * than one mode, which is what the tests need.
+ *
+ * Blocks until the process calls SYS_EXIT. Control returns here through
+ * the context saved on entry -- see kernel_longjmp in usermode.asm.
+ */
+int process_run(struct process *p, uint64_t arg);
+
+/* Release everything a process owns. Must not be called while it is
+ * running. */
+void process_destroy(struct process *p);
+
+/*
+ * End the running process because it faulted. Never returns.
+ *
+ * The process is unwound exactly as a normal exit unwinds it, with the
+ * fault vector as the exit code, so that a caller can tell "ended" from
+ * "was killed" without a second mechanism.
+ *
+ * Only valid when a process is running: a fault with no process behind it
+ * is the kernel's own, and this reports that and panics rather than
+ * pretending something else went wrong.
+ */
+void process_abort_on_fault(uint64_t vector) __attribute__((noreturn));
+
+/* The address space currently in use by a running process, or 0 when the
+ * kernel is on its own. */
+uint64_t process_current_pml4(void);
+
+/*
+ * The open-file table of the running process, or NULL when the kernel is
+ * on its own. The system call layer uses this; nothing else should.
+ */
+struct open_file *process_open_files(void);
+
+/* --- Called by the system call layer -------------------------------- */
+
+/* Record that the running process wants to end. Does not return to the
+ * caller's process; the interrupt post-hook unwinds instead. */
+void process_request_exit(int code);
+
+#endif /* FUNNYOS_PROCESS_H */

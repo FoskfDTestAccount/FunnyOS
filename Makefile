@@ -58,6 +58,7 @@ TOOLS_DIR := tools
 RUN_TEST  := $(TOOLS_DIR)/run-qemu-test.sh
 RUN_FAULT_TEST := $(TOOLS_DIR)/run-fault-test.sh
 RUN_INPUT_TEST := $(TOOLS_DIR)/run-input-test.sh
+RUN_USER_TEST  := $(TOOLS_DIR)/run-user-test.sh
 
 # ---------------------------------------------------------------------
 # Toolchain
@@ -108,14 +109,73 @@ ASM_SOURCES := $(shell find kernel      -name '*.asm' | sort)
 # near the actual cause.
 C_OBJS   := $(patsubst %.c,  $(OBJ_DIR)/%.c.o,$(C_SOURCES))
 ASM_OBJS := $(patsubst %.asm,$(OBJ_DIR)/%.asm.o,$(ASM_SOURCES))
-OBJS     := $(C_OBJS) $(ASM_OBJS)
+
+# ---------------------------------------------------------------------
+# User programs
+#
+# Built separately from the kernel and then embedded in it as a flat
+# binary. Three of the flags below are load-bearing:
+#
+#   -mgeneral-regs-only
+#       The kernel does not save vector register state when an interrupt
+#       arrives, so a user program using SSE would have its registers
+#       quietly clobbered by whatever the kernel did next. It also means
+#       no floating point, since the SysV ABI passes those in SSE
+#       registers. Both are M3's problem to fix properly.
+#
+#   -mcmodel=small
+#       A user program lives in the lower half and is addressed with the
+#       small code model, unlike the kernel's -mcmodel=kernel.
+#
+#   -fno-builtin
+#       Stops the compiler turning a loop into a call to a libc function
+#       that does not exist on this side of the boundary.
+#
+# libk is compiled a second time for user space. It is freestanding
+# already, so the only thing that changes is the code model.
+# ---------------------------------------------------------------------
+
+USER_CFLAGS := -std=c17 -g -O2 \
+               -ffreestanding -fno-stack-protector -fno-pic -fno-pie \
+               -mno-red-zone -mcmodel=small -mgeneral-regs-only \
+               -fno-builtin -Wall -Wextra \
+               -Iuser -Ikernel/include -Ilibk/include
+
+# The user program is linked into a single loadable segment, so the linker
+# warns that it has RWX permissions. That warning is about ELF program
+# headers, and the ELF here is an intermediate: it is converted to a flat
+# binary two lines later, and a flat binary has no program headers at all.
+# The kernel also never enables the NX bit, so segment permissions would
+# not be enforced even if they were expressed.
+USER_LDFLAGS := -T user/link.ld -nostdlib -z max-page-size=0x1000 \
+                --no-warn-rwx-segments
+
+USER_OBJ_DIR := $(BUILD_DIR)/userobj
+
+USER_C_SOURCES   := $(shell find user -name '*.c' | sort) libk/printf.c libk/string.c
+USER_ASM_SOURCES := $(shell find user -name '*.asm' | sort)
+
+USER_C_OBJS   := $(patsubst %.c,  $(USER_OBJ_DIR)/%.c.o,$(USER_C_SOURCES))
+USER_ASM_OBJS := $(patsubst %.asm,$(USER_OBJ_DIR)/%.asm.o,$(USER_ASM_SOURCES))
+USER_OBJS     := $(USER_C_OBJS) $(USER_ASM_OBJS)
+
+USER_ELF := $(BUILD_DIR)/funnycom.elf
+USER_BIN := $(BUILD_DIR)/funnycom.bin
+
+INIT_BLOB_C   := $(BUILD_DIR)/generated/funnycom_blob.c
+INIT_BLOB_OBJ := $(BUILD_DIR)/generated/funnycom_blob.c.o
+
+OBJS := $(C_OBJS) $(ASM_OBJS) $(INIT_BLOB_OBJ)
 
 # ---------------------------------------------------------------------
 # Targets
 # ---------------------------------------------------------------------
-.PHONY: all run test test-uefi test-all test-fault test-input check export clean distclean help
+.PHONY: all user run test test-uefi test-all test-fault test-input test-user check export clean distclean help
 
 all: $(ISO)
+
+# Just the user program, for checking it builds without the kernel.
+user: $(USER_BIN)
 
 $(KERNEL): $(OBJS) linker.ld
 	@echo "  LD      $@"
@@ -130,6 +190,49 @@ $(OBJ_DIR)/%.asm.o: %.asm
 	@mkdir -p $(@D)
 	@echo "  NASM    $<"
 	@$(NASM) $(NASMFLAGS) $< -o $@
+
+# ---------------------------------------------------------------------
+# User program
+# ---------------------------------------------------------------------
+
+$(USER_OBJ_DIR)/%.c.o: %.c
+	@mkdir -p $(@D)
+	@echo "  CCu     $<"
+	@$(CC) $(USER_CFLAGS) -c $< -o $@
+
+$(USER_OBJ_DIR)/%.asm.o: %.asm
+	@mkdir -p $(@D)
+	@echo "  NASMu   $<"
+	@$(NASM) $(NASMFLAGS) $< -o $@
+
+$(USER_ELF): $(USER_OBJS) user/link.ld
+	@echo "  LDu     $@"
+	@$(LD) $(USER_LDFLAGS) -o $@ $(USER_OBJS)
+
+# Two objcopy passes, and the first is the one that matters.
+#
+# .bss is NOBITS: it occupies no space in the file. Converting to a flat
+# binary would therefore omit it entirely and report a length that stops
+# at the end of .data. The kernel sizes its allocation from that length,
+# so a program with uninitialised data would have some of it outside the
+# pages it owns and fault on first touch. Marking .bss loadable turns it
+# into real zero bytes that count.
+$(USER_BIN): $(USER_ELF)
+	@echo "  OBJCOPY $@"
+	@objcopy --set-section-flags .bss=alloc,load,contents $< $@.tmp
+	@objcopy -O binary $@.tmp $@
+	@rm -f $@.tmp
+	@echo "  Image   $(USER_BIN): $$(stat -c %s $@) bytes"
+
+$(INIT_BLOB_C): $(USER_BIN) $(TOOLS_DIR)/bin2c.py
+	@mkdir -p $(@D)
+	@echo "  BIN2C   $@"
+	@python3 $(TOOLS_DIR)/bin2c.py $< funnyos_init_image $@
+
+$(INIT_BLOB_OBJ): $(INIT_BLOB_C)
+	@mkdir -p $(@D)
+	@echo "  CC      $<"
+	@$(CC) $(CFLAGS) -c $< -o $@
 
 # Build the bootable ISO. BIOS and UEFI both come in through El Torito
 # entries, so a single image serves both firmware types.
@@ -213,12 +316,20 @@ test-fault: $(ISO)
 test-input: $(ISO)
 	@bash $(RUN_INPUT_TEST) $(ISO) bios
 
+# Load and run the user program, in both of the modes the kernel can start
+# it in: normally, and deliberately faulting. The second is the one that
+# checks the isolation claim -- a program going wrong must stop being a
+# program, not a machine.
+test-user: $(ISO)
+	@bash $(RUN_USER_TEST) $(ISO) bios
+
 # Everything. Use this before committing.
 check: $(ISO)
 	@bash $(RUN_TEST) $(ISO) bios
 	@bash $(RUN_TEST) $(ISO) uefi
 	@bash $(RUN_FAULT_TEST) bios
 	@bash $(RUN_INPUT_TEST) $(ISO) bios
+	@bash $(RUN_USER_TEST) $(ISO) bios
 
 # Copy the ISO into the project directory so other emulators on Windows
 # can open it. Output goes to dist/ rather than the project root because

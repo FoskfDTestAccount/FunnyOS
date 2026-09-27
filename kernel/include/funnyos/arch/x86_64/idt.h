@@ -21,4 +21,14 @@ void idt_init(void);
 void idt_set_handler(uint8_t vector, void (*handler)(void), uint8_t ist,
                      uint8_t dpl);
 
+/*
+ * Change the privilege level of a vector that is already installed.
+ *
+ * Raising a vector's DPL to 3 is what lets Ring 3 code reach it with
+ * INT n. It is a separate call from installation because the two are
+ * genuinely different decisions: every vector gets a handler, and only
+ * the ones deliberately exposed to user code get DPL 3.
+ */
+void idt_set_dpl(uint8_t vector, uint8_t dpl);
+
 #endif /* FUNNYOS_ARCH_X86_64_IDT_H */

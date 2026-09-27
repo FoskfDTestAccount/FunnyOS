@@ -16,7 +16,6 @@
 static uint64_t g_hhdm;
 static uint64_t g_pml4_phys;
 static bool     g_ready;
-
 /* Page tables are physical; the HHDM is how we reach them. */
 static inline uint64_t *phys_to_ptr(uint64_t phys)
 {
@@ -168,14 +167,17 @@ void vmm_init(void)
     g_ready = true;
 }
 
-bool vmm_map_page(uint64_t virt, uint64_t phys, uint64_t flags)
+bool vmm_map_page_in(uint64_t pml4_phys, uint64_t virt, uint64_t phys,
+                     uint64_t flags)
 {
     if (!g_ready)
         return false;
     if ((virt & (PAGE_SIZE - 1)) || (phys & (PAGE_SIZE - 1)))
         return false;
+    if (!pml4_phys)
+        return false;
 
-    uint64_t *pml4 = phys_to_ptr(g_pml4_phys);
+    uint64_t *pml4 = phys_to_ptr(pml4_phys);
 
     uint64_t *pdpt = descend(pml4, PML4_INDEX(virt), flags, true, 3);
     if (!pdpt)
@@ -190,8 +192,19 @@ bool vmm_map_page(uint64_t virt, uint64_t phys, uint64_t flags)
         return false;
 
     pt[PT_INDEX(virt)] = ENTRY_ADDR(phys) | flags | VMM_PRESENT;
-    tlb_invalidate(virt);
+
+    /* Only the address space that is actually current has a TLB to
+     * invalidate. Mapping into another one leaves the current TLB alone
+     * and relies on that space's own CR3 load to flush it. */
+    if (pml4_phys == g_pml4_phys)
+        tlb_invalidate(virt);
+
     return true;
+}
+
+bool vmm_map_page(uint64_t virt, uint64_t phys, uint64_t flags)
+{
+    return vmm_map_page_in(g_pml4_phys, virt, phys, flags);
 }
 
 bool vmm_unmap_page(uint64_t virt)
@@ -216,36 +229,74 @@ bool vmm_unmap_page(uint64_t virt)
     return true;
 }
 
-uint64_t vmm_get_physical(uint64_t virt)
+/*
+ * Walk to the leaf entry for `virt` and hand back both the physical
+ * address it resolves to and the entry itself.
+ *
+ * Returning the entry matters for the permission checks below: the
+ * address alone cannot say whether a mapping is user-accessible, and a
+ * caller that has to re-walk the tables to find out is a caller that will
+ * eventually forget to.
+ */
+static uint64_t resolve_in(uint64_t pml4_phys, uint64_t virt,
+                           uint64_t *leaf_entry_out,
+                           bool *all_levels_user_out)
 {
-    if (!g_ready)
+    if (!g_ready || !pml4_phys)
         return 0;
 
-    uint64_t *pml4 = phys_to_ptr(g_pml4_phys);
-    uint64_t entry = pml4[PML4_INDEX(virt)];
-    if (!(entry & VMM_PRESENT) || (entry & VMM_HUGE))
+    bool all_user = true;
+
+    uint64_t *pml4  = phys_to_ptr(pml4_phys);
+    uint64_t  entry = pml4[PML4_INDEX(virt)];
+    if (!(entry & VMM_PRESENT))
         return 0;
+    all_user = all_user && (entry & VMM_USER) != 0;
+    if (entry & VMM_HUGE)
+        return 0;   /* PML4 has no large pages; the bit is reserved */
 
     uint64_t *pdpt = phys_to_ptr(ENTRY_ADDR(entry));
     entry = pdpt[PDPT_INDEX(virt)];
     if (!(entry & VMM_PRESENT))
         return 0;
-    if (entry & VMM_HUGE)   /* 1 GiB page */
+    all_user = all_user && (entry & VMM_USER) != 0;
+    if (entry & VMM_HUGE) {   /* 1 GiB page */
+        if (leaf_entry_out)      *leaf_entry_out = entry;
+        if (all_levels_user_out) *all_levels_user_out = all_user;
         return ENTRY_ADDR(entry) + (virt & 0x3FFFFFFF);
+    }
 
     uint64_t *pd = phys_to_ptr(ENTRY_ADDR(entry));
     entry = pd[PD_INDEX(virt)];
     if (!(entry & VMM_PRESENT))
         return 0;
-    if (entry & VMM_HUGE)   /* 2 MiB page */
+    all_user = all_user && (entry & VMM_USER) != 0;
+    if (entry & VMM_HUGE) {   /* 2 MiB page */
+        if (leaf_entry_out)      *leaf_entry_out = entry;
+        if (all_levels_user_out) *all_levels_user_out = all_user;
         return ENTRY_ADDR(entry) + (virt & 0x1FFFFF);
+    }
 
     uint64_t *pt = phys_to_ptr(ENTRY_ADDR(entry));
     entry = pt[PT_INDEX(virt)];
     if (!(entry & VMM_PRESENT))
         return 0;
+    all_user = all_user && (entry & VMM_USER) != 0;
+
+    if (leaf_entry_out)      *leaf_entry_out = entry;
+    if (all_levels_user_out) *all_levels_user_out = all_user;
 
     return ENTRY_ADDR(entry) + (virt & 0xFFF);
+}
+
+uint64_t vmm_get_physical_in(uint64_t pml4_phys, uint64_t virt)
+{
+    return resolve_in(pml4_phys, virt, NULL, NULL);
+}
+
+uint64_t vmm_get_physical(uint64_t virt)
+{
+    return vmm_get_physical_in(g_pml4_phys, virt);
 }
 
 bool vmm_is_mapped(uint64_t virt)
@@ -253,7 +304,133 @@ bool vmm_is_mapped(uint64_t virt)
     return vmm_get_physical(virt) != 0;
 }
 
+bool vmm_user_range_ok(uint64_t pml4_phys, uint64_t ptr, uint64_t len)
+{
+    /* The whole range has to be inside the half a process owns, which
+     * rules out a kernel pointer being passed down and read on the
+     * program's behalf. */
+    if (ptr >= VMM_USER_LIMIT)
+        return false;
+    if (len > VMM_USER_LIMIT - ptr)
+        return false;
+    if (len == 0)
+        return true;
+
+    uint64_t first = ptr & ~(PAGE_SIZE - 1);
+    uint64_t last  = (ptr + len - 1) & ~(PAGE_SIZE - 1);
+
+    for (uint64_t page = first; ; page += PAGE_SIZE) {
+        bool all_user = false;
+
+        if (!resolve_in(pml4_phys, page, NULL, &all_user))
+            return false;
+
+        /* The user bit has to be set at every level, not just the leaf:
+         * an entry that is user-accessible under a supervisor-only
+         * parent table faults rather than resolving. */
+        if (!all_user)
+            return false;
+
+        if (page == last)
+            break;
+    }
+
+    return true;
+}
+
 uint64_t vmm_pml4_physical(void)
 {
     return g_pml4_phys;
+}
+
+/* ------------------------------------------------------------------ */
+/* Address spaces                                                      */
+/* ------------------------------------------------------------------ */
+
+void vmm_switch_to(uint64_t pml4_phys)
+{
+    if (!pml4_phys)
+        return;
+
+    __asm__ volatile("mov %0, %%cr3" : : "r"(pml4_phys) : "memory");
+}
+
+uint64_t vmm_create_address_space(void)
+{
+    if (!g_ready)
+        return 0;
+
+    uint64_t frame = pmm_alloc_page();
+    if (!frame)
+        return 0;
+
+    uint64_t *new_pml4 = phys_to_ptr(frame);
+    uint64_t *cur_pml4 = phys_to_ptr(g_pml4_phys);
+
+    memset(new_pml4, 0, PAGE_SIZE);
+
+    /*
+     * Share the kernel half by reference, not by copy.
+     *
+     * The tables these entries point at are the kernel's own, and every
+     * address space must see the same ones: the HHDM so that a physical
+     * address reached through the bootloader's offset keeps working, and
+     * the kernel image so that an interrupt taken in Ring 3 lands in
+     * mapped code.
+     *
+     * The lower half is left empty and belongs to the process.
+     */
+    for (int i = VMM_KERNEL_PML4_INDEX; i < ENTRIES_PER_TABLE; i++)
+        new_pml4[i] = cur_pml4[i];
+
+    return frame;
+}
+
+void vmm_destroy_address_space(uint64_t pml4_phys)
+{
+    if (!g_ready || !pml4_phys)
+        return;
+
+    uint64_t *pml4 = phys_to_ptr(pml4_phys);
+
+    /*
+     * Only the lower half is walked. The upper half points at the
+     * kernel's tables, and freeing those would take the kernel down with
+     * the process that happened to exit first.
+     */
+    for (int i = 0; i < VMM_KERNEL_PML4_INDEX; i++) {
+        uint64_t entry = pml4[i];
+        if (!(entry & VMM_PRESENT))
+            continue;
+
+        uint64_t *pdpt = phys_to_ptr(ENTRY_ADDR(entry));
+
+        for (int j = 0; j < ENTRIES_PER_TABLE; j++) {
+            uint64_t pdpt_e = pdpt[j];
+            if (!(pdpt_e & VMM_PRESENT))
+                continue;
+
+            uint64_t *pd = phys_to_ptr(ENTRY_ADDR(pdpt_e));
+
+            for (int k = 0; k < ENTRIES_PER_TABLE; k++) {
+                uint64_t pd_e = pd[k];
+                if (!(pd_e & VMM_PRESENT))
+                    continue;
+
+                /* A PD entry that maps a 2 MiB page points at memory, not
+                 * at a table. Freeing it here would free a frame that is
+                 * still in use somewhere; this kernel never creates such
+                 * an entry in a process space, and the test is what makes
+                 * that a property of the code rather than of its callers. */
+                if (!(pd_e & VMM_HUGE))
+                    pmm_free_page(ENTRY_ADDR(pd_e));
+            }
+
+            pmm_free_page(ENTRY_ADDR(pdpt_e));
+        }
+
+        pmm_free_page(ENTRY_ADDR(entry));
+    }
+
+    pmm_free_page(pml4_phys);
 }

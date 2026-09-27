@@ -44,6 +44,15 @@ void idt_set_handler(uint8_t vector, void (*handler)(void), uint8_t ist,
     e->zero        = 0;
 }
 
+void idt_set_dpl(uint8_t vector, uint8_t dpl)
+{
+    struct idt_entry *e = &g_idt[vector];
+
+    /* The descriptor privilege level lives in bits 6:5 of the type and
+     * attribute byte, below the present bit and above the gate type. */
+    e->type_attr = (uint8_t)((e->type_attr & ~0x60) | ((dpl & 0x03) << 5));
+}
+
 void idt_init(void)
 {
     memset(&g_idt, 0, sizeof(g_idt));

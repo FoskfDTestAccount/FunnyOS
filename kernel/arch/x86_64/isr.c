@@ -14,6 +14,7 @@
 #include <funnyos/arch/x86_64/irq.h>
 #include <funnyos/kprintf.h>
 #include <funnyos/panic.h>
+#include <funnyos/process.h>
 
 #include <stdint.h>
 #include <stddef.h>
@@ -137,9 +138,41 @@ void isr_dispatch(struct interrupt_frame *f);
 void isr_dispatch(struct interrupt_frame *f)
 {
     /* A registered device interrupt completes here and the interrupted
-     * code resumes. Everything past this point is fatal. */
+     * code resumes. Everything past this point is fatal to something. */
     if (irq_dispatch(f))
         return;
+
+    /*
+     * A fault raised by Ring 3 code belongs to that program.
+     *
+     * This is the whole reason programs run in Ring 3, and it is the one
+     * place FunnyOS deliberately departs from DOS: a wild pointer ends
+     * the program that made it, and nothing else. The kernel reports
+     * what happened and unwinds -- it does not dump its own registers
+     * and it does not halt.
+     *
+     * The check is on the saved code segment's privilege level, which is
+     * the architectural answer to "where was this raised from" and the
+     * only one that cannot be spoofed by the program.
+     */
+    if ((f->cs & 3) == 3) {
+        kprintf("\n*** FunnyOS: program fault ***\n");
+        kprintf("  Process     : faulted in Ring 3\n");
+        kprintf("  Vector      : %llu  %s\n",
+                (unsigned long long)f->vector, exception_name(f->vector));
+        kprintf("  Error code  : 0x%016llx\n",
+                (unsigned long long)f->error_code);
+        if (f->vector == 14) {
+            kprintf("  CR2         : 0x%016llx  (faulting address)\n",
+                    (unsigned long long)read_cr2());
+        }
+        kprintf("  RIP         : 0x%016llx\n", (unsigned long long)f->rip);
+        kprintf("  RSP         : 0x%016llx\n", (unsigned long long)f->rsp);
+        kprintf("  The kernel is unaffected; ending the process.\n");
+
+        /* Never returns. */
+        process_abort_on_fault(f->vector);
+    }
 
     kprintf("\n");
     kprintf("==================== CPU EXCEPTION ====================\n");
