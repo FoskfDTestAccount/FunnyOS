@@ -29,6 +29,10 @@ uint64_t bootinfo_firmware_type(void);
  * address `phy` is `bootinfo_hhdm_offset() + phy`. */
 uint64_t bootinfo_hhdm_offset(void);
 
+/* Kernel command line supplied by the bootloader, or "" when absent.
+ * Used to gate opt-in behaviour such as fault injection in tests. */
+const char *bootinfo_cmdline(void);
+
 /* Physical memory map. */
 uint64_t bootinfo_memmap_entry_count(void);
 const struct limine_memmap_entry *bootinfo_memmap_entry(uint64_t index);

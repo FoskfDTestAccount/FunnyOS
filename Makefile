@@ -56,6 +56,7 @@ VOLID := FUNNYOS
 
 TOOLS_DIR := tools
 RUN_TEST  := $(TOOLS_DIR)/run-qemu-test.sh
+RUN_FAULT_TEST := $(TOOLS_DIR)/run-fault-test.sh
 
 # ---------------------------------------------------------------------
 # Toolchain
@@ -100,14 +101,18 @@ LDFLAGS := -T linker.ld -nostdlib -z max-page-size=0x1000
 C_SOURCES   := $(shell find kernel libk -name '*.c'   | sort)
 ASM_SOURCES := $(shell find kernel      -name '*.asm' | sort)
 
-C_OBJS   := $(patsubst %.c,  $(OBJ_DIR)/%.o,$(C_SOURCES))
-ASM_OBJS := $(patsubst %.asm,$(OBJ_DIR)/%.o,$(ASM_SOURCES))
+# Object paths keep the source extension. Without it, foo.c and foo.asm in
+# the same directory both map to foo.o and silently clobber each other --
+# which shows up as a linker error naming a symbol twice, pointing nowhere
+# near the actual cause.
+C_OBJS   := $(patsubst %.c,  $(OBJ_DIR)/%.c.o,$(C_SOURCES))
+ASM_OBJS := $(patsubst %.asm,$(OBJ_DIR)/%.asm.o,$(ASM_SOURCES))
 OBJS     := $(C_OBJS) $(ASM_OBJS)
 
 # ---------------------------------------------------------------------
 # Targets
 # ---------------------------------------------------------------------
-.PHONY: all run test test-uefi test-all export clean distclean help
+.PHONY: all run test test-uefi test-all test-fault export clean distclean help
 
 all: $(ISO)
 
@@ -115,12 +120,12 @@ $(KERNEL): $(OBJS) linker.ld
 	@echo "  LD      $@"
 	@$(LD) $(LDFLAGS) -o $@ $(OBJS)
 
-$(OBJ_DIR)/%.o: %.c
+$(OBJ_DIR)/%.c.o: %.c
 	@mkdir -p $(@D)
 	@echo "  CC      $<"
 	@$(CC) $(CFLAGS) -c $< -o $@
 
-$(OBJ_DIR)/%.o: %.asm
+$(OBJ_DIR)/%.asm.o: %.asm
 	@mkdir -p $(@D)
 	@echo "  NASM    $<"
 	@$(NASM) $(NASMFLAGS) $< -o $@
@@ -193,6 +198,13 @@ test-all: $(ISO)
 	@bash $(RUN_TEST) $(ISO) bios
 	@bash $(RUN_TEST) $(ISO) uefi
 
+# Boot an image whose kernel command line asks for deliberate fault
+# injection, and assert the exception handler produces a real diagnostic.
+# This is the M1 acceptance test: a fault must be reported, not turned into
+# a triple fault and a silent reboot.
+test-fault: $(ISO)
+	@bash $(RUN_FAULT_TEST) bios
+
 # Copy the ISO into the project directory so other emulators on Windows
 # can open it. Output goes to dist/ rather than the project root because
 # the root holds two phantom files (funyos.iso / funnyos.elf) left behind
@@ -219,6 +231,7 @@ help:
 	@echo "  make test       Run headless and assert (BIOS path)"
 	@echo "  make test-uefi  Run headless and assert (UEFI path)"
 	@echo "  make test-all   Run both boot paths"
+	@echo "  make test-fault Boot with fault injection and check the diagnostic"
 	@echo "  make export     Copy the ISO into the project directory"
 	@echo "  make clean      Remove build artifacts"
 	@echo "  make distclean  Remove build artifacts and download cache"

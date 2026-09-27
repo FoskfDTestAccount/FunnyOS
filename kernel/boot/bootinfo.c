@@ -77,6 +77,12 @@ static volatile struct limine_executable_address_request g_exec_addr_request = {
     .revision = 0,
 };
 
+REQUESTS
+static volatile struct limine_executable_cmdline_request g_cmdline_request = {
+    .id = LIMINE_EXECUTABLE_CMDLINE_REQUEST_ID,
+    .revision = 0,
+};
+
 REQUESTS_END
 static volatile uint64_t g_requests_end_marker[] = LIMINE_REQUESTS_END_MARKER;
 
@@ -168,4 +174,11 @@ uint64_t bootinfo_kernel_virtual_base(void)
     if (!g_exec_addr_request.response)
         return 0;
     return g_exec_addr_request.response->virtual_base;
+}
+
+const char *bootinfo_cmdline(void)
+{
+    if (!g_cmdline_request.response || !g_cmdline_request.response->cmdline)
+        return "";
+    return g_cmdline_request.response->cmdline;
 }

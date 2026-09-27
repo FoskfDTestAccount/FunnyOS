@@ -142,15 +142,20 @@ else
 fi
 
 echo "Assertions ($MODE path):"
-expect_present "x86-64 kernel, M0 boot verification"  "kernel entry ran, serial output works"
+expect_present "x86-64 kernel"                        "kernel entry ran, serial output works"
 expect_present "Bootloader     : Limine"               "bootloader info request parsed"
 expect_present "$FW_EXPECT"                           "firmware type confirmed as $MODE"
 expect_present "Base revision  : 3 (confirmed"        "boot protocol base revision accepted"
 expect_present "HHDM offset"                          "HHDM request parsed"
 expect_present "Usable memory"                        "memory map request parsed and summarised"
 expect_present "Framebuffer    :"                     "framebuffer request parsed"
-expect_present "M0 boot verification PASSED"          "completion marker present"
+expect_present "Boot verification PASSED"             "completion marker present"
 expect_absent  "PANIC"                                "no kernel panic"
+
+# M1: descriptor tables. Without these a fault is a silent triple fault.
+expect_present "GDT/TSS        : installed"           "GDT and TSS loaded"
+expect_present "IDT            : 256 vectors"         "IDT installed"
+expect_present "Fault handling : active"              "exception reporting enabled"
 
 # These two guard the VMware boot failure: when Limine cannot match the
 # device it booted from with a readable volume, it warns and then fails to
@@ -161,9 +166,9 @@ expect_absent  "Could not meaningfully match"         "bootloader matched boot d
 
 echo
 if [ "$FAILED" -eq 0 ]; then
-    echo "====> M0 test PASSED ($MODE)"
+    echo "====> boot test PASSED ($MODE)"
     exit 0
 else
-    echo "====> M0 test FAILED ($MODE)"
+    echo "====> boot test FAILED ($MODE)"
     exit 1
 fi

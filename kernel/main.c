@@ -1,15 +1,21 @@
 /*
  * FunnyOS kernel entry point.
  *
- * M0 goal: prove the boot chain works end to end. Four things are
- * verified here:
- *   1. Limine loaded the kernel correctly and jumped to _start in 64-bit
- *      long mode.
- *   2. The stack the kernel built for itself is usable, so C code runs.
- *   3. The serial output channel works. QEMU can capture it headlessly,
- *      which is what makes the automated test possible.
- *   4. Limine requests were parsed correctly and memory map /
- *      framebuffer information is readable.
+ * What this verifies, in order:
+ *
+ *   1. Limine loaded the kernel into 64-bit long mode and jumped to
+ *      _start, and the stack the kernel built for itself is usable.
+ *   2. The output channels work: serial (captured headlessly by the test
+ *      harness) and the framebuffer console (what a real screen shows).
+ *   3. The boot protocol requests parsed correctly: memory map, HHDM,
+ *      framebuffer, firmware type, kernel image address.
+ *   4. Descriptor tables are installed, so a CPU fault is reported rather
+ *      than becoming a triple fault and a silent reboot. This is the whole
+ *      point of M1.
+ *
+ * A deliberate fault can be injected by booting with the command line
+ * option `selftest=fault`, which exercises the exception path on demand
+ * instead of waiting for a real bug.
  */
 #include <funnyos/bootinfo.h>
 #include <funnyos/fb.h>
@@ -17,10 +23,21 @@
 #include <funnyos/panic.h>
 #include <funnyos/serial.h>
 
+#include <funnyos/arch/x86_64/gdt.h>
+#include <funnyos/arch/x86_64/idt.h>
+
 #include <stdbool.h>
 #include <libk/string.h>
 
 extern char __kernel_end[];
+
+/*
+ * Below the kernel and outside the HHDM, so it is guaranteed unmapped
+ * under base revision 3: the unconditional identity map of the low 4 GiB
+ * is dropped at that revision. Chosen to be recognisable in a register
+ * dump at a glance.
+ */
+#define FAULT_TEST_ADDRESS 0x00000000DEADB000ULL
 
 /* Translate the firmware type enum into a human-readable name. */
 static const char *firmware_type_name(uint64_t type)
@@ -99,9 +116,21 @@ void kmain(void)
      * simply stays serial-only, which the summary below reports. */
     bool fb_ok = fb_init();
 
+    /*
+     * Descriptor tables go before anything else that can fault. Loading the
+     * IDT is what turns a CPU exception from a silent triple fault into a
+     * handler that can explain itself.
+     *
+     * Order matters: the IDT entries name a code selector, and the IST
+     * stacks live in the TSS, so the GDT has to be in place first.
+     */
+    gdt_init();
+    idt_init();
+
     kprintf("\n");
     kprintf("==================================================\n");
-    kprintf("  FunnyOS -- x86-64 kernel, M0 boot verification\n");
+    kprintf("  FunnyOS -- x86-64 kernel\n");
+    kprintf("  boot chain and kernel infrastructure check\n");
     kprintf("==================================================\n");
     kprintf("\n");
 
@@ -126,6 +155,11 @@ void kmain(void)
     kprintf("  Virtual base   : %p\n", (void *)bootinfo_kernel_virtual_base());
     kprintf("  Image end      : %p\n", (void *)__kernel_end);
 
+    kprintf("\n[cpu]\n");
+    kprintf("  GDT/TSS        : installed, TSS at %p\n", (void *)tss_address());
+    kprintf("  IDT            : 256 vectors installed\n");
+    kprintf("  Fault handling : active (#DF and NMI on dedicated IST stacks)\n");
+
     kprintf("\n[memory]\n");
     kprintf("  HHDM offset    : %p\n", (void *)bootinfo_hhdm_offset());
     print_memory_summary();
@@ -149,13 +183,31 @@ void kmain(void)
 
     kprintf("\n");
     kprintf("==================================================\n");
-    kprintf("  M0 boot verification PASSED. Halting.\n");
+    kprintf("  Boot verification PASSED.\n");
     kprintf("==================================================\n");
-    kprintf("\nThis output is mirrored to COM1. The kernel has no scheduler\n");
-    kprintf("yet, so it halts here by design after proving the boot chain.\n");
 
-    /* M0 stops here. M1 will install the IDT, page tables and physical
-     * memory manager at this point. */
+    /*
+     * Opt-in fault injection. Booting with `selftest=fault` on the command
+     * line exercises the exception path deliberately, so the diagnostic
+     * machinery can be tested without waiting for a real bug to appear.
+     * Normal boots never reach this.
+     */
+    const char *cmdline = bootinfo_cmdline();
+    if (strstr(cmdline, "selftest=fault")) {
+        kprintf("\n[fault self-test]\n");
+        kprintf("  Command line requested fault injection.\n");
+        kprintf("  Reading from unmapped address %p ...\n",
+                (void *)FAULT_TEST_ADDRESS);
+
+        volatile uint64_t *unmapped = (volatile uint64_t *)FAULT_TEST_ADDRESS;
+        (void)*unmapped;    /* the fault handler takes over from here */
+
+        /* Not reached: the page fault handler does not return. */
+        panic("fault injection did not fault at %p", (void *)FAULT_TEST_ADDRESS);
+    }
+
+    kprintf("\nThis output is mirrored to COM1. The kernel has no scheduler\n");
+    kprintf("yet, so it halts here by design.\n");
     __asm__ volatile("cli");
     for (;;)
         __asm__ volatile("hlt");

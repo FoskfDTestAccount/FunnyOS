@@ -19,4 +19,7 @@ size_t strlen(const char *s);
 int    strcmp(const char *a, const char *b);
 int    strncmp(const char *a, const char *b, size_t n);
 
+/* First occurrence of `needle` in `haystack`, or NULL. */
+const char *strstr(const char *haystack, const char *needle);
+
 #endif /* FUNNYOS_LIBK_STRING_H */

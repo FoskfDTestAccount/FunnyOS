@@ -80,3 +80,21 @@ int strncmp(const char *a, const char *b, size_t n)
         return 0;
     return (int)(unsigned char)*a - (int)(unsigned char)*b;
 }
+
+const char *strstr(const char *haystack, const char *needle)
+{
+    if (!*needle)
+        return haystack;
+
+    for (; *haystack; haystack++) {
+        const char *h = haystack;
+        const char *n = needle;
+        while (*h && *n && *h == *n) {
+            h++;
+            n++;
+        }
+        if (!*n)
+            return haystack;
+    }
+    return NULL;
+}
