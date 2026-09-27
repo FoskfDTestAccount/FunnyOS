@@ -18,7 +18,9 @@
  * instead of waiting for a real bug.
  */
 #include <funnyos/bootinfo.h>
+#include <funnyos/console.h>
 #include <funnyos/fb.h>
+#include <funnyos/kbd.h>
 #include <funnyos/kprintf.h>
 #include <funnyos/panic.h>
 #include <funnyos/serial.h>
@@ -336,6 +338,14 @@ void kmain(void)
     acpi_init();
     lapic_init();
     ioapic_init();
+
+    /*
+     * The keyboard needs the IO APIC, because that is what routes IRQ 1
+     * to a vector, and it needs an interrupt handler registry to claim
+     * one. Both are in place by here.
+     */
+    bool kbd_ok = kbd_init();
+
     timer_init();
 
     kprintf("\n");
@@ -411,15 +421,24 @@ void kmain(void)
     kprintf("  COM1 (115200 8N1): %s\n",
             serial_is_ready() ? "loopback self-test passed"
                               : "transmit works, loopback self-test failed");
+    kprintf("  Keyboard       : %s\n",
+            kbd_ok ? "PS/2, IRQ 1 routed through the IO APIC"
+                   : "NOT AVAILABLE");
 
     kprintf("\n[self-test]\n");
     bool mem_ok = run_memory_selftest();
     kprintf("  Memory subsystem: %s\n",
             mem_ok ? "all checks passed" : "FAILURES, see above");
 
+    bool kbd_decode_ok = kbd_selftest();
+    kprintf("  Scancode decoder: %s\n",
+            kbd_decode_ok ? "all cases passed" : "FAILURES, see above");
+
+    bool passed = mem_ok && kbd_decode_ok;
+
     kprintf("\n");
     kprintf("==================================================\n");
-    kprintf("  Boot verification %s.\n", mem_ok ? "PASSED" : "FAILED");
+    kprintf("  Boot verification %s.\n", passed ? "PASSED" : "FAILED");
     kprintf("==================================================\n");
 
     /*
@@ -466,10 +485,26 @@ void kmain(void)
     kprintf("  Interrupt count: %llu\n",
             (unsigned long long)irq_total_count());
 
-    kprintf("\nThis output is mirrored to COM1. The kernel has no scheduler\n");
-    kprintf("yet, so it idles here by design, ticking at %u Hz.\n",
-            (unsigned)timer_hz());
+    /*
+     * Scaffolding for M2.
+     *
+     * The interactive interface M2 calls for is FunnyCOM, a Ring 3 shell,
+     * which does not exist yet. Until it does, the kernel reads a line and
+     * echoes it back -- enough to exercise the whole input path end to
+     * end: the 8042 raises IRQ 1, the IO APIC routes it, the handler
+     * decodes the scancodes, the line discipline edits them, and the
+     * result comes back out on both output channels.
+     *
+     * This block is replaced by the shell, not kept as a fallback.
+     */
+    kprintf("\n[console loop]\n");
+    kprintf("  Type a line and press Enter; the kernel echoes it back.\n");
 
-    for (;;)
-        __asm__ volatile("hlt");
+    char line[128];
+    for (;;) {
+        console_prompt("  > ");
+        size_t length = console_read_line(line, sizeof(line));
+        kprintf("  echo (%llu bytes): \"%s\"\n",
+                (unsigned long long)length, line);
+    }
 }

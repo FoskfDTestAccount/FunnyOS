@@ -57,6 +57,7 @@ VOLID := FUNNYOS
 TOOLS_DIR := tools
 RUN_TEST  := $(TOOLS_DIR)/run-qemu-test.sh
 RUN_FAULT_TEST := $(TOOLS_DIR)/run-fault-test.sh
+RUN_INPUT_TEST := $(TOOLS_DIR)/run-input-test.sh
 
 # ---------------------------------------------------------------------
 # Toolchain
@@ -112,7 +113,7 @@ OBJS     := $(C_OBJS) $(ASM_OBJS)
 # ---------------------------------------------------------------------
 # Targets
 # ---------------------------------------------------------------------
-.PHONY: all run test test-uefi test-all test-fault export clean distclean help
+.PHONY: all run test test-uefi test-all test-fault test-input check export clean distclean help
 
 all: $(ISO)
 
@@ -205,6 +206,20 @@ test-all: $(ISO)
 test-fault: $(ISO)
 	@bash $(RUN_FAULT_TEST) bios
 
+# Type on the emulated keyboard through the QEMU monitor and assert on
+# what comes back. This is the only test that covers the interrupt path
+# from the 8042 to the line discipline; the decoder's own self-test proves
+# the translation tables but cannot prove an interrupt ever arrives.
+test-input: $(ISO)
+	@bash $(RUN_INPUT_TEST) $(ISO) bios
+
+# Everything. Use this before committing.
+check: $(ISO)
+	@bash $(RUN_TEST) $(ISO) bios
+	@bash $(RUN_TEST) $(ISO) uefi
+	@bash $(RUN_FAULT_TEST) bios
+	@bash $(RUN_INPUT_TEST) $(ISO) bios
+
 # Copy the ISO into the project directory so other emulators on Windows
 # can open it. Output goes to dist/ rather than the project root because
 # the root holds two phantom files (funyos.iso / funnyos.elf) left behind
@@ -232,6 +247,8 @@ help:
 	@echo "  make test-uefi  Run headless and assert (UEFI path)"
 	@echo "  make test-all   Run both boot paths"
 	@echo "  make test-fault Boot with fault injection and check the diagnostic"
+	@echo "  make test-input Type on the emulated keyboard and check the echo"
+	@echo "  make check      Run every test above"
 	@echo "  make export     Copy the ISO into the project directory"
 	@echo "  make clean      Remove build artifacts"
 	@echo "  make distclean  Remove build artifacts and download cache"
