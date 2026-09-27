@@ -1,0 +1,37 @@
+# =====================================================================
+#  FunnyOS 行尾策略
+#
+#  本项目在 Windows 上编辑、在 WSL 里构建，因此行尾符必须显式锁定。
+#
+#  为什么强制 LF：shell 脚本和 Makefile 一旦带上 CRLF，在 WSL 中
+#  会以极隐蔽的方式失效——"VAR=value\r" 的变量值尾部多一个回车，
+#  导致路径判断、命令参数全部错位，而且不报任何语法错误。
+#  这不是理论风险，本项目已经因此排查过一轮。
+#
+#  注意：Windows 版 Git 默认 core.autocrlf=true，会把检出的文件
+#  全部转成 CRLF。下面的设置会覆盖该行为。
+# =====================================================================
+
+# 默认：文本文件统一使用 LF
+* text=auto eol=lf
+
+# 明确标注为文本且必须是 LF 的类型
+*.c        text eol=lf
+*.h        text eol=lf
+*.asm      text eol=lf
+*.ld       text eol=lf
+*.sh       text eol=lf
+*.conf     text eol=lf
+*.md       text eol=lf
+Makefile   text eol=lf
+.gitignore text eol=lf
+
+# 二进制文件：不做任何行尾转换
+*.iso   binary
+*.elf   binary
+*.o     binary
+*.bin   binary
+*.fd    binary
+*.img   binary
+*.sys   binary
+*.EFI   binary
