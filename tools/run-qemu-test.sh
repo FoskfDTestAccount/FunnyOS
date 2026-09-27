@@ -152,6 +152,13 @@ expect_present "Framebuffer    :"                     "framebuffer request parse
 expect_present "M0 boot verification PASSED"          "completion marker present"
 expect_absent  "PANIC"                                "no kernel panic"
 
+# These two guard the VMware boot failure: when Limine cannot match the
+# device it booted from with a readable volume, it warns and then fails to
+# resolve a boot()-relative kernel path. The config now locates the kernel
+# by filesystem label instead, so neither message should ever appear.
+expect_absent  "Failed to open executable"            "bootloader resolved the kernel path"
+expect_absent  "Could not meaningfully match"         "bootloader matched boot device to a volume"
+
 echo
 if [ "$FAILED" -eq 0 ]; then
     echo "====> M0 test PASSED ($MODE)"

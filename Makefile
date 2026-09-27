@@ -46,6 +46,14 @@ ISO      := $(BUILD_DIR)/funyos.iso
 LIMINE_DIR := boot/limine/limine-binary
 LIMINE     := $(LIMINE_DIR)/limine
 
+# ISO 9660 volume identifier.
+#
+# This is load-bearing, not cosmetic: boot/limine.conf locates the kernel
+# with fslabel(VOLID), so the label baked into the image and the label in
+# the config must match exactly. The build verifies this below, because a
+# mismatch produces a kernel that builds fine and then cannot be booted.
+VOLID := FUNNYOS
+
 TOOLS_DIR := tools
 RUN_TEST  := $(TOOLS_DIR)/run-qemu-test.sh
 
@@ -117,7 +125,28 @@ $(OBJ_DIR)/%.o: %.asm
 	@echo "  NASM    $<"
 	@$(NASM) $(NASMFLAGS) $< -o $@
 
-# Build the bootable ISO (hybrid: BIOS + UEFI in one image)
+# Build the bootable ISO. BIOS and UEFI both come in through El Torito
+# entries, so a single image serves both firmware types.
+#
+# Two deliberate omissions, both learned from a VMware boot failure:
+#
+#   No `limine bios-install`. That step exists to make an image bootable as
+#   a hard disk (a USB stick), and it rewrites the partition table to do it.
+#   CD boot does not need it, and the MBR it left behind -- with a 32 KiB
+#   "bootable" partition holding Limine's stage 2 -- was one more structure
+#   for firmware to misread.
+#
+#   No `--protective-msdos-label`. Dropping it leaves the image with a GPT
+#   and no DOS partition table at all, which is one less thing a BIOS can
+#   mistake the optical disc for.
+#
+# -efi-boot-part stays: UEFI needs it to associate the boot device with a
+# readable volume. Without it Limine reports "Could not meaningfully match
+# the boot device handle with a volume" and cannot find the kernel.
+#
+# If you want a USB-bootable image instead, the sequence is: add
+# --protective-msdos-label back, then run `limine bios-install` on the
+# result. That produces an isohybrid image you can dd onto a stick.
 $(ISO): $(KERNEL)
 	@echo "  Preparing ISO tree"
 	@rm -rf $(ISO_ROOT)
@@ -129,13 +158,20 @@ $(ISO): $(KERNEL)
 	@cp $(LIMINE_DIR)/limine-uefi-cd.bin   $(ISO_ROOT)/boot/
 	@echo "  XORRISO $@"
 	@xorriso -as mkisofs -R -r -J \
+	    -V $(VOLID) \
 	    -b boot/limine-bios-cd.bin \
 	    -no-emul-boot -boot-load-size 4 -boot-info-table \
 	    --efi-boot boot/limine-uefi-cd.bin \
-	    -efi-boot-part --efi-boot-image --protective-msdos-label \
-	    $(ISO_ROOT) -o $@ 2>/dev/null
-	@echo "  Installing BIOS boot stages"
-	@$(LIMINE) bios-install $@ >/dev/null
+	    -efi-boot-part --efi-boot-image \
+	    $(ISO_ROOT) -o $@ >/dev/null 2>&1
+	@label=$$(xorriso -indev $@ -pvd_info 2>&1 | sed -n 's/^Volume [Ii]d *: *//p' | head -1 | tr -d "'"); \
+	if [ "$$label" != "$(VOLID)" ]; then \
+	    echo "  ERROR: ISO volume id is '$$label', expected '$(VOLID)'."; \
+	    echo "         boot/limine.conf resolves the kernel via fslabel($(VOLID));"; \
+	    echo "         with a mismatched label the image will not boot."; \
+	    exit 1; \
+	fi; \
+	echo "  Volume id verified: $$label"
 	@echo ""
 	@echo "  Built: $@"
 

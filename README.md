@@ -86,9 +86,9 @@ FunnyOS/
 └── Makefile
 ```
 
-## 两个必须知道的坑
+## 三个必须知道的坑
 
-以下两点都是实际踩出来的，不是理论风险。
+以下三点都是实际踩出来的，不是理论风险。
 
 ### 1. 构建产物不在项目目录里
 
@@ -108,6 +108,26 @@ FunnyOS/
 - 内核目前不保存 FPU/SSE 状态，编译器生成的任何浮点或向量指令都会在后续上下文切换时静默损坏数据。
 
 这两个标志写在 `Makefile` 的 `CFLAGS` 里，不要移除。
+
+### 3. 内核路径用 `fslabel()`，不要用 `boot()`
+
+`boot():` 的含义是"引导驱动器上包含配置文件的那个分区"。这依赖 Limine 成功地把引导设备和某个可读卷对应起来。某些固件/虚拟机组合做不到，Limine 会警告：
+
+```
+Could not meaningfully match the boot device handle with a volume
+```
+
+然后回退到扫描含配置的卷。配置仍然找得到，但 `boot():` 不再可解析，内核于是打不开：
+
+```
+PANIC: Failed to open executable with path `boot():/boot/funyos.elf`
+```
+
+这在 VMware Workstation 上实测触发过（同样的镜像在 QEMU 里正常，所以本地测试抓不住）。改用 `fslabel()` 后，卷是靠 ISO 9660 卷标识符定位的，完全不经过引导设备匹配这一步。
+
+标签由 `Makefile` 里的 `VOLID` 定义，构建时会校验镜像确实带上了它——因为标签对不上会造出一个"编译通过、测试通过、但无法引导"的镜像，这种失败模式最难排查。
+
+同理，构建**不做** `limine bios-install`、也**不加** `--protective-msdos-label`：那是为"写入 U 盘当硬盘启动"准备的，会给镜像留下 DOS 分区表，让固件有机会把光盘误判成硬盘。需要 U 盘启动版本的话，把这两步加回去即可（`Makefile` 里有说明）。
 
 ## 设计要点速查
 
@@ -208,9 +228,9 @@ FunnyOS/
 └── Makefile
 ```
 
-## Two things you need to know
+## Three things you need to know
 
-Both of these were hit in practice, not theorised.
+All three were hit in practice, not theorised.
 
 ### 1. Build artifacts do not live in the project directory
 
@@ -230,6 +250,26 @@ Sources stay in the project directory (visible from Windows, suitable for versio
 - The kernel does not save FPU/SSE state, so any floating point or vector instruction the compiler emits would silently corrupt data on the next context switch.
 
 Both flags live in `CFLAGS` in the `Makefile`. Do not remove them.
+
+### 3. The kernel path uses `fslabel()`, not `boot()`
+
+`boot():` means "the partition holding the config file, on the boot drive". That depends on Limine successfully matching the device it was booted from with a readable volume. Some firmware/VM combinations fail that match, and Limine warns:
+
+```
+Could not meaningfully match the boot device handle with a volume
+```
+
+It then falls back to scanning for a volume containing a config. The config is still found, but `boot():` no longer resolves, and the kernel cannot be opened:
+
+```
+PANIC: Failed to open executable with path `boot():/boot/funyos.elf`
+```
+
+This was observed on VMware Workstation. The same image booted fine under QEMU, so local testing does not catch it. `fslabel()` sidesteps the whole thing: it locates the volume by its ISO 9660 volume identifier, with no boot-device matching involved.
+
+The label comes from `VOLID` in the `Makefile`, and the build verifies the image actually carries it — because a mismatched label produces an image that compiles, passes every test, and then refuses to boot, which is the nastiest failure mode there is.
+
+For the same reason the build does **not** run `limine bios-install` and does **not** pass `--protective-msdos-label`: those exist to make an image bootable as a hard disk (a USB stick), and they leave a DOS partition table behind that gives firmware the chance to mistake the optical disc for a hard drive. If you do want a USB-bootable image, add both back (`Makefile` explains where).
 
 ## Design decisions at a glance
 
