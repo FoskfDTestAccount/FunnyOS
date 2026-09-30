@@ -9,8 +9,8 @@
 /* ------------------------------------------------------------------ */
 
 static vm86_op_fn       g_table[256];
-static const char      *g_owner[256];   /* which group owns each slot */
 static bool             g_built;
+static bool             g_merge_attempted;
 static vm86_conflict_fn g_conflict_fn;
 static void            *g_conflict_ctx;
 
@@ -21,58 +21,72 @@ void vm86_set_conflict_reporter(vm86_conflict_fn fn, void *ctx)
 }
 
 /*
- * Merge one group's table in, reporting anything it claims that is
- * already spoken for.
+ * Merge the groups in, reporting anything two of them both claim.
  *
  * The report is the point. Two groups claiming the same opcode because
  * somebody misread the map is the characteristic failure of splitting
  * this work up, and without a check it is silent: whichever table was
- * merged last simply wins, and the instruction produces the wrong answer
- * only for the encoding that was taken.
+ * merged in last simply wins, and the instruction produces the wrong
+ * answer only for the encoding that was taken.
  *
  * Naming *which two* groups is the other half of that, and it is the
  * half that is easy to leave out. The name of the group being merged in
  * is not enough on its own: the question a reader has is who else wanted
  * the slot, and a report that says a group collided with itself sends
- * them looking for a mistake that is not there. So the owner of each
- * slot is remembered as the tables go in, and a conflict names both.
+ * them looking for a mistake that is not there. So the owner of each slot
+ * is remembered as the tables go in, and a conflict names both.
+ *
+ * The first claim keeps a contested slot. That is a decision rather than
+ * a fact -- the table is broken either way -- but it is the decision that
+ * leaves something runnable behind, and the caller is told by the return
+ * value and by the reporter that what it has is not what it asked for.
  */
-static bool install(const vm86_op_fn *from, const char *name, bool *conflict)
+bool vm86_ops_merge(vm86_op_fn *out, const vm86_op_fn *const *groups,
+                    const char *const *names, size_t count)
 {
+    const char *owner[256];
+    bool        ok = true;
+
     for (int i = 0; i < 256; i++) {
-        if (!from[i])
-            continue;
-
-        if (g_table[i]) {
-            if (g_conflict_fn)
-                g_conflict_fn(g_conflict_ctx, (uint8_t)i, g_owner[i], name);
-            *conflict = true;
-            continue;
-        }
-
-        g_table[i] = from[i];
-        g_owner[i] = name;
+        out[i]   = NULL;
+        owner[i] = NULL;
     }
 
-    return true;
+    for (size_t g = 0; g < count; g++) {
+        for (int i = 0; i < 256; i++) {
+            if (!groups[g][i])
+                continue;
+
+            if (out[i]) {
+                if (g_conflict_fn)
+                    g_conflict_fn(g_conflict_ctx, (uint8_t)i, owner[i], names[g]);
+                ok = false;
+                continue;
+            }
+
+            out[i]   = groups[g][i];
+            owner[i] = names[g];
+        }
+    }
+
+    return ok;
 }
+
+/* The five groups, in the order they are merged -- which is the order
+ * that settles a contested slot, though nothing should be relying on it. */
+static const vm86_op_fn *const g_groups[] = {
+    vm86_ops_alu, vm86_ops_mov, vm86_ops_str, vm86_ops_ctl, vm86_ops_186,
+};
+
+static const char *const g_group_names[] = {
+    "alu", "mov", "str", "ctl", "186",
+};
 
 bool vm86_ops_build(void)
 {
-    bool conflict = false;
+    g_built = vm86_ops_merge(g_table, g_groups, g_group_names,
+                             sizeof(g_groups) / sizeof(g_groups[0]));
 
-    for (int i = 0; i < 256; i++) {
-        g_table[i] = NULL;
-        g_owner[i] = NULL;
-    }
-
-    install(vm86_ops_alu, "alu", &conflict);
-    install(vm86_ops_mov, "mov", &conflict);
-    install(vm86_ops_str, "str", &conflict);
-    install(vm86_ops_ctl, "ctl", &conflict);
-    install(vm86_ops_186, "186", &conflict);
-
-    g_built = !conflict;
     return g_built;
 }
 
@@ -145,8 +159,26 @@ enum vm86_result vm86_step(struct vm86_cpu *cpu)
 
     cpu->insn_count++;
 
-    if (!g_built)
+    /*
+     * The table is merged once, not once per instruction.
+     *
+     * vm86_ops_build() answers false when two groups claim the same
+     * opcode, and trying again cannot change that answer: the five tables
+     * are const. Trying again every instruction would run the whole
+     * 1280-slot merge once per instruction executed, which turns a table
+     * mistake into a machine that is orders of magnitude too slow and
+     * still running the wrong handler for the opcode that was contested.
+     *
+     * A failure is not swallowed. The reporter installed by
+     * vm86_set_conflict_reporter() was called with the opcode and both
+     * group names at the moment it was found, and vm86_ops_table()
+     * answers NULL from then on -- which is what an embedder that wants
+     * to refuse to run checks.
+     */
+    if (!g_built && !g_merge_attempted) {
+        g_merge_attempted = true;
         vm86_ops_build();
+    }
 
     vm86_op_fn handler = g_table[opcode];
 

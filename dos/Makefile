@@ -84,6 +84,70 @@ HARNESS_C := tests/harness.c
 # adding them at once.
 SUITES := $(patsubst tests/test_%.c,%,$(wildcard tests/test_*.c))
 
+# --- The corpus suite -------------------------------------------------
+#
+# Everything else in tests/ is written in C and hands the interpreter a
+# handful of bytes. The corpus suite runs whole programs, and a program
+# is easier to read -- and to check against a manual -- as assembly than
+# as a list of hex bytes. So dos/corpus holds nasm sources, and this is
+# what turns them into something a C test can run.
+#
+# The build assembles each one and then converts it with tools/bin2c.py,
+# the same way the top-level Makefile embeds the init program. The point
+# of converting rather than reading the .bin at run time is that the
+# suite then has no files to find and no path to be told: a test that
+# depends on its working directory is a test that fails for a reason
+# having nothing to do with the emulator. (python3 comes from the
+# top-level build, which already needs it for the same script.)
+#
+# None of this is linked into the other suites, so a checkout that never
+# runs the corpus pays one unused pair of rules.
+NASM ?= nasm
+
+CORPUS_SRC   := $(wildcard corpus/*.asm)
+CORPUS_BIN   := $(patsubst corpus/%.asm,$(BUILD)/corpus/%.bin,$(CORPUS_SRC))
+CORPUS_EMBED := $(patsubst corpus/%.asm,$(BUILD)/corpus/%.c,$(CORPUS_SRC))
+
+# Kept rather than deleted after use.
+#
+# A file that exists only to satisfy another rule is an intermediate to
+# make, and make removes intermediates at the end of a run. Here that
+# would mean the assembled binaries -- the exact bytes the suite runs --
+# vanish whenever the build finishes, so a failing sample could not be
+# disassembled without rebuilding it, and every run would re-assemble the
+# whole corpus because the deleted .bin would come back newer than the .c
+# built from it.
+.SECONDARY: $(CORPUS_BIN)
+
+# nasm is the one tool here that the rest of dos/ does not need, so its
+# absence is worth a sentence rather than a shell's "command not found" --
+# and worth saying before the first sample rather than after the last.
+# The top-level build already requires nasm for the kernel, so this is a
+# check for people building this directory on its own.
+$(BUILD)/corpus/%.bin: corpus/%.asm
+	@mkdir -p $(@D)
+	@command -v $(NASM) >/dev/null 2>&1 || { \
+	    echo "  !!    $(NASM) is not installed."; \
+	    echo "        dos/corpus builds its samples from the .asm files"; \
+	    echo "        in corpus/, so the corpus suite cannot be run"; \
+	    echo "        without it."; \
+	    echo "        On Debian and Ubuntu:  apt-get install nasm"; \
+	    exit 1; \
+	}
+	@echo "  NASM    $<"
+	@$(NASM) -f bin $< -o $@
+
+$(BUILD)/corpus/%.c: $(BUILD)/corpus/%.bin ../tools/bin2c.py
+	@echo "  EMBED   $@"
+	@python3 ../tools/bin2c.py $< corpus_$(basename $(@F)) $@
+
+# The replayer and its header, added to the one suite that uses them.
+#
+# replay.h is an order-only prerequisite so that editing it rebuilds the
+# suite without being handed to the compiler: everything in $^ ends up on
+# the command line, and a .h file there is not a thing to compile.
+$(BUILD)/test_corpus: $(CORPUS_EMBED) corpus/replay.c | corpus/replay.h
+
 .PHONY: all test list clean $(addprefix test-,$(SUITES))
 
 all: test
