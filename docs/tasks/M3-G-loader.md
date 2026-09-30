@@ -58,11 +58,23 @@ struct process *process_create(const char *name, const void *image,
 
 **为什么用链接器符号而不是手写常量:** 手写的常量会和 `.bss` 的实际大小悄悄脱钩。有人给 VM 进程加一个全局数组,`memory_size` 不变,于是新数组落在映射之外,第一次写就 fault —— 而错误信息会指向那个新数组,不指向这里。
 
-### 2.3 关于 `.bss` 那个 objcopy 技巧
+### 2.3 **删掉** `.bss` 那个 objcopy 技巧
 
-**保留它。** 它现在的作用变成了"让平坦镜像等于需要初始化的部分",而 `memory_size - image_size` 的那一截由加载器清零。两者是互补的,不是重复的。
+> 这一节的第一版写的是"**保留它**",理由是"`.bss` 进镜像、`memory_size - image_size` 那一截由加载器清零,两者互补,不是重复"。**那个理由是错的,已经被实测推翻**(任务 G 的负责人量的):`.bss` 被强制进镜像之后,`_image_end - 0x400000` **恒等于镜像长度**。所谓"尾段"永远是 0 字节。所谓的"互补"其实是"两个机制做同一件事",而其中一件是多余的。
 
-但 `user/link.ld` 里那段注释现在**说的是旧的理由**("A NOBITS .bss would ... fall outside the size the kernel is told, and fault on first touch")。它仍然是真的,但不再完整 —— 现在还有第二个机制。把它更新成同时说明这两件事,否则下一个人读到它会以为 `.bss` 的处理只有一种。
+所以:**把 `Makefile:239` 那一行 `--set-section-flags .bss=alloc,load,contents` 删掉**,只留 `objcopy -O binary`。
+
+三条理由,第三条最要紧:
+
+1. 那个技巧存在的**全部理由**,是 Makefile 里紧挨着它的注释自己写的:"The kernel sizes its allocation from that length, so a program with uninitialised data would have some of it outside the pages it owns and fault on first touch." **内核不再从那个长度决定分配多少了** —— 它现在从 `memory_size` 决定。理由消失,技巧就该走。
+2. 保留它、另外再加一个 NOLOAD 段,等于给"一块被清零的内存"留**两套机制**(`.bss` 进镜像、自定义段不进)。读代码的人得先弄明白为什么有两个。
+3. **留下来的那个陷阱还在。** 如果大零区要靠一个自定义段属性才能"不进镜像",那么**有人写了个大数组却忘了加那个属性时,他会得到 96 MB 的生成 C 源码** —— 也就是第一节那个问题原样复发,而且是在一个看起来完全正常的 `static uint8_t buf[N];` 上复发。删掉技巧之后,`.bss` 里任何大小的零数组都自然落在尾段,**没有需要记住的咒语**。
+
+`.bss`(小全局)和 guest RAM(大零区)**从今以后是同一个机制**:都在镜像之外、都由加载器清零。
+
+两处注释**必须跟着改**,因为它们描述的理由已经不存在了:`user/link.ld` 里那段("Marking .bss loadable turns it into real zero bytes that count"),以及 Makefile:229 那段("Two objcopy passes, and the first is the one that matters")—— 现在只剩**一次** objcopy。
+
+改完之后有一个可以直接对照的观测:funnycom 的**镜像会变小**(小的那截正是 `.bss`),而 **`memory_size` 不变**。两个数在 `make` 的输出里都有,值得对一次。
 
 ---
 
@@ -101,8 +113,11 @@ struct process *process_create(const char *name, const void *image,
 
 1. `make` 全绿,`-Werror` 下零警告
 2. `make test` 与 `make test-all` 全绿 —— 特别是 `selftest=userfault` / `userexit` / `fputest` 三条路径
-3. **至少有一个测试证明尾段真的存在、真的被清零、真的可写。** 不能只证明"能起来"。具体来说:一个程序声明一块明显大于它自身代码的 BSS,在尾段的最末尾写一个值再读回来,并且确认它读到的是 0 而不是别的。三条断言都要有,因为"映射了"、"清零了"、"可写"是三个不同的失败方式。
-4. **至少有一个测试证明 `memory_size < image_size` 被拒绝**,并且不泄漏。
+3. **至少有一个测试证明尾段真的存在、真的被清零、真的可写。** 不能只证明"能起来"。具体来说:一个程序声明一块明显大于它自身代码的 `.bss`,在尾段的最末尾**先读到 0、再写一个值、再读回来**。三条断言都要有,因为"映射了"、"清零了"、"可写"是三个不同的失败方式。
+
+   **这个测试要从 Ring 3 做**(给 funnycom 加一个 `selftest=` 模式,让程序用自己的指针读写自己的内存)。理由:要防的失败是"**Ring 3 程序在自己 `.bss` 上 fault**",只有从 Ring 3 走一遍才复现得了。顺带它也证明了页的 U 位,不需要再去读 PTE。
+
+4. **至少有一个测试证明 `memory_size < image_size` 被拒绝**,并且不泄漏。**这条放内核侧的启动自检**(内核没有单元测试框架,启动自检是唯一的位置),折进 `passed`,失败会让 `make test` 的 "Boot verification PASSED" 断掉。
 5. 报告里写:你选了哪种方式把 `memory_size` 从 ELF 传到内核,以及为什么;上面四个数的关系你是怎么保证的。
 
 ---
