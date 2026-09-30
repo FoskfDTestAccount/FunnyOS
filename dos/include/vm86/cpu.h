@@ -58,6 +58,21 @@ enum vm86_seg {
 
 #define VM86_NO_SEGMENT  (-1)   /* no segment override in effect */
 
+/*
+ * No exception was raised.
+ *
+ * The fault field below cannot use zero for this, because zero is already
+ * taken: divide error is vector 0, and the invalid opcode trap is 6. A
+ * field where zero meant both "nothing happened" and "the program divided
+ * by zero" could not answer the one question it exists to answer, and the
+ * only reason that never broke anything is that every caller also looked
+ * at what vm86_step returned.
+ *
+ * Every vector this layer can raise is a real one, so the sentinel sits
+ * outside the range.
+ */
+#define VM86_NO_FAULT   0xFFu
+
 /* ------------------------------------------------------------------ */
 /* FLAGS                                                               */
 /* ------------------------------------------------------------------ */
@@ -151,12 +166,17 @@ struct vm86_cpu {
 
     /*
      * The exception raised by the instruction just executed, as an
-     * interrupt vector, or 0 for none. A handler that raises one sets
-     * this and returns VM86_FAULT; the run loop stops and the caller
-     * decides what to do about it.
+     * interrupt vector, or VM86_NO_FAULT.
      *
-     * Translate from #DE (divide by zero) is vector 0, and the invalid
-     * opcode trap is vector 6.
+     * A handler that raises one sets this and returns VM86_FAULT; the run
+     * loop stops and the caller decides what to do about it. Divide error
+     * is vector 0 and the invalid opcode trap is vector 6.
+     *
+     * Cleared at the start of every instruction, so what is here always
+     * describes the step just taken rather than one from earlier in the
+     * run. Before that clearing existed, a fault left its vector behind
+     * for every later instruction to read -- invisible in practice only
+     * because nothing read the field without checking the result first.
      */
     uint8_t fault;
 

@@ -329,6 +329,45 @@ static void test_pop_sp_ends_at_the_popped_value(struct vm86_cpu *cpu)
     vm86_expect_u16("SP", cpu->sp, 0x2000);
 }
 
+/*
+ * A fault belongs to the instruction that raised it, and none of them is
+ * spelled the same way as "no fault".
+ *
+ * Two properties have to hold at once, and neither did. Divide error is
+ * vector 0, so a field that used zero for "nothing happened" could not
+ * distinguish the two questions anyone would ask it. And nothing cleared
+ * the field between instructions, so a vector outlived the instruction
+ * that raised it and was still there for everything that ran afterwards.
+ *
+ * Neither was visible in practice, and that is the point of asserting
+ * them: every caller also inspected what the step returned, so the field
+ * was never trusted on its own. This is the arrangement the field exists
+ * to make unnecessary, so the case below holds it to that.
+ */
+static void test_a_fault_belongs_to_its_instruction(struct vm86_cpu *cpu)
+{
+    static const uint8_t code[] = { 0xF7, 0xF3,   /* div bx   */
+                                    0x90,         /* nop      */
+                                    0xF4 };       /* hlt      */
+
+    vm86_test_load(cpu, code, sizeof(code));
+    cpu->ax = 0x0000;
+    cpu->dx = 0x0000;
+    cpu->bx = 0x0000;
+
+    vm86_expect_u16("the first step faults", (uint16_t)vm86_step(cpu),
+                    VM86_FAULT);
+    vm86_expect_u16("the vector is divide error", cpu->fault,
+                    VM86_VECTOR_DIVIDE_ERROR);
+    vm86_expect_bool("which is not the same value as no fault at all",
+                     cpu->fault != VM86_NO_FAULT, true);
+
+    vm86_expect_u16("the next step is an ordinary instruction",
+                    (uint16_t)vm86_step(cpu), VM86_CONTINUE);
+    vm86_expect_u16("so it left no vector behind", cpu->fault,
+                    VM86_NO_FAULT);
+}
+
 /* ================================================================== */
 /* Addresses, and the ones that are not memory                         */
 /* ================================================================== */
@@ -3382,6 +3421,8 @@ static const struct vm86_test tests[] = {
       test_push_sp_by_group_five_agrees_with_fifty_four },
     { "pop sp ends at the popped value",
       test_pop_sp_ends_at_the_popped_value },
+    { "a fault belongs to its instruction",
+      test_a_fault_belongs_to_its_instruction },
 
     /* Addresses that are computed but not visited */
     { "lea reads no memory and stores the offset",

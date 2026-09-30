@@ -208,7 +208,7 @@ static void test_bound_accepts_values_inside(struct vm86_cpu *cpu)
     vm86_expect_bool("between them",
                      run_bound(cpu, 0x0010, 0x0020, 0x0018) == VM86_HALT, true);
 
-    vm86_expect_u16("no fault recorded", cpu->fault, 0);
+    vm86_expect_u16("no fault recorded", cpu->fault, VM86_NO_FAULT);
 }
 
 static void test_bound_below_the_lower_bound_faults(struct vm86_cpu *cpu)

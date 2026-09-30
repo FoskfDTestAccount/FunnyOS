@@ -365,7 +365,7 @@ enum vm86_result vm86_dbg_step(struct vm86_cpu *cpu, struct vm86_dbg_trace *trac
         trace->bytes[i] = peek_code(cpu, (uint16_t)(start_ip + i));
 
     trace->result = result;
-    trace->fault  = (result == VM86_FAULT) ? cpu->fault : 0;
+    trace->fault  = (result == VM86_FAULT) ? cpu->fault : VM86_NO_FAULT;
     trace->after  = *cpu;
 
     /*

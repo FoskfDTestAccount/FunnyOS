@@ -162,6 +162,16 @@ enum vm86_result vm86_step(struct vm86_cpu *cpu)
     cpu->prefix.repeat  = 0;
     cpu->prefix.lock    = false;
 
+    /*
+     * The fault belongs to one instruction for the same reason the
+     * prefixes do, and clearing it here is what makes the field mean "the
+     * instruction just executed faulted" rather than "something faulted
+     * at some point". Neither a handler that returns early nor one that
+     * finishes cleanly can leave a vector behind for the next step to
+     * inherit.
+     */
+    cpu->fault = VM86_NO_FAULT;
+
     uint8_t opcode;
 
     for (;;) {

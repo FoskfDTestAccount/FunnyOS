@@ -8,6 +8,10 @@ void vm86_reset(struct vm86_cpu *cpu, struct vm86_mem *mem)
 {
     memset(cpu, 0, sizeof(*cpu));
 
+    /* Zero is divide error, so "no fault" has to be set rather than left
+     * to the memset. See VM86_NO_FAULT. */
+    cpu->fault = VM86_NO_FAULT;
+
     cpu->mem = mem;
 
     /*
