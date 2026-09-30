@@ -188,6 +188,25 @@ uint16_t vm86_expect_mem16(const char *what, struct vm86_cpu *cpu,
 /* The runner                                                          */
 /* ------------------------------------------------------------------ */
 
+/*
+ * Two groups claiming one opcode is reported, not merely detected.
+ *
+ * Detecting it without saying which pair is close to useless: the suite
+ * stops with "two opcode groups claim the same opcode" and the reader has
+ * to bisect five tables to find the culprits. Naming the opcode and both
+ * groups turns that into a one-line answer, and this is the failure mode
+ * that splitting the opcode map between several people is most likely to
+ * produce.
+ */
+static void report_conflict(void *ctx, uint8_t opcode,
+                            const char *first, const char *second)
+{
+    (void)ctx;
+
+    printf("  !     opcode %02X is claimed by both %s and %s\n",
+           opcode, first, second);
+}
+
 int vm86_test_main(const char *suite, const struct vm86_test *tests,
                    size_t count)
 {
@@ -197,6 +216,8 @@ int vm86_test_main(const char *suite, const struct vm86_test *tests,
         printf("%s: cannot allocate guest memory\n", suite);
         return 2;
     }
+
+    vm86_set_conflict_reporter(report_conflict, NULL);
 
     /*
      * Check the dispatch table before running anything.
