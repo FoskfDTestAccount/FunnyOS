@@ -62,59 +62,12 @@
  * copies one byte -- which is the sort of thing that gets blamed on the
  * DOS program.
  *
- * So the loop is not private to this file. It is exported, the part that
- * varies is a callback, and ops_186.c declares it and passes its own two
- * bodies.
- *
- * It is NOT declared in ops.h, because the header is frozen and adding
- * to it is the interface owner's decision, not this file's. The exact
- * prototype is spelled out here so the declaration can be copied
- * verbatim, and the report asks for it to be moved into ops.h where it
- * belongs:
- *
- *     typedef void (*vm86_str_body)(struct vm86_cpu *cpu, uint8_t bits,
- *                                   int16_t delta, enum vm86_seg source);
- *
- *     enum vm86_result vm86_str_repeat(struct vm86_cpu *cpu, uint8_t bits,
- *                                      vm86_str_body body, bool conditional);
- *
- * The contract, exactly -- this is the whole of what a body may rely on:
- *
- *   bits        8 or 16. Bits, not bytes.
- *
- *   delta       what SI and DI move by, already signed: +bits/8 with DF
- *               clear, -bits/8 with DF set. Worked out once, before the
- *               loop begins; a body only adds it to a pointer.
- *
- *   source      the DS-side segment with any segment override applied,
- *               resolved by the loop so that no body has to remember to.
- *               The ES side is deliberately not passed and must never be
- *               overridden: a body that writes memory writes through
- *               VM86_ES, and a body that reads through the prefix uses
- *               this parameter. INS has no DS-side operand and ignores
- *               it; OUTS is the mirror image of MOVS.
- *
- *   conditional false for MOVS, STOS, LODS -- and for INS and OUTS: the
- *               loop runs CX times and the flags never enter into it.
- *               true for CMPS and SCAS: F3 (REP/REPE) stops the loop the
- *               first time ZF reads clear, F2 (REPNE) stops it the first
- *               time ZF reads set.
- *
- *   CX          tested before the first iteration, so CX=0 calls the body
- *               zero times. Decremented once per iteration, the last one
- *               included: a loop that ran out of count ends with CX=0
- *               and one stopped by the flag ends with the untouched
- *               elements still counted in CX. A program searching with
- *               REPNE SCASB branches on that number afterwards, so it is
- *               part of the result and not an implementation detail.
- *
- *   body        does exactly one element: the memory work, whatever flags
- *               the instruction sets, and advancing SI and DI by delta.
- *               Which pointers move is the instruction's business --
- *               STOS moves only DI, LODS only SI -- so the loop cannot do
- *               it for them. Called at least zero and at most CX times.
- *
- *   returns     VM86_CONTINUE, always. No string instruction can fault.
+ * So the loop is not private to this file. It is vm86_str_repeat(), it
+ * is declared in ops.h with the callback it takes, and ops_186.c calls
+ * it with its own two bodies. The contract lives there, once; what is
+ * written in this file is the part of it that is easy to get wrong
+ * rather than easy to read, and it sits next to the code that depends
+ * on it.
  *
  * ---------------------------------------------------------------------
  * How this file is arranged
@@ -128,15 +81,6 @@
 /* ------------------------------------------------------------------ */
 /* The one loop                                                        */
 /* ------------------------------------------------------------------ */
-
-/*
- * One element of a string operation.
- *
- * `source` is the DS-side segment with the override applied; see the
- * contract above for what the loop promises and what the body must do.
- */
-typedef void (*vm86_str_body)(struct vm86_cpu *cpu, uint8_t bits,
-                              int16_t delta, enum vm86_seg source);
 
 /*
  * Which way the pointers move, from the direction flag.
