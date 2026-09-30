@@ -303,16 +303,22 @@ static void test_push_sp_by_group_five_agrees_with_fifty_four(struct vm86_cpu *c
  *
  * The manually described order is "transfer the word, then increment SP
  * by two", which read literally would leave SP at 2002h here. What the
- * implementation does is 2000h: the word off the stack becomes SP and
- * the increment disappears, because for this one destination the write
- * to the register is the last thing that happens.
+ * implementation does is 2000h, and 2000h is the right answer: POP SP
+ * increments the pointer first and only then loads the word off the old
+ * top of the stack into it, so the destination write happens last and
+ * the increment is lost.
  *
- * Which of the two the 8086's microcode does is not something the manual
- * states, and it is listed in the report as unknown rather than settled.
- * The case is here to pin the behaviour this machine has, so that
- * changing it is a deliberate act and not a slip -- `pop sp` is the one
- * POP whose destination is the pointer, and it is not exercised anywhere
- * else in the suite.
+ * The manual's wording is what makes this a trap. It describes the
+ * ordinary case, where the destination is some other register, and reads
+ * as though the increment always survives. The verification report
+ * listed this as unsettled rather than guessing; it has since been
+ * looked up and the sources state it outright. The same sources confirm
+ * the PUSH SP behaviour asserted above, and add the consequence that a
+ * PUSH SP / POP SP pair on an 8086 leaves SP two lower than it started.
+ *
+ * The case is here so that changing it is a deliberate act and not a
+ * slip -- `pop sp` is the one POP whose destination is the pointer, and
+ * it is not exercised anywhere else in the suite.
  */
 static void test_pop_sp_ends_at_the_popped_value(struct vm86_cpu *cpu)
 {
