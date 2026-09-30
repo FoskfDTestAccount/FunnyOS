@@ -42,7 +42,7 @@ DOS 在这里扮演两重角色：**设计参照系**（继承小内核、直白
 
 `make run` 可交互运行；`bash tools/screenshot.sh` 与 `bash tools/screenshot-shell.sh` 可无头截图。
 
-下一步是 M3：8086 解释器核心。
+**M3 已经开工**：8086 解释器的骨架就位了——CPU 状态、ModRM 解码、取指与分发循环、标志位规则，以及一个**在宿主上跑的测试骨架**（毫秒级，不需要 QEMU，因为解释器是纯逻辑）。各操作码组按编码切成六份互不重叠的任务，任务书在 [docs/tasks/](docs/tasks/)。
 
 ## 构建环境
 
@@ -124,9 +124,15 @@ FunnyOS/
 │   ├── libu/                    用户态库：系统调用封装、缓冲输出
 │   ├── funnycom/                FunnyCOM，就是那个 Shell
 │   └── link.ld                  用户态链接脚本（固定加载到 4 MiB）
+├── dos/                         8086 子系统（纯逻辑，可在宿主上测试）
+│   ├── include/vm86/            CPU 状态、内存、解码、分发契约（已冻结）
+│   ├── cpu/                     解释器核心与各操作码组
+│   ├── mem/                     guest 内存模型
+│   └── tests/                   宿主上跑的测试与骨架
 ├── libk/                        内核基础库（内核与用户态各编译一次）
 ├── docs/
 │   ├── DESIGN.md                架构设计文档
+│   ├── tasks/                   M3 的任务书（每个操作码组一份）
 │   └── limine-*.md              Limine 协议、配置、用法文档（由脚本获取）
 ├── tools/
 │   ├── setup-limine.sh          获取 Limine（幂等）
@@ -268,7 +274,7 @@ The same ISO in **VMware Workstation** (BIOS path, not QEMU):
 
 `make run` boots interactively; `bash tools/screenshot.sh` and `bash tools/screenshot-shell.sh` capture the screen headlessly.
 
-Next up is M3: the 8086 interpreter core.
+**M3 has started.** The scaffold for the 8086 interpreter is in place -- CPU state, ModRM decoding, the fetch-and-dispatch loop, the flag rules -- along with a **test harness that runs on the host** rather than in QEMU, because the interpreter is pure logic and does not need an operating system to execute. The opcode groups are split by encoding into six non-overlapping tasks; the assignments are in [docs/tasks/](docs/tasks/).
 
 ## Build environment
 
@@ -350,9 +356,15 @@ FunnyOS/
 │   ├── libu/                    User library: syscall wrappers, buffered output
 │   ├── funnycom/                FunnyCOM, the shell
 │   └── link.ld                  User linker script (linked at 4 MiB)
+├── dos/                         8086 subsystem (pure logic, host-testable)
+│   ├── include/vm86/            CPU state, memory, decoding, dispatch (frozen)
+│   ├── cpu/                     The interpreter core and the opcode groups
+│   ├── mem/                     The guest memory model
+│   └── tests/                   A harness that runs on the host, not in QEMU
 ├── libk/                        Kernel support library (compiled for both sides)
 ├── docs/
 │   ├── DESIGN.md                Architecture and design decisions
+│   ├── tasks/                   M3 task assignments, one per opcode group
 │   └── limine-*.md              Limine protocol, config and usage docs (fetched, not committed)
 ├── tools/
 │   ├── setup-limine.sh          Fetch Limine (idempotent)
