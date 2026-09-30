@@ -16,7 +16,23 @@
 # =====================================================================
 
 CC    ?= gcc
-BUILD ?= /var/tmp/funyos-build/dos-tests
+
+# Keyed on the directory the sources live in, so that a session working
+# in its own git worktree compiles into its own output directory instead
+# of overwriting the binaries of a session working in another one.
+#
+# This matters because several people build at once here. A shared output
+# path means make can find a binary that is newer than the sources in
+# front of it, decide there is nothing to do, and run a test suite built
+# from somebody else's tree -- a result that means nothing and looks
+# exactly like a passing one. The alternative, rebuilding everything on
+# every invocation, is what a shared path degrades to anyway once the
+# timestamps stop lining up.
+#
+# So: main checkout here gets .../funyos-build/FunnyOS/dos-tests, and a
+# worktree at .claude/worktrees/m3-c-str-task-188236 gets
+# .../funyos-build/m3-c-str-task-188236/dos-tests.
+BUILD ?= /var/tmp/funyos-build/$(notdir $(patsubst %/dos,%,$(CURDIR)))/dos-tests
 
 # -Werror is on here and not in the kernel's build, deliberately. The
 # kernel has history; this directory is new and has none, so there is
