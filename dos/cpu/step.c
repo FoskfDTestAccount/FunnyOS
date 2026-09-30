@@ -9,6 +9,7 @@
 /* ------------------------------------------------------------------ */
 
 static vm86_op_fn       g_table[256];
+static const char      *g_owner[256];   /* which group owns each slot */
 static bool             g_built;
 static vm86_conflict_fn g_conflict_fn;
 static void            *g_conflict_ctx;
@@ -28,6 +29,13 @@ void vm86_set_conflict_reporter(vm86_conflict_fn fn, void *ctx)
  * this work up, and without a check it is silent: whichever table was
  * merged last simply wins, and the instruction produces the wrong answer
  * only for the encoding that was taken.
+ *
+ * Naming *which two* groups is the other half of that, and it is the
+ * half that is easy to leave out. The name of the group being merged in
+ * is not enough on its own: the question a reader has is who else wanted
+ * the slot, and a report that says a group collided with itself sends
+ * them looking for a mistake that is not there. So the owner of each
+ * slot is remembered as the tables go in, and a conflict names both.
  */
 static bool install(const vm86_op_fn *from, const char *name, bool *conflict)
 {
@@ -37,12 +45,13 @@ static bool install(const vm86_op_fn *from, const char *name, bool *conflict)
 
         if (g_table[i]) {
             if (g_conflict_fn)
-                g_conflict_fn(g_conflict_ctx, (uint8_t)i, name, name);
+                g_conflict_fn(g_conflict_ctx, (uint8_t)i, g_owner[i], name);
             *conflict = true;
             continue;
         }
 
         g_table[i] = from[i];
+        g_owner[i] = name;
     }
 
     return true;
@@ -52,8 +61,10 @@ bool vm86_ops_build(void)
 {
     bool conflict = false;
 
-    for (int i = 0; i < 256; i++)
+    for (int i = 0; i < 256; i++) {
         g_table[i] = NULL;
+        g_owner[i] = NULL;
+    }
 
     install(vm86_ops_alu, "alu", &conflict);
     install(vm86_ops_mov, "mov", &conflict);
