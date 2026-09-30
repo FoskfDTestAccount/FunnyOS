@@ -271,6 +271,34 @@ static void test_push_sp_pushes_the_decremented_value(struct vm86_cpu *cpu)
 }
 
 /*
+ * FF F4 is PUSH SP as well, and it has to answer exactly as 54 does.
+ *
+ * One instruction, two encodings, two files: 54 lives in ops_mov.c and
+ * FF F4 in ops_ctl.c's group 5. The 8086 answer was put into the first
+ * and missed in the second, so the same instruction had two values
+ * depending on how it was written -- and a future reader would have
+ * concluded from the code that the two encodings differ.
+ *
+ * The verification pass that found it also noticed that neither this
+ * suite nor the corpus sample for PUSH SP exercised FF F4 at all, which
+ * is why both encodings are asserted here side by side rather than only
+ * the one that happened to be tested.
+ */
+static void test_push_sp_by_group_five_agrees_with_fifty_four(struct vm86_cpu *cpu)
+{
+    static const uint8_t code[] = { 0xFF, 0xF4, 0xF4 };   /* push sp; hlt */
+
+    vm86_test_load(cpu, code, sizeof(code));
+    cpu->sp = 0x8000;
+
+    vm86_test_run(cpu, 10);
+
+    vm86_expect_bool("halted", cpu->halted, true);
+    vm86_expect_u16("SP", cpu->sp, 0x7FFE);
+    vm86_expect_mem16("what FF F4 left behind", cpu, 0x7FFE, 0x7FFE);
+}
+
+/*
  * POP SP, and the increment that gets thrown away.
  *
  * The manually described order is "transfer the word, then increment SP
@@ -3350,6 +3378,8 @@ static const struct vm86_test tests[] = {
       test_push_runs_off_the_end_of_the_stack_segment },
     { "push sp pushes the decremented value",
       test_push_sp_pushes_the_decremented_value },
+    { "push sp by group five agrees with fifty four",
+      test_push_sp_by_group_five_agrees_with_fifty_four },
     { "pop sp ends at the popped value",
       test_pop_sp_ends_at_the_popped_value },
 

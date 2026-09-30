@@ -209,9 +209,20 @@ static enum vm86_result op_alu_block(struct vm86_cpu *cpu, uint8_t opcode)
 
         if (form == 7 && segment == VM86_CS) {
             /*
-             * POP CS never existed. The 8086 left the encoding unused and
-             * the 386 took it for the two-byte opcode prefix, so on this
-             * processor it genuinely is not an instruction.
+             * 0F is POP CS on the 8086, and the two-byte escape from the
+             * 80186 onward.
+             *
+             * Refusing it is a choice about which machine this is, not a
+             * fact about the encoding. The opcode map here follows the
+             * 186 -- that is what makes PUSHA and the rest possible --
+             * so the escape stays reserved and POP CS is not implemented.
+             *
+             * The comment that used to sit here said POP CS never existed
+             * and that the 386 took the encoding. Both were wrong, and it
+             * is worth leaving a note about why that mattered: a reason
+             * that reads as complete stops the next reader from checking,
+             * which is exactly how a false one survives. The behaviour
+             * did not change when this was corrected; only the reason.
              */
             cpu->fault = VM86_VECTOR_INVALID_OPCODE;
             return VM86_FAULT;

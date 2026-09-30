@@ -816,7 +816,27 @@ static enum vm86_result op_group5(struct vm86_cpu *cpu, uint8_t opcode)
         break;
 
     case 6:     /* PUSH r/m16 */
-        vm86_push16(cpu, vm86_operand_read(cpu, &mr.operand));
+        /*
+         * FF F4 is PUSH SP, and it has to answer exactly as 54 does.
+         *
+         * The register form of SP is the one operand in this group whose
+         * value cannot simply be read out of the register file: the 8086
+         * pushes the SP it holds *after* the decrement, so handing the
+         * helper the current SP is the 80186 answer. That is the same
+         * mistake 54 was corrected for, and it survived here in a second
+         * file because 54 and FF F4 are separate encodings of one
+         * instruction and nothing made them agree.
+         *
+         * Memory forms are untouched. FF 36 pushes what is at the
+         * address, and the address is formed from SP before the push
+         * either way.
+         */
+        if (mr.operand.kind == VM86_OPERAND_REGISTER &&
+            mr.operand.reg == VM86_REG_SP) {
+            vm86_push16(cpu, (uint16_t)(cpu->sp - 2));
+        } else {
+            vm86_push16(cpu, vm86_operand_read(cpu, &mr.operand));
+        }
         break;
 
     case 7:     /* not an instruction on this processor */
