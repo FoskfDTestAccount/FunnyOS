@@ -147,6 +147,13 @@ ASM_OBJS := $(patsubst %.asm,$(OBJ_DIR)/%.asm.o,$(ASM_SOURCES))
 #       Stops the compiler turning a loop into a call to a libc function
 #       that does not exist on this side of the boundary.
 #
+#   -Idos/include
+#       The 8086 interpreter is compiled into this image as well, and its
+#       headers live under dos/include. Without this the interpreter does
+#       not compile here at all: every one of its files includes
+#       <vm86/...>, and nothing else on the user side puts that directory
+#       on the search path.
+#
 # libk is compiled a second time for user space. It is freestanding
 # already, so the only thing that changes is the code model.
 # ---------------------------------------------------------------------
@@ -155,7 +162,7 @@ USER_CFLAGS := -std=c17 -g -O2 \
                -ffreestanding -fno-stack-protector -fno-pic -fno-pie \
                -mno-red-zone -mcmodel=small \
                -fno-builtin -Wall -Wextra \
-               -Iuser -Ikernel/include -Ilibk/include
+               -Iuser -Idos/include -Ikernel/include -Ilibk/include
 
 # The user program is linked into a single loadable segment, so the linker
 # warns that it has RWX permissions. That warning is about ELF program
@@ -168,7 +175,12 @@ USER_LDFLAGS := -T user/link.ld -nostdlib -z max-page-size=0x1000 \
 
 USER_OBJ_DIR := $(BUILD_DIR)/userobj
 
-USER_C_SOURCES   := $(shell find user -name '*.c' | sort) libk/printf.c libk/string.c
+# The 8086 interpreter is part of the user image, because that is where it
+# runs: a Ring 3 process, per DESIGN.md's decision D4. Only the core comes
+# in -- dos/tests is the host-side test driver and has no business in a
+# program that is supposed to execute guest code.
+USER_C_SOURCES   := $(shell find user -name '*.c' | sort) libk/printf.c libk/string.c \
+                    $(wildcard dos/cpu/*.c) $(wildcard dos/mem/*.c)
 USER_ASM_SOURCES := $(shell find user -name '*.asm' | sort)
 
 USER_C_OBJS   := $(patsubst %.c,  $(USER_OBJ_DIR)/%.c.o,$(USER_C_SOURCES))
@@ -186,7 +198,7 @@ OBJS := $(C_OBJS) $(ASM_OBJS) $(INIT_BLOB_OBJ)
 # ---------------------------------------------------------------------
 # Targets
 # ---------------------------------------------------------------------
-.PHONY: all user run test test-uefi test-all test-fault test-input test-user check export clean distclean help
+.PHONY: all user run test test-uefi test-all test-fault test-input test-user test-vm check export clean distclean help
 
 all: $(ISO)
 
@@ -340,6 +352,18 @@ test-input: $(ISO)
 test-user: $(ISO)
 	@bash $(RUN_USER_TEST) $(ISO) bios
 
+# Boot with `vm=1` instead of the shell, and run the 8086 interpreter in
+# Ring 3. This is M3's acceptance test: guest instructions executed by the
+# operating system, with the terminal state compared against the manual
+# rather than printed for a person to look at.
+#
+# FUNYOS_BUILD_DIR is passed through because the script rebuilds an image
+# from the ISO tree, and `make test-vm BUILD_DIR=/somewhere/else` has to
+# keep the two of them looking at the same place.
+test-vm: $(ISO)
+	@FUNYOS_BUILD_DIR=$(BUILD_DIR) \
+	    bash $(TOOLS_DIR)/run-vm-test.sh $(ISO) bios
+
 # Everything. Use this before committing.
 check: $(ISO)
 	@bash $(RUN_TEST) $(ISO) bios
@@ -347,6 +371,8 @@ check: $(ISO)
 	@bash $(RUN_FAULT_TEST) bios
 	@bash $(RUN_INPUT_TEST) $(ISO) bios
 	@bash $(RUN_USER_TEST) $(ISO) bios
+	@FUNYOS_BUILD_DIR=$(BUILD_DIR) \
+	    bash $(TOOLS_DIR)/run-vm-test.sh $(ISO) bios
 
 # Copy the ISO into the project directory so other emulators on Windows
 # can open it. Output goes to dist/ rather than the project root because
@@ -376,6 +402,8 @@ help:
 	@echo "  make test-all   Run both boot paths"
 	@echo "  make test-fault Boot with fault injection and check the diagnostic"
 	@echo "  make test-input Type on the emulated keyboard and check the echo"
+	@echo "  make test-user  Load and run the user program in its modes"
+	@echo "  make test-vm    Run the 8086 interpreter in Ring 3 and assert"
 	@echo "  make check      Run every test above"
 	@echo "  make export     Copy the ISO into the project directory"
 	@echo "  make clean      Remove build artifacts"
