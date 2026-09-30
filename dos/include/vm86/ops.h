@@ -214,6 +214,65 @@ void     vm86_push16(struct vm86_cpu *cpu, uint16_t value);
 uint16_t vm86_pop16(struct vm86_cpu *cpu);
 
 /* ------------------------------------------------------------------ */
+/* The string loop                                                     */
+/* ------------------------------------------------------------------ */
+
+/*
+ * One element of a repeated string instruction.
+ *
+ * `bits` is 8 or 16 -- bits, not bytes. `delta` is how far SI and DI
+ * move, already signed from the direction flag, worked out once by the
+ * loop before it starts. `source` is the DS-side segment with any
+ * segment override already applied, resolved by the loop so that no body
+ * has to remember to.
+ *
+ * The body does one element: the memory work, whatever flags the
+ * instruction sets, and advancing SI and DI by delta. Which pointers
+ * move is the instruction's business -- STOS moves only DI, LODS only SI
+ * -- so the loop cannot do it for them. It must not read cpu->prefix,
+ * and it must not touch CX.
+ *
+ * A body that writes memory writes through VM86_ES and must not resolve
+ * that through vm86_effective_seg(): a prefix moves the read, and there
+ * is no prefix on this processor that makes a string write land anywhere
+ * but ES:DI.
+ */
+typedef void (*vm86_str_body)(struct vm86_cpu *cpu, uint8_t bits,
+                              int16_t delta, enum vm86_seg source);
+
+/*
+ * Run a string instruction, with or without a REP prefix.
+ *
+ * Implemented in ops_str.c, which owns the string instructions, and used
+ * by ops_186.c for INS and OUTS. They are the same loop: the same REP
+ * prefix, the same direction flag, the same CX=0 rule, and the same
+ * asymmetry where the DS side takes a segment override and the ES side
+ * never does. Two implementations of that would not stay equal, and the
+ * bug they would produce is a machine where `rep movsb` works and
+ * `rep insb` moves a single byte -- which is the kind of thing that gets
+ * blamed on the DOS program.
+ *
+ * `conditional` is false for MOVS, STOS, LODS, INS and OUTS, where the
+ * loop runs CX times and the flags never enter into it, and true for
+ * CMPS and SCAS, where F3 stops the loop the first time ZF reads clear
+ * and F2 stops it the first time ZF reads set. With `conditional` false
+ * an F2 therefore behaves as an F3 without a second branch, which is the
+ * reading every part since the 8086 has taken.
+ *
+ * CX is tested before the first iteration, so a REP with CX=0 calls the
+ * body zero times; it is decremented once per iteration, the last one
+ * included, so a loop stopped by the flag leaves the elements it never
+ * looked at still counted in CX. A program searching with REPNE SCASB
+ * branches on that number afterwards, so it is part of the result rather
+ * than an implementation detail.
+ *
+ * With no prefix at all the body is called exactly once. Always returns
+ * VM86_CONTINUE: no string instruction can fault.
+ */
+enum vm86_result vm86_str_repeat(struct vm86_cpu *cpu, uint8_t bits,
+                                 vm86_str_body body, bool conditional);
+
+/* ------------------------------------------------------------------ */
 /* Shared flag computation                                             */
 /* ------------------------------------------------------------------ */
 
