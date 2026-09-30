@@ -7,12 +7,14 @@
  *   50-5F   PUSH/POP a register                         [DONE - example]
  *   88-8B   MOV r/m, r and r, r/m                               [TODO]
  *   8C-8E   MOV a segment register out and in                   [TODO]
+ *   8D      LEA                                                 [TODO]
  *   8F      POP r/m16                                           [TODO]
  *   90      NOP                                                 [DONE]
  *   91-97   XCHG AX with a register                             [TODO]
  *   86-87   XCHG r/m with a register                            [TODO]
  *   A0-A3   MOV AL/AX, [moffs]                                  [TODO]
  *   B0-BF   MOV a register, immediate                   [DONE - example]
+ *   C4-C5   LES, LDS                                            [TODO]
  *   C6-C7   MOV r/m, immediate                                  [TODO]
  *   D7      XLAT                                                [TODO]
  *
@@ -20,7 +22,29 @@
  * call. Do not reimplement them.
  *
  * ---------------------------------------------------------------------
- * Two traps worth knowing before you start
+ * Traps worth knowing before you start
+ *
+ * LEA computes an effective address and does NOT read memory.
+ *
+ * That is the entire point of the instruction and it is easy to lose
+ * sight of: `lea bx, [bp+si]` runs the addressing hardware and stores
+ * the resulting offset in BX, with no access to the address it computed.
+ * A handler written by reaching for vm86_operand_read() will read memory
+ * the program never asked for -- which usually does no harm, which is
+ * what makes it a bad bug to find later.
+ *
+ * The segment override prefix still affects a LEA: `lea bx, es:[bp+si]`
+ * computes an offset that includes the ES base. Whether that is what a
+ * program wants is its business; what matters is that it is what the
+ * hardware does.
+ *
+ * LES and LDS load a far pointer: two words from memory, one into a
+ * register and one into ES or DS.
+ *
+ * `les di, [bx]` reads DI from [bx] and ES from [bx+2]. The register
+ * comes first in memory and the segment second, which is the opposite of
+ * how the pair is written -- and the same reversal as the far CALL and
+ * JMP encodings, so it is worth learning once.
  *
  * PUSH SP. On the 8086 it pushes the value of SP *after* the decrement;
  * on the 80186 and later it pushes the value *before*. This is a
