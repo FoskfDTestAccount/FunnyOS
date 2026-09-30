@@ -16,6 +16,7 @@
  */
 #include <libu/libu.h>
 #include <libk/string.h>
+#include <vm/vm.h>
 
 #include <stdbool.h>
 
@@ -34,6 +35,15 @@
 #define ARG_FAULT_TEST 1
 #define ARG_EXIT_TEST  2
 #define ARG_FPU_TEST   3
+
+/*
+ * Run the 8086 interpreter instead of the shell, and exit with what it
+ * says. The switch is `vm=1` on the kernel command line rather than
+ * another `selftest=`, because `selftest=` means "inject a fault on
+ * purpose" and this is not a fault -- it is M3's whole deliverable being
+ * exercised.
+ */
+#define ARG_VM         4
 
 /* Exit code for the exit test. Deliberately not zero, so that a test
  * which passes has proved the code travelled back through the kernel
@@ -386,6 +396,12 @@ int u_main(uint64_t arg)
     if (arg == ARG_FPU_TEST) {
         run_fpu_test();
         return 0;
+    }
+
+    if (arg == ARG_VM) {
+        /* The exit code is the interpreter's verdict, so it travels back
+         * to the kernel and shows up in the boot log as the result. */
+        return vm_selftest();
     }
 
     banner();

@@ -535,6 +535,10 @@ void kmain(void)
          * One argument, because there is no argument vector yet. The
          * tests start the same image in several modes this way rather than
          * building it several times.
+         *
+         * `vm=1` is not a `selftest=`: those inject a fault on purpose to
+         * exercise the error paths, and this runs the 8086 interpreter,
+         * which is the thing M3 exists to deliver.
          */
         uint64_t arg = 0;
         if (strstr(cmdline, "selftest=userfault"))
@@ -543,6 +547,8 @@ void kmain(void)
             arg = 2;
         else if (strstr(cmdline, "selftest=fputest"))
             arg = 3;
+        else if (strstr(cmdline, "vm=1"))
+            arg = 4;
 
         kprintf("  Loaded at      : 0x%llx, stack top 0x%llx\n",
                 (unsigned long long)PROCESS_CODE_BASE,
