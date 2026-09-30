@@ -70,20 +70,24 @@
  * convention asks for, so samples written to that convention will fit
  * here unchanged.
  *
- * The reason it is not larger is not a property of the emulator. Ring 3
- * has no heap, so the guest's memory is a static array -- and the build
- * turns .bss into real zero bytes in the image, which tools/bin2c.py then
- * expands to six characters of C source per byte. Sixteen megabytes here
- * would mean ninety-six megabytes of generated source compiled into the
- * kernel.
+ * Sixteen megabytes is the whole address space this machine models: the
+ * megabyte the chip itself can address, plus the extended pool the
+ * design provides for. It is a named constant because it is meant to be
+ * read, not because it is still expected to move.
  *
- * It is a named constant because it is meant to change. Task G is adding
- * a memory size to the loader (ELF's p_memsz); once a process can own
- * more memory than its image, this becomes a zero region the kernel hands
- * over, and whoever makes that change is the one to raise this number.
- * At that point sixteen megabytes costs nothing.
+ * It must not live in .bss. The build marks .bss loadable, so an array
+ * there is emitted into the flat image and from there into the kernel as
+ * a C array at six characters a byte -- these sixteen megabytes would
+ * become ninety-six megabytes of generated source. The .guestram section
+ * in user/link.ld is NOLOAD, which is the whole point: it counts toward
+ * the size the loader maps and contributes nothing at all to the image.
+ * The loader then zeroes it, which is what a guest expects to find.
+ *
+ * The attribute is the price of that, and forgetting it is visible
+ * rather than quiet: the generated source explodes and the build is
+ * obviously wrong, at build time, before anything runs.
  */
-#define GUEST_RAM_BYTES (1024u * 1024u)
+#define GUEST_RAM_BYTES (16u * 1024u * 1024u)
 
 /*
  * Where a guest program is loaded, and where its stack starts. Both come
@@ -105,10 +109,12 @@
 #define GUEST_INSN_LIMIT 100000u
 
 /*
- * Ring 3 has no heap, so the guest's memory is static storage. See the
- * note on the size above for why it is not bigger.
+ * Ring 3 has no heap, so the guest's memory is static storage -- but in
+ * the section that is mapped and not loaded. See the note above, and the
+ * one on .guestram in user/link.ld.
  */
-static uint8_t g_guest_ram[GUEST_RAM_BYTES];
+static uint8_t g_guest_ram[GUEST_RAM_BYTES]
+    __attribute__((section(".guestram")));
 
 /* ------------------------------------------------------------------ */
 /* What a case expects                                                 */
