@@ -230,10 +230,14 @@ $(USER_ELF): $(USER_OBJS) user/link.ld
 #
 # .bss is NOBITS: it occupies no space in the file. Converting to a flat
 # binary would therefore omit it entirely and report a length that stops
-# at the end of .data. The kernel sizes its allocation from that length,
-# so a program with uninitialised data would have some of it outside the
-# pages it owns and fault on first touch. Marking .bss loadable turns it
-# into real zero bytes that count.
+# at the end of .data. Marking .bss loadable turns it into real zero bytes
+# that count.
+#
+# That length is the image size -- how many bytes the kernel copies. It is
+# not how much memory the program gets: anything the program declares in
+# the NOLOAD section user/link.ld puts after .bss is mapped and zeroed by
+# the kernel rather than carried through here, and is counted from
+# _image_end instead. See the rule below.
 $(USER_BIN): $(USER_ELF)
 	@echo "  OBJCOPY $@"
 	@objcopy --set-section-flags .bss=alloc,load,contents $< $@.tmp
@@ -241,10 +245,41 @@ $(USER_BIN): $(USER_ELF)
 	@rm -f $@.tmp
 	@echo "  Image   $(USER_BIN): $$(stat -c %s $@) bytes"
 
-$(INIT_BLOB_C): $(USER_BIN) $(TOOLS_DIR)/bin2c.py
+# Memory the program asks for, read out of the ELF rather than written
+# down here.
+#
+# The linker is the only thing that knows where the program's memory ends
+# -- the end of .bss, plus whatever the NOLOAD section holds -- and a
+# constant written down instead would drift away from it silently. Add an
+# array to the program, forget the constant, and the new array lands
+# outside the mapping and faults on its first write, with the error
+# naming the array rather than the constant.
+#
+# The check below is the point of doing this in four lines rather than
+# one. `_image_end - 0x400000` is what the kernel is told, and the flat
+# image's length is what it copies; the tail between them is the region
+# the kernel maps and zeroes. If the linker ever stops placing _image_end
+# where the image ends, the symptom is a global variable that is
+# inexplicably wrong, which is a long way from this line.
+$(INIT_BLOB_C): $(USER_BIN) $(USER_ELF) $(TOOLS_DIR)/bin2c.py
 	@mkdir -p $(@D)
 	@echo "  BIN2C   $@"
-	@python3 $(TOOLS_DIR)/bin2c.py $< funnyos_init_image $@
+	@image_size=$$(stat -c %s $(USER_BIN)); \
+	image_end=$$(nm $(USER_ELF) | awk '$$NF == "_image_end" { print $$1 }'); \
+	if [ -z "$$image_end" ]; then \
+	    echo "  ERROR: $(USER_ELF) defines no _image_end."; \
+	    echo "         user/link.ld is supposed to; without it the kernel"; \
+	    echo "         cannot be told how much memory the program asked for."; \
+	    exit 1; \
+	fi; \
+	memory_size=$$(( 0x$$image_end - 0x400000 )); \
+	if [ "$$memory_size" -lt "$$image_size" ]; then \
+	    echo "  ERROR: _image_end says $$memory_size bytes of memory, but the"; \
+	    echo "         image is $$image_size bytes and goes into it."; \
+	    exit 1; \
+	fi; \
+	echo "  Memory  $(USER_BIN): $$memory_size bytes (image $$image_size, tail $$(( memory_size - image_size )))"; \
+	python3 $(TOOLS_DIR)/bin2c.py $< funnyos_init_image $@ $$memory_size
 
 $(INIT_BLOB_OBJ): $(INIT_BLOB_C)
 	@mkdir -p $(@D)
