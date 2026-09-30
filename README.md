@@ -42,11 +42,11 @@ DOS 在这里扮演两重角色：**设计参照系**（继承小内核、直白
 
 `make run` 可交互运行；`bash tools/screenshot.sh` 与 `bash tools/screenshot-shell.sh` 可无头截图。
 
-**M3 的实现已经完成，正在做独立验证**：8086 解释器的五组操作码全部就位——算术逻辑、数据传送、串操作、控制流、186 扩展，加上骨架里的 CPU 状态、ModRM 解码、取指分发与标志位规则。
+**M3 已完成**：一个纯软件的 8086 解释器，全部 256 个操作码槽位，加 80186 扩展，加一个单步调试器。**它作为 Ring 3 进程运行在 FunnyOS 里**——以 `vm=1` 启动时，内核会跑起解释器，接上 16 MB 的 guest 内存，执行一段手工汇编的 guest 程序并把终态交给自动化断言（`make test-vm`）。验收标准「能执行手工汇编的二进制，寄存器与标志位状态正确」因此是可复现的，不是靠看屏幕。
 
-测试**在宿主上跑**，不在 QEMU 里：解释器是纯逻辑，给它一块内存和几个字节它就能执行，所以 `cd dos && make test` 是毫秒级的。另有 `tools/check-opcode-coverage.py` 检查 256 个操作码槽位是不是都有归属——**"没人认领"和"不需要认领"是两回事**，只有写下来才分得清。
+操作码与内存模型的那四百多个用例**在宿主上跑**，不在 QEMU 里：解释器是纯逻辑，给它一块内存和几个字节它就能执行，所以 `cd dos && make test` 是毫秒级的。但**绿灯不算证据，除非证明它会红**——所以每一层都做过**变异测试**：往实现里种一个缺陷，看对应用例变不变红。三处独立活动共种了一百二十多处，每一条用例都被至少一个变异体弄红过。
 
-各组按编码切成六份互不重叠的任务，任务书在 [docs/tasks/](docs/tasks/)。第六份是**独立验证**，交给没有参与实现的人：它回答的不是"我写的代码做了我以为它做的事吗"（那是作者自己的测试要回答的），而是"**有没有什么事所有人都以为做了、但没做**"。
+各组按编码切成互不重叠的任务，任务书在 [docs/tasks/](docs/tasks/)，其中一份是**独立验证**，交给没有参与实现的人：它回答的不是「我写的代码做了我以为它做的事吗」，而是「**有没有什么事所有人都以为做了、但没做**」——它也确实找出来了。
 
 ## 构建环境
 
@@ -278,11 +278,11 @@ The same ISO in **VMware Workstation** (BIOS path, not QEMU):
 
 `make run` boots interactively; `bash tools/screenshot.sh` and `bash tools/screenshot-shell.sh` capture the screen headlessly.
 
-**M3's implementation is complete, and under independent verification.** All five opcode groups are in place -- arithmetic and logic, data movement, the string instructions, control flow, and the 80186 additions -- on top of the scaffold's CPU state, ModRM decoding, fetch-and-dispatch loop and flag rules.
+**M3 is done.** A software 8086 interpreter, all 256 opcode slots, the 80186 additions, and a single-step debugger. **It runs inside FunnyOS as a Ring 3 process** -- boot with `vm=1` and the kernel starts the interpreter, gives it 16 MB of guest memory, runs a hand-assembled guest and hands the terminal state to automated assertions (`make test-vm`). The acceptance criterion -- execute a hand-assembled binary with the registers and flags correct -- is therefore reproducible, not something somebody looked at.
 
-The tests **run on the host**, not in QEMU: the interpreter is pure logic, and given a block of memory and some bytes it executes, so `cd dos && make test` answers in milliseconds. `tools/check-opcode-coverage.py` separately checks that every one of the 256 opcode slots is accounted for -- because **"nobody claimed it" and "nobody needs to claim it" are different things**, and only writing the second one down tells them apart.
+The four hundred-odd cases covering the opcodes and the memory model **run on the host**, not in QEMU: the interpreter is pure logic, and given a block of memory and some bytes it executes, so `cd dos && make test` answers in milliseconds. But **a green light is not evidence unless it can be shown to go red** -- so every layer was put through **mutation testing**: inject one defect, watch which case turns red. Three independent campaigns injected well over a hundred, and every case was turned red by at least one of them.
 
-The work was split by encoding into six non-overlapping assignments, in [docs/tasks/](docs/tasks/). The sixth is **independent verification**, given to somebody who did not write any of it: the question it answers is not "does my code do what I thought" (that is what each author's own tests answer) but "**is there anything everybody assumed was done, and wasn't**".
+The work was split by encoding into non-overlapping assignments, in [docs/tasks/](docs/tasks/). One of them is **independent verification**, given to somebody who wrote none of it: the question it answers is not whether the code does what its author thought, but **whether anything everybody assumed was done, wasn't** -- and it found some.
 
 ## Build environment
 
