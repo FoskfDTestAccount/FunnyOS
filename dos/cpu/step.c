@@ -41,8 +41,8 @@ void vm86_set_conflict_reporter(vm86_conflict_fn fn, void *ctx)
  * leaves something runnable behind, and the caller is told by the return
  * value and by the reporter that what it has is not what it asked for.
  */
-bool vm86_ops_merge(vm86_op_fn *out, const vm86_op_fn *const *groups,
-                    const char *const *names, size_t count)
+static bool merge_into(vm86_op_fn *out, const vm86_op_fn *const *groups,
+                       const char *const *names, size_t count)
 {
     const char *owner[256];
     bool        ok = true;
@@ -82,12 +82,25 @@ static const char *const g_group_names[] = {
     "alu", "mov", "str", "ctl", "186",
 };
 
-bool vm86_ops_build(void)
+bool vm86_ops_build_from(const vm86_op_fn *const *groups,
+                         const char *const *names, size_t count)
 {
-    g_built = vm86_ops_merge(g_table, g_groups, g_group_names,
-                             sizeof(g_groups) / sizeof(g_groups[0]));
+    /*
+     * Marked attempted even when it fails. A caller that supplies a table
+     * has settled the question of which table this machine runs on, and
+     * the run loop must not merge the five over the top of it on the next
+     * step.
+     */
+    g_merge_attempted = true;
+    g_built           = merge_into(g_table, groups, names, count);
 
     return g_built;
+}
+
+bool vm86_ops_build(void)
+{
+    return vm86_ops_build_from(g_groups, g_group_names,
+                               sizeof(g_groups) / sizeof(g_groups[0]));
 }
 
 const vm86_op_fn *vm86_ops_table(void)
@@ -160,25 +173,38 @@ enum vm86_result vm86_step(struct vm86_cpu *cpu)
     cpu->insn_count++;
 
     /*
-     * The table is merged once, not once per instruction.
+     * The table is built once, not once per instruction.
      *
-     * vm86_ops_build() answers false when two groups claim the same
-     * opcode, and trying again cannot change that answer: the five tables
-     * are const. Trying again every instruction would run the whole
-     * 1280-slot merge once per instruction executed, which turns a table
-     * mistake into a machine that is orders of magnitude too slow and
-     * still running the wrong handler for the opcode that was contested.
-     *
-     * A failure is not swallowed. The reporter installed by
-     * vm86_set_conflict_reporter() was called with the opcode and both
-     * group names at the moment it was found, and vm86_ops_table()
-     * answers NULL from then on -- which is what an embedder that wants
-     * to refuse to run checks.
+     * What it answers cannot change by trying again -- the five tables are
+     * const -- and trying again every instruction would run the whole
+     * 1280-slot merge once for each instruction executed, which turns a
+     * table mistake into a machine that is orders of magnitude too slow
+     * and still running the wrong handler for the opcode that was
+     * contested.
      */
     if (!g_built && !g_merge_attempted) {
         g_merge_attempted = true;
         vm86_ops_build();
     }
+
+    /*
+     * Dispatch through a table that did not merge, and the machine runs
+     * whichever group reached a contested opcode first -- a coin toss
+     * decided by the order the groups happen to be listed in. So it does
+     * not dispatch at all.
+     *
+     * This is a fault in the host and not in the guest, and it is reported
+     * as its own thing rather than as a halt. A caller that reads every
+     * stop as the program ending would take a broken emulator for a clean
+     * run; the integration's acceptance test is such a caller, and it
+     * checks that the guest got there by halting.
+     *
+     * The collision was named when it was found, by the reporter installed
+     * through vm86_set_conflict_reporter(), and vm86_ops_table() answers
+     * NULL from here on.
+     */
+    if (!g_built)
+        return VM86_INTERNAL_ERROR;
 
     vm86_op_fn handler = g_table[opcode];
 

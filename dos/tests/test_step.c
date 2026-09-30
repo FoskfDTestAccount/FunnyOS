@@ -16,11 +16,13 @@
  * no single instruction is under test: what is under test is that the
  * state a prefix leaves behind does not survive into what runs next.
  *
- * The merge cases bring their own tables. The real five cannot be made
- * to collide, so the conflict path -- which is the failure mode of
- * splitting an opcode map between several people -- is unreachable any
- * other way. What they exercise is vm86_ops_merge(), which is the same
- * function vm86_ops_build() calls to build the table the machine runs on.
+ * The table cases install their own groups, through the function the
+ * machine itself builds its table with. The five real groups cannot be
+ * made to collide, so the failure this file is most about -- two groups
+ * claiming one opcode, which is the characteristic failure of splitting
+ * an opcode map between several people -- cannot be produced from them at
+ * all. Each case puts the machine's own table back before it returns,
+ * because the next case runs on it.
  */
 #include "harness.h"
 
@@ -85,7 +87,7 @@ static void test_the_last_segment_prefix_wins(struct vm86_cpu *cpu)
 }
 
 /* ------------------------------------------------------------------ */
-/* Merging the groups                                                  */
+/* Building the dispatch table                                         */
 /* ------------------------------------------------------------------ */
 
 static int         g_reports;
@@ -123,8 +125,8 @@ static enum vm86_result handler_b(struct vm86_cpu *cpu, uint8_t opcode)
  *
  * The harness installs its own before running any test, to report a
  * collision in the real tables -- and a real collision stops the suite
- * before it gets here, so taking the reporter over cannot hide one.
- * What it catches is a collision in the tables this test brings.
+ * before it gets here, so taking the reporter over cannot hide one. What
+ * it catches is a collision in the tables these cases bring.
  */
 static void tests_begin_reporting(void)
 {
@@ -141,7 +143,6 @@ static void test_a_contested_opcode_is_reported(struct vm86_cpu *cpu)
 {
     vm86_op_fn first[256]  = { 0 };
     vm86_op_fn second[256] = { 0 };
-    vm86_op_fn merged[256];
 
     const vm86_op_fn *groups[2] = { first, second };
     const char *names[2] = { "first", "second" };
@@ -152,10 +153,14 @@ static void test_a_contested_opcode_is_reported(struct vm86_cpu *cpu)
     second[0x42] = handler_b;
 
     tests_begin_reporting();
-    bool ok = vm86_ops_merge(merged, groups, names, 2);
+    bool ok = vm86_ops_build_from(groups, names, 2);
     tests_stop_reporting();
 
-    vm86_expect_bool("the merge reports a failure", ok, false);
+    const vm86_op_fn *table = vm86_ops_table();
+
+    vm86_ops_build();   /* the machine's own table, for the cases after this */
+
+    vm86_expect_bool("the build reports a failure", ok, false);
     vm86_expect_bool("the collision was reported once", g_reports == 1, true);
     vm86_expect_u16("the opcode was named", g_reported_opcode, 0x42);
     vm86_expect_bool("so was the group that got there first",
@@ -164,20 +169,21 @@ static void test_a_contested_opcode_is_reported(struct vm86_cpu *cpu)
                      g_reported_second == names[1], true);
 
     /*
-     * The first claim keeps the slot. That is a decision rather than a
-     * fact -- the encoding is broken either way -- but it is a decision
-     * that has to be made: a merge that left the slot empty would turn
-     * a table mistake into an invalid-opcode exception somewhere else.
+     * The table the run loop would have dispatched through held the first
+     * claim in the contested slot -- a decision rather than a fact, since
+     * the encoding is broken either way, but a decision that had to be
+     * made. vm86_ops_table() refuses to hand it over: a caller that asked
+     * for a table and got a broken one is better served by NULL than by
+     * something that looks usable.
      */
-    vm86_expect_bool("the earlier claim kept the slot",
-                     merged[0x42] == handler_a, true);
+    vm86_expect_bool("a table that did not merge is not handed out",
+                     table == NULL, true);
 }
 
 static void test_a_clean_merge_installs_every_claim(struct vm86_cpu *cpu)
 {
     vm86_op_fn first[256]  = { 0 };
     vm86_op_fn second[256] = { 0 };
-    vm86_op_fn merged[256];
 
     const vm86_op_fn *groups[2] = { first, second };
     const char *names[2] = { "first", "second" };
@@ -188,28 +194,78 @@ static void test_a_clean_merge_installs_every_claim(struct vm86_cpu *cpu)
     second[0x43] = handler_b;
 
     tests_begin_reporting();
-    bool ok = vm86_ops_merge(merged, groups, names, 2);
+    bool ok = vm86_ops_build_from(groups, names, 2);
     tests_stop_reporting();
 
-    vm86_expect_bool("the merge succeeds", ok, true);
+    /*
+     * The slots are read out before the machine's own table is put back.
+     * What vm86_ops_table() returns points at the table itself, so
+     * rebuilding underneath it would leave the pointer looking at
+     * handlers this case never installed.
+     */
+    const vm86_op_fn *table = vm86_ops_table();
+    vm86_op_fn claim_a = table ? table[0x42] : NULL;
+    vm86_op_fn claim_b = table ? table[0x43] : NULL;
+    vm86_op_fn empty   = table ? table[0x44] : NULL;
+
+    vm86_ops_build();   /* the machine's own table, for the cases after this */
+
+    vm86_expect_bool("the build succeeds", ok, true);
     vm86_expect_bool("and reports nothing", g_reports == 0, true);
+    vm86_expect_bool("the table is available", table != NULL, true);
     vm86_expect_bool("the first group's claim arrived",
-                     merged[0x42] == handler_a, true);
+                     claim_a == handler_a, true);
     vm86_expect_bool("the second group's claim arrived too",
-                     merged[0x43] == handler_b, true);
-    vm86_expect_bool("a slot nobody claims is empty",
-                     merged[0x44] == NULL, true);
+                     claim_b == handler_b, true);
+    vm86_expect_bool("a slot nobody claims is empty", empty == NULL, true);
+}
+
+static void test_a_table_that_did_not_merge_is_not_a_halt(struct vm86_cpu *cpu)
+{
+    /* mov ax,1234h ; hlt -- an ordinary program, which is the point: the
+     * machine refuses to run it rather than running it through a table it
+     * could not build. */
+    static const uint8_t code[] = { 0xB8, 0x34, 0x12, 0xF4 };
+
+    vm86_op_fn first[256]  = { 0 };
+    vm86_op_fn second[256] = { 0 };
+
+    const vm86_op_fn *groups[2] = { first, second };
+    const char *names[2] = { "first", "second" };
+
+    vm86_test_load(cpu, code, sizeof(code));
+
+    first[0xB8]  = handler_a;
+    second[0xB8] = handler_b;
+
+    tests_begin_reporting();
+    bool built = vm86_ops_build_from(groups, names, 2);
+    tests_stop_reporting();
+
+    vm86_expect_bool("the table did not merge", built, false);
+
+    enum vm86_result result = vm86_step(cpu);
+
+    vm86_ops_build();   /* the machine's own table, for the cases after this */
+
+    vm86_expect_bool("stepping refuses to dispatch",
+                     result == VM86_INTERNAL_ERROR, true);
+
+    /*
+     * The whole reason this case exists.
+     *
+     * A caller reads VM86_HALT as "the program finished", and the
+     * integration's acceptance test reads it exactly that way -- it
+     * checks that the guest got there by halting. So a table failure that
+     * answered VM86_HALT would let a broken emulator pass that test,
+     * which is worse than any of the ways it could fail loudly. The two
+     * values have to stay different, and this assertion is what says so.
+     */
+    vm86_expect_bool("and it is not a halt", result != VM86_HALT, true);
 }
 
 static void test_the_five_groups_do_not_collide(struct vm86_cpu *cpu)
 {
-    vm86_op_fn merged[256];
-
-    const vm86_op_fn *groups[5] = {
-        vm86_ops_alu, vm86_ops_mov, vm86_ops_str, vm86_ops_ctl, vm86_ops_186,
-    };
-    const char *names[5] = { "alu", "mov", "str", "ctl", "186" };
-
     (void)cpu;
 
     /*
@@ -217,10 +273,10 @@ static void test_the_five_groups_do_not_collide(struct vm86_cpu *cpu)
      * same opcode. Every other test in the project depends on it -- a
      * collision means some instruction runs a handler written for a
      * different one -- so it is asserted here as well as checked by the
-     * harness at startup, and this one says which two collided.
+     * harness at startup, and this one can say which two collided.
      */
     tests_begin_reporting();
-    bool ok = vm86_ops_merge(merged, groups, names, 5);
+    bool ok = vm86_ops_build();
     tests_stop_reporting();
 
     vm86_expect_bool("the five groups partition the map", ok, true);
@@ -238,6 +294,8 @@ static const struct vm86_test tests[] = {
       test_a_contested_opcode_is_reported },
     { "a clean merge installs every claim",
       test_a_clean_merge_installs_every_claim },
+    { "a table that did not merge is not a halt",
+      test_a_table_that_did_not_merge_is_not_a_halt },
     { "the five groups do not collide",
       test_the_five_groups_do_not_collide },
 };

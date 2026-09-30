@@ -67,18 +67,19 @@ enum vm86_result {
      * stops; delivering the interrupt is not this layer's job. */
     VM86_FAULT,
 
-    /* The emulator itself is broken: the opcode tables could not be
-     * merged, so at least one opcode is claimed twice and there is no
-     * correct table to run. No instruction was executed and cpu->fault
-     * is meaningless.
+    /* Something on the host is broken: the opcode tables could not be
+     * merged, so at least one opcode is claimed twice and no table can
+     * be trusted to reach the handler it should. No instruction was
+     * executed, and cpu->fault is meaningless -- nothing is wrong with
+     * the guest, which is why this is not an exception and carries no
+     * vector.
      *
-     * This is deliberately not VM86_HALT. The three results above all
-     * describe something the guest did; this one describes something the
-     * host did, and conflating the two is how a broken emulator would
-     * get mistaken for a working one. A caller that stops on HLT reports
-     * a normal ending -- the acceptance test for this milestone asserts
-     * exactly that -- so a conflicted table reported as a halt would
-     * pass. */
+     * It is deliberately not VM86_HALT. The three values above all
+     * describe something the guest did; this one describes something
+     * the host did, and conflating the two is how a broken emulator
+     * gets mistaken for a working one. A caller that stops on HLT
+     * reports a normal ending -- the acceptance test for the
+     * integration asserts exactly that, and would pass. */
     VM86_INTERNAL_ERROR,
 };
 
@@ -146,22 +147,29 @@ extern const vm86_op_fn vm86_ops_186[256];
 bool vm86_ops_build(void);
 
 /*
- * Merge a set of group tables into one the caller owns.
+ * Build the dispatch table the run loop uses out of a set of group tables.
  *
- * `groups` is `count` tables of 256 entries and `names` names them, one
- * each. `out` is filled the way vm86_ops_build() fills the table the run
- * loop uses: every non-NULL slot goes in, the first group to claim a slot
- * keeps it, and a slot that two groups both claim is reported through the
- * conflict reporter and makes the return value false.
+ * `groups` is `count` tables of 256 entries, and `names` names them, one
+ * each. Every non-NULL slot goes into the table; the first group to claim
+ * a slot keeps it, and a slot that two groups both claim is reported
+ * through the conflict reporter and makes the return value false -- after
+ * which vm86_step() answers VM86_INTERNAL_ERROR rather than dispatching
+ * through the table it was given.
  *
- * Exposed because that last path cannot be reached from outside: it runs
- * only when two of the five tables collide, so a test that wants to see
- * the report has to bring tables that do. vm86_ops_build() is this
- * function over the five groups above, which is what makes what such a
- * test sees the same thing the machine would do.
+ * vm86_ops_build() is this with the five groups above, which is what
+ * makes a table built here the one the machine runs on.
+ *
+ * Exposed because the failure it describes cannot be produced from those
+ * five: they do not collide. A caller that wants to see what the machine
+ * does with a table that does has to supply one, and that is the only way
+ * either the report or the refusal can be tested at all.
+ *
+ * The table stays installed until the next call -- including a call that
+ * fails, which does not leave the previous table in place -- so a caller
+ * that installs a broken one has to install a good one afterwards.
  */
-bool vm86_ops_merge(vm86_op_fn *out, const vm86_op_fn *const *groups,
-                    const char *const *names, size_t count);
+bool vm86_ops_build_from(const vm86_op_fn *const *groups,
+                         const char *const *names, size_t count);
 
 /*
  * Called once for each opcode two groups both claim.
