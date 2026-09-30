@@ -194,6 +194,18 @@ enum corpus_outcome {
      * is not there.
      */
     CORPUS_INSN_LIMIT,
+
+    /*
+     * The emulator failed and the sample did not.
+     *
+     * The opcode table did not merge, so nothing in the run reached the
+     * handler it should have and this case has not been judged at all.
+     * Kept apart from the four above for the reason the four are kept
+     * apart from each other: those are verdicts on the sample, and a
+     * report that delivered this one as a verdict would send the reader
+     * through a sample that is fine.
+     */
+    CORPUS_INTERNAL_ERROR,
 };
 
 /*

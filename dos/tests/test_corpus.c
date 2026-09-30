@@ -174,6 +174,7 @@ static const char *outcome_name(enum corpus_outcome outcome)
     case CORPUS_WRONG_ENDING: return "stopped the wrong way";
     case CORPUS_WRONG_FAULT:  return "wrong fault vector";
     case CORPUS_INSN_LIMIT:   return "instruction limit";
+    case CORPUS_INTERNAL_ERROR: return "the emulator failed";
     }
 
     return "?";
