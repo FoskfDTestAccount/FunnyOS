@@ -56,6 +56,10 @@ CFLAGS := -std=c17 -g -O2 -Wall -Wextra -Werror -fno-builtin \
 # The interpreter itself. Everything here is freestanding: no system
 # header is included from dos/cpu or dos/mem, and that is checked by the
 # fact that this list also compiles for the user-space build.
+#
+# The debugger is in it for the same reason. It takes its output as a
+# callback rather than calling printf, so it is as freestanding as the
+# interpreter it watches and links into the same two builds.
 CORE_C := \
     cpu/cpu.c      \
     cpu/decode.c   \
@@ -66,6 +70,7 @@ CORE_C := \
     cpu/ops_str.c  \
     cpu/ops_ctl.c  \
     cpu/ops_186.c  \
+    dbg/trace.c    \
     mem/mem.c
 
 # libk provides memset and memcpy. Linking it here rather than the host's
