@@ -1809,25 +1809,73 @@ static void test_fe_refuses_unknown_opcode(struct vm86_cpu *cpu)
     vm86_expect_mem8("memory untouched", cpu, DATA, 0x55);
 }
 
-static void test_fe_refuses_a_register_operand(struct vm86_cpu *cpu)
+/* ------------------------------------------------------------------ */
+static void test_fe_increments_al(struct vm86_cpu *cpu)
 {
-    /* FE C0: mod = 3, which would name AL. The encoding is memory only --
-     * and this is the one place here where the manual and the metal are
-     * known to disagree, so the choice is written down in ops_alu.c and
-     * pinned here. */
-    static const uint8_t code[] = { 0xFE, 0xC0 };
+    /* inc al -- FE C0. The one-byte forms at 40-47 are inc and dec for
+     * the sixteen-bit registers only; a byte register has no short form,
+     * so this is how an assembler writes every byte-register increment
+     * there is. */
+    static const uint8_t code[] = { 0xFE, 0xC0, 0xF4 };
 
     vm86_test_load(cpu, code, sizeof(code));
-    cpu->ax = 0x0005;
+    cpu->ax = 0x007F;
+    vm86_flag_set(cpu, VM86_CF, true);   /* to prove INC leaves it alone */
 
-    enum vm86_result result = vm86_test_run(cpu, 5);
+    vm86_test_run(cpu, 5);
 
-    vm86_expect_bool("faulted", result == VM86_FAULT, true);
-    vm86_expect_u16("vector", cpu->fault, VM86_VECTOR_INVALID_OPCODE);
-    vm86_expect_u16("AX untouched", cpu->ax, 0x0005);
+    vm86_expect_u16("AL", cpu->al, 0x80);
+    vm86_expect_flags("flags", cpu,
+                      VM86_CF | VM86_OF | VM86_AF | VM86_SF, 0);
 }
 
-/* ------------------------------------------------------------------ */
+static void test_fe_increments_bl(struct vm86_cpu *cpu)
+{
+    /* inc bl -- FE C3, a byte register that is not the accumulator. */
+    static const uint8_t code[] = { 0xFE, 0xC3, 0xF4 };
+
+    vm86_test_load(cpu, code, sizeof(code));
+    cpu->bx = 0x00FF;
+    vm86_flag_set(cpu, VM86_CF, true);
+
+    vm86_test_run(cpu, 5);
+
+    vm86_expect_u16("BX", cpu->bx, 0x0000);
+    vm86_expect_flags("flags", cpu,
+                      VM86_CF | VM86_AF | VM86_ZF | VM86_PF, 0);
+}
+
+static void test_fe_decrements_cl(struct vm86_cpu *cpu)
+{
+    /* dec cl -- FE C9, the decrement half of the group. */
+    static const uint8_t code[] = { 0xFE, 0xC9, 0xF4 };
+
+    vm86_test_load(cpu, code, sizeof(code));
+    cpu->cx = 0x0001;
+    vm86_flag_set(cpu, VM86_CF, true);
+
+    vm86_test_run(cpu, 5);
+
+    vm86_expect_u16("CX", cpu->cx, 0x0000);
+    vm86_expect_flags("flags", cpu, VM86_CF | VM86_ZF | VM86_PF, 0);
+}
+
+static void test_fe_reaches_the_high_bytes(struct vm86_cpu *cpu)
+{
+    /* inc dh -- FE C6. The high bytes are where the 8-bit register order
+     * stops agreeing with the 16-bit one, so this is the case that would
+     * catch a handler indexing the register file by hand. */
+    static const uint8_t code[] = { 0xFE, 0xC6, 0xF4 };
+
+    vm86_test_load(cpu, code, sizeof(code));
+    cpu->dx = 0x7F00;
+
+    vm86_test_run(cpu, 5);
+
+    vm86_expect_u16("DX", cpu->dx, 0x8000);
+    vm86_expect_flags("flags", cpu, VM86_OF | VM86_AF | VM86_SF, 0);
+}
+
 /* ------------------------------------------------------------------ */
 
 static const struct vm86_test tests[] = {
@@ -1960,7 +2008,10 @@ static const struct vm86_test tests[] = {
     { "fe increment wraps",           test_fe_increment_wraps },
     { "fe decrement wraps",           test_fe_decrement_wraps },
     { "fe refuses other sub-opcodes", test_fe_refuses_unknown_opcode },
-    { "fe refuses a register form",   test_fe_refuses_a_register_operand },
+    { "fe increments al",             test_fe_increments_al },
+    { "fe increments bl",             test_fe_increments_bl },
+    { "fe decrements cl",             test_fe_decrements_cl },
+    { "fe reaches the high bytes",    test_fe_reaches_the_high_bytes },
 };
 
 VM86_TEST_MAIN("alu", tests)

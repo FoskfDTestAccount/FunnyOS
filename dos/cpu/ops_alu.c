@@ -18,7 +18,7 @@
  *   D0-D3   shifts by one, by CL, and by an immediate              [DONE]
  *   D4-D5   AAM, AAD                                               [DONE]
  *   F6-F7   the group 3 block: TEST/NOT/NEG/MUL/IMUL/DIV/IDIV      [DONE]
- *   FE      INC/DEC a byte in memory                               [DONE]
+ *   FE      INC/DEC a byte, register or memory                     [DONE]
  *
  * D7 (XLAT) is deliberately absent. It is a table lookup and belongs to
  * ops_mov.c, even though it sits between two things that are mine. This
@@ -703,11 +703,13 @@ static enum vm86_result op_shift(struct vm86_cpu *cpu, uint8_t opcode)
  * nothing and because D4 0A is what a program actually contains.
  *
  * AAM is a division and can therefore fail the way a division fails, but
- * not a division a program can catch: the manual requires a non-zero
- * base. A zero base is a division by zero inside the host, which would
- * take the emulator down rather than the guest's program. Treating it as
- * the guest's divide error is the reading that keeps the fault inside the
- * guest, where M4 can deliver it the way it delivers any other.
+ * not in a way a program can have been written to catch: a zero base is
+ * documented nowhere and appears in no program, and on a host it would be
+ * a division by zero inside the emulator -- taking the emulator down
+ * rather than the guest's program. So it is a decision rather than a
+ * reading: the fault is reported as the guest's divide error, which keeps
+ * it inside the guest, where M4 can deliver it the way it delivers any
+ * other.
  */
 static enum vm86_result op_aam(struct vm86_cpu *cpu, uint8_t opcode)
 {
@@ -912,7 +914,7 @@ static enum vm86_result op_group3(struct vm86_cpu *cpu, uint8_t opcode)
 }
 
 /* ------------------------------------------------------------------ */
-/* FE: increment and decrement a byte in memory                        */
+/* FE: increment and decrement a byte                                  */
 /* ------------------------------------------------------------------ */
 
 static enum vm86_result op_incdec_rm8(struct vm86_cpu *cpu, uint8_t opcode)
@@ -925,20 +927,18 @@ static enum vm86_result op_incdec_rm8(struct vm86_cpu *cpu, uint8_t opcode)
     /*
      * FE is the byte half of the group FF is the word half of, and only
      * two of its eight sub-opcodes exist: /0 increment and /1 decrement.
-     * The rest are not instructions on this part.
+     * The rest are not instructions on this part, and a program that
+     * probes for one expects a clean refusal rather than a plausible
+     * wrong answer.
      *
-     * The encoding is also documented as memory only, so mod == 3 -- the
-     * one form that would name a register -- is refused as well. This is
-     * the one place in this file where the manual and the metal are known
-     * to differ: the 8086 goes ahead and increments the register anyway,
-     * because the restriction is in the assembler and the microcode never
-     * checked it. Following the manual is the choice here, because
-     * `inc al` has a one-byte encoding of its own that assemblers emit,
-     * so nothing that was assembled can reach this, and code that was
-     * patched by hand into the undefined form would rather stop where it
-     * can be seen than quietly do something nobody documented.
+     * The operand may be a register or a memory byte. Worth stating
+     * because the register case is not a curiosity: 40-47, the
+     * one-byte forms, are inc and dec for the sixteen-bit registers
+     * only. A byte register has no short form, so every `inc bl` and
+     * `dec dh` a program contains arrives here -- there is no other
+     * encoding an assembler could have emitted.
      */
-    if (mr.reg > 1 || mr.mod == 3) {
+    if (mr.reg > 1) {
         cpu->fault = VM86_VECTOR_INVALID_OPCODE;
         return VM86_FAULT;
     }
