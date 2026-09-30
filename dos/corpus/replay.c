@@ -259,7 +259,26 @@ enum corpus_outcome vm86_corpus_replay(struct vm86_mem *mem,
         return CORPUS_PASS;
     }
 
-    /* VM86_HALT, or something a future handler invents. */
+    /*
+     * The emulator failed rather than the sample. The fault is in the
+     * host and is reported in the host's words: "the machine halted where
+     * the case expects a fault" is what the branch below would say, and
+     * it would send the reader looking for a missing HLT in a sample that
+     * is fine.
+     */
+    if (result == VM86_INTERNAL_ERROR) {
+        put_text(&e, "the interpreter's opcode table did not merge, so "
+                     "nothing in this run reached the handler it should "
+                     "have and this case has not been judged");
+        flush(&e);
+        return CORPUS_INTERNAL_ERROR;
+    }
+
+    /*
+     * VM86_HALT. It is the only ending left: every other value the run
+     * loop can return is handled above, so this is no longer a catch-all
+     * that happens to hold a halt -- which is what it was written as.
+     */
     if (c->ending != CORPUS_ENDS_HALTED) {
         put_text(&e, "the machine halted where the case expects a fault "
                      "(vector ");

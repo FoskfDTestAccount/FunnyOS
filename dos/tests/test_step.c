@@ -199,9 +199,11 @@ static void test_a_clean_merge_installs_every_claim(struct vm86_cpu *cpu)
 
     /*
      * The slots are read out before the machine's own table is put back.
-     * What vm86_ops_table() returns points at the table itself, so
-     * rebuilding underneath it would leave the pointer looking at
-     * handlers this case never installed.
+     * vm86_ops_table() returns a pointer into the table itself and a
+     * build writes through that pointer, so anything read through it has
+     * to be read before the next call -- otherwise the pointer quietly
+     * starts showing handlers this case never installed, which is how
+     * this case failed the first time it was written.
      */
     const vm86_op_fn *table = vm86_ops_table();
     vm86_op_fn claim_a = table ? table[0x42] : NULL;
