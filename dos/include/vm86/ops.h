@@ -44,6 +44,7 @@
 #define VM86_OPS_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include <vm86/cpu.h>
@@ -129,6 +130,24 @@ extern const vm86_op_fn vm86_ops_186[256];
  * table was merged last would simply win.
  */
 bool vm86_ops_build(void);
+
+/*
+ * Merge a set of group tables into one the caller owns.
+ *
+ * `groups` is `count` tables of 256 entries and `names` names them, one
+ * each. `out` is filled the way vm86_ops_build() fills the table the run
+ * loop uses: every non-NULL slot goes in, the first group to claim a slot
+ * keeps it, and a slot that two groups both claim is reported through the
+ * conflict reporter and makes the return value false.
+ *
+ * Exposed because that last path cannot be reached from outside: it runs
+ * only when two of the five tables collide, so a test that wants to see
+ * the report has to bring tables that do. vm86_ops_build() is this
+ * function over the five groups above, which is what makes what such a
+ * test sees the same thing the machine would do.
+ */
+bool vm86_ops_merge(vm86_op_fn *out, const vm86_op_fn *const *groups,
+                    const char *const *names, size_t count);
 
 /*
  * Called once for each opcode two groups both claim.
