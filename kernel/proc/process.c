@@ -89,49 +89,69 @@ struct open_file *process_open_files(void)
 }
 
 /*
- * Copy a flat image into a freshly mapped run of pages, and map the
- * stack above it.
+ * Copy a flat image into a freshly mapped run of pages, zero the rest of
+ * the region the caller asked for, and map the stack above it.
  *
  * Returns false with nothing leaked if any step fails.
  */
 static bool build_address_space(struct process *p, const void *image,
-                                size_t size)
+                                size_t image_size, size_t memory_size)
 {
-    /* --- The program --- */
-    uint64_t image_end = PROCESS_CODE_BASE + size;
+    /*
+     * Both bounds are named before anything can jump to the failure path
+     * below. Declaring the stack's base down beside its loop would read
+     * better, but a `goto fail` from the first loop would then arrive
+     * with it holding whatever was on the stack -- and the unwind would
+     * walk a range built from that, over pages that had already been
+     * freed, which is a double free rather than a leak.
+     */
+    uint64_t memory_end = PROCESS_CODE_BASE + memory_size;
+    uint64_t stack_base = PROCESS_STACK_TOP - PROCESS_STACK_SIZE;
 
-    for (uint64_t virt = PROCESS_CODE_BASE; virt < image_end; virt += PAGE_SIZE) {
+    /* --- The program, and the tail behind it --- */
+    for (uint64_t virt = PROCESS_CODE_BASE; virt < memory_end; virt += PAGE_SIZE) {
         uint64_t frame = pmm_alloc_page();
         if (!frame)
-            return false;
+            goto fail;
 
         if (!vmm_map_page_in(p->pml4, virt, frame, VMM_USER_RW)) {
             pmm_free_page(frame);
-            return false;
+            goto fail;
         }
 
+        /*
+         * Zero the whole page, then copy over the front of it. That
+         * order is what makes the tail work: a page past the end of the
+         * image keeps its zeroes and is never written again.
+         *
+         * It is a promise rather than tidiness. The one place FunnyOS
+         * departs from DOS is that a program cannot see what the last
+         * one left behind, and a page that skipped this would be exactly
+         * that leak -- in the one routine that handles a whole
+         * program's worth of memory, and silently.
+         */
         uint8_t *dst = frame_ptr(frame);
         memset(dst, 0, PAGE_SIZE);
 
         size_t offset = (size_t)(virt - PROCESS_CODE_BASE);
-        size_t chunk  = size - offset;
-        if (chunk > PAGE_SIZE)
-            chunk = PAGE_SIZE;
+        if (offset < image_size) {
+            size_t chunk = image_size - offset;
+            if (chunk > PAGE_SIZE)
+                chunk = PAGE_SIZE;
 
-        memcpy(dst, (const uint8_t *)image + offset, chunk);
+            memcpy(dst, (const uint8_t *)image + offset, chunk);
+        }
     }
 
     /* --- The stack --- */
-    uint64_t stack_base = PROCESS_STACK_TOP - PROCESS_STACK_SIZE;
-
     for (uint64_t virt = stack_base; virt < PROCESS_STACK_TOP; virt += PAGE_SIZE) {
         uint64_t frame = pmm_alloc_page();
         if (!frame)
-            return false;
+            goto fail;
 
         if (!vmm_map_page_in(p->pml4, virt, frame, VMM_USER_RW)) {
             pmm_free_page(frame);
-            return false;
+            goto fail;
         }
 
         /* Zeroed, so a program that reads an uninitialised local gets
@@ -140,12 +160,59 @@ static bool build_address_space(struct process *p, const void *image,
     }
 
     return true;
+
+fail:
+    /*
+     * Hand back what this built before it ran out.
+     *
+     * The frames are the caller's to free -- vmm_destroy_address_space
+     * releases the page tables and deliberately nothing else -- so a
+     * region abandoned half mapped would take its pages out of the
+     * allocator for good. Nothing else would notice: the address space
+     * still tears down cleanly, and the machine simply has less memory
+     * than it should for the rest of its uptime.
+     *
+     * A range rather than a record of how far the loop got, because the
+     * mappings are already that record: free_leaf_frames skips whatever
+     * is not there.
+     */
+    free_leaf_frames(p->pml4, PROCESS_CODE_BASE, memory_end);
+    free_leaf_frames(p->pml4, stack_base, PROCESS_STACK_TOP);
+
+    return false;
 }
 
-struct process *process_create(const char *name, const void *image, size_t size)
+struct process *process_create(const char *name, const void *image,
+                               size_t image_size, size_t memory_size)
 {
-    if (!image || size == 0)
+    if (!image || image_size == 0)
         return NULL;
+
+    /*
+     * The two layouts that cannot exist, refused before anything has been
+     * allocated -- and refused as argument errors, not as a shortage of
+     * memory, because that is what they are.
+     *
+     * The second is compared as a distance rather than by adding to
+     * PROCESS_CODE_BASE, so that a size near SIZE_MAX is refused instead
+     * of wrapping round to something that would look small enough. See
+     * the note on PROCESS_STACK_TOP for why a region reaching the stack
+     * is not a failure the loader would otherwise get to notice.
+     */
+    if (memory_size < image_size) {
+        kprintf("process: %llu bytes of memory is less than the %llu-byte "
+                "image going into it\n",
+                (unsigned long long)memory_size,
+                (unsigned long long)image_size);
+        return NULL;
+    }
+
+    if (memory_size > (PROCESS_STACK_TOP - PROCESS_STACK_SIZE) - PROCESS_CODE_BASE) {
+        kprintf("process: %llu bytes of memory would reach the stack at %p\n",
+                (unsigned long long)memory_size,
+                (void *)(PROCESS_STACK_TOP - PROCESS_STACK_SIZE));
+        return NULL;
+    }
 
     struct process *p = kmalloc(sizeof(*p));
     if (!p)
@@ -200,7 +267,7 @@ struct process *process_create(const char *name, const void *image, size_t size)
      * its code and not on whatever ran before it. */
     fpu_init_state(p->fpu_state);
 
-    if (!build_address_space(p, image, size)) {
+    if (!build_address_space(p, image, image_size, memory_size)) {
         kprintf("process: cannot build the address space (out of memory?)\n");
         vmm_destroy_address_space(p->pml4);
         kfree(p->fpu_state);
@@ -209,9 +276,9 @@ struct process *process_create(const char *name, const void *image, size_t size)
         return NULL;
     }
 
-    p->entry      = PROCESS_CODE_BASE;
-    p->stack_top  = PROCESS_STACK_TOP;
-    p->image_size = size;
+    p->entry       = PROCESS_CODE_BASE;
+    p->stack_top   = PROCESS_STACK_TOP;
+    p->memory_size = memory_size;
 
     return p;
 }
@@ -221,12 +288,17 @@ void process_destroy(struct process *p)
     if (!p)
         return;
 
-    /* The image starts at a fixed base and the stack sits directly below
-     * the top. Both are freed by range, which is exact rather than
-     * approximate: this is the same layout build_address_space created,
-     * and the image size is recorded at load time for precisely this. */
+    /* The program's memory starts at a fixed base and runs for as long as
+     * the process was given -- which is not the length of its image, and
+     * the difference is a whole tail of frames. Freeing by the image
+     * length instead would leave those frames mapped to nothing and out
+     * of the allocator, and only for a process that was given a tail,
+     * which is to say only the one the emulator needs. The stack sits
+     * directly below its top. Both are freed by range, which is exact
+     * rather than approximate: this is the same layout
+     * build_address_space created. */
     free_leaf_frames(p->pml4, PROCESS_CODE_BASE,
-                     PROCESS_CODE_BASE + p->image_size);
+                     PROCESS_CODE_BASE + p->memory_size);
     free_leaf_frames(p->pml4, PROCESS_STACK_TOP - PROCESS_STACK_SIZE,
                      PROCESS_STACK_TOP);
 

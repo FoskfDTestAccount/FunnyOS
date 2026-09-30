@@ -51,6 +51,98 @@
 #define EXIT_TEST_CODE 7
 
 /* ------------------------------------------------------------------ */
+/* The memory the kernel builds and the image does not contain         */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Two sizes are in play from here on, and this array is the difference
+ * between them.
+ *
+ * It lives in .guestram, which user/link.ld marks NOLOAD. The section
+ * takes up address space and not one byte of the flat image, so the
+ * kernel maps it and zeroes it instead of copying it -- and the size the
+ * kernel is given comes from `_image_end`, the linker's idea of where
+ * this program's memory ends, not from the length of the image.
+ *
+ * That distinction is the whole reason for the second size. An array of
+ * this size in .bss would be forced into the image and then into the C
+ * source the image is compiled into, at six characters a byte. The
+ * emulator that will run DOS programs needs sixteen megabytes of guest
+ * RAM and declares it the same way; this is the small version that can
+ * be checked on every boot.
+ *
+ * Deliberately much larger than this program's code, and checked at its
+ * last byte -- which is the last byte of the program's memory, and so
+ * the first byte an off-by-one-page in the loader would leave out.
+ */
+#define GUEST_RAM_BYTES (256 * 1024)
+
+static unsigned char g_guest_ram[GUEST_RAM_BYTES]
+    __attribute__((section(".guestram")));
+
+/*
+ * Read back the memory the loader was asked to build.
+ *
+ * Three things, checked separately because they fail separately, and
+ * because only one of the three failures announces itself:
+ *
+ *   Mapped.     Reading the last byte at all is the check. A page the
+ *               loader never mapped does not return a wrong value, it
+ *               faults, and the kernel ends the process.
+ *   Zeroed.     Every byte is scanned rather than sampled. A page that
+ *               was mapped but not cleared holds whatever the last
+ *               process left in that frame, and that is a value that
+ *               looks entirely reasonable -- which is how it survives
+ *               review. There is one process today; there will be more.
+ *   Writable.   A pattern is written to both ends and read back. The far
+ *               end is the last byte of the region, so this crosses the
+ *               final page boundary as well.
+ *
+ * The order matters and is the reason this is one function: every byte is
+ * read before anything is written, so the zeroes are the loader's and not
+ * this check's own leftovers.
+ */
+static bool check_loader_memory(void)
+{
+    volatile unsigned char *ram = g_guest_ram;
+
+    unsigned long not_zero = 0;
+
+    for (unsigned long i = 0; i < GUEST_RAM_BYTES; i++) {
+        if (ram[i] != 0)
+            not_zero++;
+    }
+
+    bool zeroed = (not_zero == 0);
+
+    /* Only now, with the scan behind us. */
+    ram[0] = 0xA5;
+    ram[GUEST_RAM_BYTES - 1] = 0x5A;
+
+    bool writable = (ram[0] == 0xA5 && ram[GUEST_RAM_BYTES - 1] == 0x5A);
+
+    /* Put back what was there, so that a later reader of this memory --
+     * or a later run of this check -- is not looking at this one. */
+    ram[0] = 0;
+    ram[GUEST_RAM_BYTES - 1] = 0;
+
+    uprintf("  Memory tail    : %lu bytes past the end of the image\n",
+            (unsigned long)GUEST_RAM_BYTES);
+    uprintf("  Tail mapped    : yes\n");
+    uprintf("  Tail zeroed    : %s\n",
+            zeroed ? "yes" : "NO, some bytes were not zero");
+    uprintf("  Tail writable  : %s\n",
+            writable ? "yes" : "NO, a value did not read back");
+
+    if (!zeroed) {
+        uprintf("                   %lu of %lu bytes were not zero\n",
+                not_zero, (unsigned long)GUEST_RAM_BYTES);
+    }
+
+    return zeroed && writable;
+}
+
+/* ------------------------------------------------------------------ */
 /* Helpers                                                             */
 /* ------------------------------------------------------------------ */
 
@@ -381,6 +473,18 @@ static void run_fpu_test(void)
 
 int u_main(uint64_t arg)
 {
+    /*
+     * First, and on every boot rather than under a flag.
+     *
+     * The loader is the one part of the kernel every program goes
+     * through, and the failures it can have here are the quiet kind, so
+     * this is worth the microseconds every time. A boot log with no
+     * "Tail mapped" line in it is a boot where the program died before
+     * reaching this point.
+     */
+    if (!check_loader_memory())
+        uputs("  Loader memory  : FAILED, and this is a kernel bug\n");
+
     if (arg == ARG_FAULT_TEST) {
         run_fault_test();
         return 1;

@@ -294,6 +294,78 @@ static bool run_memory_selftest(void)
     return ok;
 }
 
+/*
+ * The loader's two sizes, and the one way of getting them wrong that
+ * nothing else would notice.
+ *
+ * A process is given a region at least as long as the image that goes
+ * into it, and process_destroy() frees the frames behind that region from
+ * a field recording the region -- not the image. Record the image there
+ * instead and everything still works: the program loads, it runs, the
+ * shell appears. The only difference is that the tail's frames are never
+ * given back, and only for a process that was given a tail, which is to
+ * say only the one the emulator needs. Nothing would fail until a second
+ * process could not be started, a long time later.
+ *
+ * So the check has to be the frame count rather than a result. Build a
+ * process whose region is almost entirely tail, tear it down, and require
+ * the allocator to be exactly where it started.
+ *
+ * A region smaller than the image is a caller's mistake and has to be
+ * refused rather than built; that case costs nothing to check, because
+ * the refusal happens before the first page is allocated.
+ */
+static bool run_loader_selftest(void)
+{
+    bool ok = true;
+
+    /* One byte, so that almost the whole of the region below is tail. */
+    static const uint8_t image[1] = { 0xF4 };
+
+    /* --- A region smaller than the image is refused --- */
+    struct process *refused =
+        process_create("loader-small", image, sizeof(image), 0);
+
+    if (refused) {
+        kprintf("    region < image : FAILED, built one anyway\n");
+        process_destroy(refused);
+        ok = false;
+    }
+
+    /* --- Everything a tail costs comes back --- */
+    uint64_t before = pmm_free_frame_count();
+
+    struct process *probed =
+        process_create("loader-tail", image, sizeof(image), 64 * 1024);
+
+    if (!probed) {
+        kprintf("    tail frames    : FAILED, could not build it at all\n");
+        return false;
+    }
+
+    uint64_t held = pmm_free_frame_count();
+
+    process_destroy(probed);
+
+    uint64_t after = pmm_free_frame_count();
+
+    /* It has to have taken frames -- otherwise the run proves nothing --
+     * and it has to have returned every one of them. */
+    if (held >= before) {
+        kprintf("    tail frames    : FAILED, a 64 KiB region cost no "
+                "frames at all\n");
+        ok = false;
+    } else if (after != before) {
+        kprintf("    tail frames    : FAILED, %llu of %llu frames stayed "
+                "allocated\n",
+                (unsigned long long)(before - after),
+                (unsigned long long)(before - held));
+        ok = false;
+    }
+
+    return ok;
+}
+
 void kmain(void)
 {
     /* Serial comes first: it is the channel of last resort, and it still
@@ -461,7 +533,16 @@ void kmain(void)
     kprintf("  Scancode decoder: %s\n",
             kbd_decode_ok ? "all cases passed" : "FAILURES, see above");
 
-    bool passed = mem_ok && kbd_decode_ok;
+    /* M3: the loader now takes two sizes, so the failure to guard against
+     * is no longer "the program does not load" -- it is "the program
+     * loads and its memory is never fully given back". See the note on
+     * run_loader_selftest. */
+    bool loader_ok = run_loader_selftest();
+    kprintf("  Loader region   : %s\n",
+            loader_ok ? "tail mapped and fully accounted for"
+                      : "FAILURES, see above");
+
+    bool passed = mem_ok && kbd_decode_ok && loader_ok;
 
     kprintf("\n");
     kprintf("==================================================\n");
@@ -523,10 +604,23 @@ void kmain(void)
     kprintf("\n[user program]\n");
     kprintf("  Image          : %llu bytes embedded in the kernel\n",
             (unsigned long long)funnyos_init_image_size);
+    kprintf("  Memory         : %llu bytes, %llu of it past the end of the "
+            "image\n",
+            (unsigned long long)funnyos_init_image_mem_size,
+            (unsigned long long)(funnyos_init_image_mem_size -
+                                 funnyos_init_image_size));
 
+    /*
+     * Two sizes, not one. The image is what the kernel embeds and copies;
+     * the memory is how much address space the program asked for through
+     * the linker, which is more than the image whenever it declares a
+     * region that must not be carried through the image -- see _image_end
+     * in user/link.ld.
+     */
     struct process *program = process_create("funnycom",
                                              funnyos_init_image,
-                                             (size_t)funnyos_init_image_size);
+                                             (size_t)funnyos_init_image_size,
+                                             (size_t)funnyos_init_image_mem_size);
 
     if (!program) {
         kprintf("  Result         : could not be loaded\n");

@@ -7,7 +7,13 @@
 # process, and each has its own way of going wrong:
 #
 #   1. Normally. The shell starts in Ring 3 and stays there. Checks the
-#      load path, the iretq into Ring 3, and the system call interface.
+#      load path, the iretq into Ring 3, and the system call interface --
+#      and the memory the kernel built for the program, which is now
+#      larger than the image embedded in the kernel and is mapped, zeroed
+#      and made writable by the loader rather than carried through the
+#      image. Three assertions, because those are three different ways to
+#      get it wrong; the mapped one is really the absence of a fault, so
+#      it shows up below as "the shell did not fault".
 #
 #   2. With `selftest=userfault`. The program writes to an address it has
 #      no mapping for. This is the one that checks the claim FunnyOS
@@ -171,6 +177,16 @@ expect_present "F:\\>"                       "shell reached its prompt"         
 expect_absent  "PANIC"                       "no kernel panic"                   "$LOG1"
 expect_absent  "program fault"               "the shell did not fault"           "$LOG1"
 expect_absent  "CPU EXCEPTION"               "no CPU exception"                  "$LOG1"
+
+# The program's memory is larger than the image, and the part of it that
+# is not in the image is the loader's to create. All three have to hold
+# and they fail differently: a page that was never mapped faults before
+# these lines are reached (which is what the two assertions above catch),
+# one that was mapped and not cleared reads as somebody's leftovers, and
+# one that is there and read-only fails on the first write.
+expect_present "Tail mapped    : yes"        "the loader built the program's tail"  "$LOG1"
+expect_present "Tail zeroed    : yes"        "every byte of it was cleared"        "$LOG1"
+expect_present "Tail writable  : yes"        "and the program can write to it"     "$LOG1"
 
 # ------------------------------------------------------------ run 2
 
