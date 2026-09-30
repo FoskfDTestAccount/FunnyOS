@@ -9,7 +9,7 @@
 >
 > **`dos/cpu/ops_*.c` 一个字都不要改。** 任务 F 正在逐行验证那五个文件。你只加文件。
 >
-> **Makefile 只改 `USER_C_SOURCES` 那一行,不要顺手重排别的行。** 任务 G 同时在改同一个文件的另一段(blob 生成那一段),重排会让两边合并时打架。
+> **Makefile 只做追加,不要重排任何现有行。** 你至少要动两处:`USER_C_SOURCES`(收进解译器核心)和 `USER_CFLAGS`(加 `-Idos/include`,否则 `dos/` 里每个文件都找不到 `<vm86/...>` —— **这一处在第一版任务书里漏了,是执行者编译时才发现的**)。任务 G 同时在改同一个文件的 blob 生成那一段,重排会让两边合并时打架。
 
 ---
 
@@ -41,7 +41,7 @@ USER_C_SOURCES := $(shell find user -name '*.c' | sort) libk/printf.c libk/strin
 
 **`user/` 下的 `.c` 是自动收进用户态镜像的。** 所以你在 `user/vm/` 下加的文件不需要新的链接规则 —— 这正是这个任务能和任务 G 并行、而不互相踩的原因。
 
-但 `dos/` 不在 `user/` 下,所以**需要改那一行**,把解释器核心加进去:
+但 `dos/` 不在 `user/` 下,所以**需要改两处**:一处把解释器核心收进来,一处把它的头文件目录放进搜索路径。
 
 ```make
 USER_C_SOURCES := $(shell find user -name '*.c' | sort) libk/printf.c libk/string.c \
