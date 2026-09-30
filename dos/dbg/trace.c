@@ -477,9 +477,10 @@ static void line_end(struct line *l)
 static const char *result_name(enum vm86_result result)
 {
     switch (result) {
-    case VM86_CONTINUE: return "continue";
-    case VM86_HALT:     return "halt";
-    case VM86_FAULT:    return "fault";
+    case VM86_CONTINUE:       return "continue";
+    case VM86_HALT:           return "halt";
+    case VM86_FAULT:          return "fault";
+    case VM86_INTERNAL_ERROR: return "internal-error";
     }
 
     return "unknown";

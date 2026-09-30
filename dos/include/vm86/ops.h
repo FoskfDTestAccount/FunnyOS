@@ -66,6 +66,20 @@ enum vm86_result {
     /* An exception was raised. cpu->fault holds the vector. The run loop
      * stops; delivering the interrupt is not this layer's job. */
     VM86_FAULT,
+
+    /* The emulator itself is broken: the opcode tables could not be
+     * merged, so at least one opcode is claimed twice and there is no
+     * correct table to run. No instruction was executed and cpu->fault
+     * is meaningless.
+     *
+     * This is deliberately not VM86_HALT. The three results above all
+     * describe something the guest did; this one describes something the
+     * host did, and conflating the two is how a broken emulator would
+     * get mistaken for a working one. A caller that stops on HLT reports
+     * a normal ending -- the acceptance test for this milestone asserts
+     * exactly that -- so a conflicted table reported as a halt would
+     * pass. */
+    VM86_INTERNAL_ERROR,
 };
 
 /*
