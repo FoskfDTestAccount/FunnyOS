@@ -42,7 +42,11 @@ DOS 在这里扮演两重角色：**设计参照系**（继承小内核、直白
 
 `make run` 可交互运行；`bash tools/screenshot.sh` 与 `bash tools/screenshot-shell.sh` 可无头截图。
 
-**M3 已经开工**：8086 解释器的骨架就位了——CPU 状态、ModRM 解码、取指与分发循环、标志位规则，以及一个**在宿主上跑的测试骨架**（毫秒级，不需要 QEMU，因为解释器是纯逻辑）。各操作码组按编码切成六份互不重叠的任务，任务书在 [docs/tasks/](docs/tasks/)。
+**M3 的实现已经完成，正在做独立验证**：8086 解释器的五组操作码全部就位——算术逻辑、数据传送、串操作、控制流、186 扩展，加上骨架里的 CPU 状态、ModRM 解码、取指分发与标志位规则。
+
+测试**在宿主上跑**，不在 QEMU 里：解释器是纯逻辑，给它一块内存和几个字节它就能执行，所以 `cd dos && make test` 是毫秒级的。另有 `tools/check-opcode-coverage.py` 检查 256 个操作码槽位是不是都有归属——**"没人认领"和"不需要认领"是两回事**，只有写下来才分得清。
+
+各组按编码切成六份互不重叠的任务，任务书在 [docs/tasks/](docs/tasks/)。第六份是**独立验证**，交给没有参与实现的人：它回答的不是"我写的代码做了我以为它做的事吗"（那是作者自己的测试要回答的），而是"**有没有什么事所有人都以为做了、但没做**"。
 
 ## 构建环境
 
@@ -274,7 +278,11 @@ The same ISO in **VMware Workstation** (BIOS path, not QEMU):
 
 `make run` boots interactively; `bash tools/screenshot.sh` and `bash tools/screenshot-shell.sh` capture the screen headlessly.
 
-**M3 has started.** The scaffold for the 8086 interpreter is in place -- CPU state, ModRM decoding, the fetch-and-dispatch loop, the flag rules -- along with a **test harness that runs on the host** rather than in QEMU, because the interpreter is pure logic and does not need an operating system to execute. The opcode groups are split by encoding into six non-overlapping tasks; the assignments are in [docs/tasks/](docs/tasks/).
+**M3's implementation is complete, and under independent verification.** All five opcode groups are in place -- arithmetic and logic, data movement, the string instructions, control flow, and the 80186 additions -- on top of the scaffold's CPU state, ModRM decoding, fetch-and-dispatch loop and flag rules.
+
+The tests **run on the host**, not in QEMU: the interpreter is pure logic, and given a block of memory and some bytes it executes, so `cd dos && make test` answers in milliseconds. `tools/check-opcode-coverage.py` separately checks that every one of the 256 opcode slots is accounted for -- because **"nobody claimed it" and "nobody needs to claim it" are different things**, and only writing the second one down tells them apart.
+
+The work was split by encoding into six non-overlapping assignments, in [docs/tasks/](docs/tasks/). The sixth is **independent verification**, given to somebody who did not write any of it: the question it answers is not "does my code do what I thought" (that is what each author's own tests answer) but "**is there anything everybody assumed was done, and wasn't**".
 
 ## Build environment
 
