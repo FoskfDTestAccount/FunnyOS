@@ -29,6 +29,7 @@
 
 #include <funnyos/arch/x86_64/acpi.h>
 #include <funnyos/arch/x86_64/apic.h>
+#include <funnyos/arch/x86_64/fpu.h>
 #include <funnyos/arch/x86_64/gdt.h>
 #include <funnyos/arch/x86_64/idt.h>
 #include <funnyos/arch/x86_64/io.h>
@@ -315,6 +316,18 @@ void kmain(void)
     idt_init();
 
     /*
+     * Floating point comes next, and early.
+     *
+     * It has to be before any process exists, because a program's state
+     * area is created with an SSE instruction, and SSE instructions are
+     * unavailable -- they raise #UD -- until the control registers say the
+     * operating system can preserve their state. Doing it before the
+     * interrupt controllers also means a failure here is reported plainly
+     * rather than mixed up with device bring-up.
+     */
+    bool fpu_ok = fpu_init();
+
+    /*
      * Then memory, in dependency order: the frame allocator reads the
      * bootloader's memory map, the page table code needs frames for any
      * new table, and the heap needs both to grow itself.
@@ -387,6 +400,13 @@ void kmain(void)
     kprintf("  GDT/TSS        : installed, TSS at %p\n", (void *)tss_address());
     kprintf("  IDT            : 256 vectors installed\n");
     kprintf("  Fault handling : active (#DF and NMI on dedicated IST stacks)\n");
+    kprintf("  Floating point : %s\n",
+            fpu_ok ? "x87 and SSE enabled, per-process state saved"
+                   : "NOT AVAILABLE");
+    kprintf("  AVX            : %s\n",
+            fpu_avx_present() ? "present but not enabled (FXSAVE does not "
+                                "cover YMM state)"
+                              : "not present");
 
     kprintf("\n[memory]\n");
     kprintf("  HHDM offset    : %p\n", (void *)bootinfo_hhdm_offset());
@@ -513,14 +533,16 @@ void kmain(void)
     } else {
         /*
          * One argument, because there is no argument vector yet. The
-         * tests start the same image in three modes this way rather than
-         * building it three times.
+         * tests start the same image in several modes this way rather than
+         * building it several times.
          */
         uint64_t arg = 0;
         if (strstr(cmdline, "selftest=userfault"))
             arg = 1;
         else if (strstr(cmdline, "selftest=userexit"))
             arg = 2;
+        else if (strstr(cmdline, "selftest=fputest"))
+            arg = 3;
 
         kprintf("  Loaded at      : 0x%llx, stack top 0x%llx\n",
                 (unsigned long long)PROCESS_CODE_BASE,

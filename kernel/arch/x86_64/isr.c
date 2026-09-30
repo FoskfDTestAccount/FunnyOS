@@ -11,6 +11,7 @@
  * once drivers exist, a claimed vector is the common case, while every
  * path below this point is terminal.
  */
+#include <funnyos/arch/x86_64/cpu.h>
 #include <funnyos/arch/x86_64/irq.h>
 #include <funnyos/kprintf.h>
 #include <funnyos/panic.h>
@@ -18,25 +19,6 @@
 
 #include <stdint.h>
 #include <stddef.h>
-
-/* --- Control registers ------------------------------------------- */
-
-static inline uint64_t read_cr0(void)
-{
-    uint64_t v; __asm__ volatile("mov %%cr0, %0" : "=r"(v)); return v;
-}
-static inline uint64_t read_cr2(void)
-{
-    uint64_t v; __asm__ volatile("mov %%cr2, %0" : "=r"(v)); return v;
-}
-static inline uint64_t read_cr3(void)
-{
-    uint64_t v; __asm__ volatile("mov %%cr3, %0" : "=r"(v)); return v;
-}
-static inline uint64_t read_cr4(void)
-{
-    uint64_t v; __asm__ volatile("mov %%cr4, %0" : "=r"(v)); return v;
-}
 
 /* --- Names -------------------------------------------------------- */
 
@@ -164,7 +146,7 @@ void isr_dispatch(struct interrupt_frame *f)
                 (unsigned long long)f->error_code);
         if (f->vector == 14) {
             kprintf("  CR2         : 0x%016llx  (faulting address)\n",
-                    (unsigned long long)read_cr2());
+                    (unsigned long long)cpu_read_cr2());
         }
         kprintf("  RIP         : 0x%016llx\n", (unsigned long long)f->rip);
         kprintf("  RSP         : 0x%016llx\n", (unsigned long long)f->rsp);
@@ -195,7 +177,7 @@ void isr_dispatch(struct interrupt_frame *f)
 
     if (f->vector == 14)
         kprintf("  CR2        : 0x%016llx  (faulting address)\n",
-                (unsigned long long)read_cr2());
+                (unsigned long long)cpu_read_cr2());
 
     kprintf("\n");
     kprintf("  RIP        : 0x%016llx\n", (unsigned long long)f->rip);
@@ -205,9 +187,9 @@ void isr_dispatch(struct interrupt_frame *f)
     kprintf("  RSP        : 0x%016llx\n", (unsigned long long)f->rsp);
 
     kprintf("\n");
-    kprintf("  CR0        : 0x%016llx\n", (unsigned long long)read_cr0());
-    kprintf("  CR3        : 0x%016llx\n", (unsigned long long)read_cr3());
-    kprintf("  CR4        : 0x%016llx\n", (unsigned long long)read_cr4());
+    kprintf("  CR0        : 0x%016llx\n", (unsigned long long)cpu_read_cr0());
+    kprintf("  CR3        : 0x%016llx\n", (unsigned long long)cpu_read_cr3());
+    kprintf("  CR4        : 0x%016llx\n", (unsigned long long)cpu_read_cr4());
 
     kprintf("\n");
     kprintf("  RAX %016llx  RBX %016llx\n",

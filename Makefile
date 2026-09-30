@@ -59,6 +59,7 @@ RUN_TEST  := $(TOOLS_DIR)/run-qemu-test.sh
 RUN_FAULT_TEST := $(TOOLS_DIR)/run-fault-test.sh
 RUN_INPUT_TEST := $(TOOLS_DIR)/run-input-test.sh
 RUN_USER_TEST  := $(TOOLS_DIR)/run-user-test.sh
+CHECK_VECTOR_REGS := $(TOOLS_DIR)/check-no-vector-regs.sh
 
 # ---------------------------------------------------------------------
 # Toolchain
@@ -81,10 +82,24 @@ INCLUDES := -Ikernel/include -Ilibk/include -Iboot/limine
 #                         turn it off at compile time.
 #   -mcmodel=kernel       Code model for the upper half of the address space.
 #   -mgeneral-regs-only   Restrict the compiler to general-purpose
-#                         registers, forbidding SSE/MMX codegen. The kernel
-#                         does not save FPU state, so any floating point or
-#                         vector instruction emitted here would silently
-#                         corrupt data on the next context switch.
+#                         registers, forbidding SSE/MMX codegen.
+#
+#                         THIS ONE IS AN INVARIANT, NOT A PREFERENCE.
+#                         An interrupt does not save vector register
+#                         state -- the CPU saves that only when software
+#                         asks it to. So the kernel never touching a
+#                         vector register is precisely what makes
+#                         interrupt entry cheap, and what lets a program
+#                         keep its floating point registers across one.
+#
+#                         Remove this flag and every interrupt starts
+#                         silently corrupting whatever the interrupted
+#                         program had loaded. See
+#                         kernel/include/funnyos/arch/x86_64/fpu.h.
+#
+#                         User programs are built without it, so they may
+#                         use floating point; that asymmetry is
+#                         deliberate and is the whole design.
 CFLAGS := -std=c17 -g -O2 \
           -ffreestanding -fno-stack-protector -fno-pic -fno-pie \
           -mno-red-zone -mcmodel=kernel -mgeneral-regs-only \
@@ -116,12 +131,13 @@ ASM_OBJS := $(patsubst %.asm,$(OBJ_DIR)/%.asm.o,$(ASM_SOURCES))
 # Built separately from the kernel and then embedded in it as a flat
 # binary. Three of the flags below are load-bearing:
 #
-#   -mgeneral-regs-only
-#       The kernel does not save vector register state when an interrupt
-#       arrives, so a user program using SSE would have its registers
-#       quietly clobbered by whatever the kernel did next. It also means
-#       no floating point, since the SysV ABI passes those in SSE
-#       registers. Both are M3's problem to fix properly.
+#   (no -mgeneral-regs-only)
+#       User programs MAY use floating point and vector registers, and
+#       the kernel enables SSE for them. The kernel itself must not, and
+#       does not -- see the note above CFLAGS. This asymmetry is the whole
+#       design: an interrupt does not save vector state, so the kernel
+#       never touching it is what makes interrupt entry cheap, while a
+#       process's state is saved whenever control changes hands.
 #
 #   -mcmodel=small
 #       A user program lives in the lower half and is addressed with the
@@ -137,7 +153,7 @@ ASM_OBJS := $(patsubst %.asm,$(OBJ_DIR)/%.asm.o,$(ASM_SOURCES))
 
 USER_CFLAGS := -std=c17 -g -O2 \
                -ffreestanding -fno-stack-protector -fno-pic -fno-pie \
-               -mno-red-zone -mcmodel=small -mgeneral-regs-only \
+               -mno-red-zone -mcmodel=small \
                -fno-builtin -Wall -Wextra \
                -Iuser -Ikernel/include -Ilibk/include
 
@@ -180,6 +196,7 @@ user: $(USER_BIN)
 $(KERNEL): $(OBJS) linker.ld
 	@echo "  LD      $@"
 	@$(LD) $(LDFLAGS) -o $@ $(OBJS)
+	@bash $(CHECK_VECTOR_REGS) $@
 
 $(OBJ_DIR)/%.c.o: %.c
 	@mkdir -p $(@D)

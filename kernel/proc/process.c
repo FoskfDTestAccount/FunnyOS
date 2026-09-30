@@ -1,5 +1,6 @@
 #include <funnyos/process.h>
 
+#include <funnyos/arch/x86_64/fpu.h>
 #include <funnyos/arch/x86_64/gdt.h>
 #include <funnyos/arch/x86_64/irq.h>
 #include <funnyos/bootinfo.h>
@@ -168,9 +169,41 @@ struct process *process_create(const char *name, const void *image, size_t size)
         return NULL;
     }
 
+    /*
+     * Floating point state. The heap hands back 16-byte aligned blocks --
+     * its header is 32 bytes and its base is page aligned -- which is
+     * exactly what FXSAVE requires, but that is a property of another
+     * file, so it is checked rather than assumed.
+     */
+    p->fpu_state = kmalloc(FPU_STATE_SIZE);
+    if (!p->fpu_state) {
+        kprintf("process: cannot allocate floating point state\n");
+        vmm_destroy_address_space(p->pml4);
+        kfree(p->kernel_stack);
+        kfree(p);
+        return NULL;
+    }
+
+    if (((uintptr_t)p->fpu_state & (FPU_STATE_ALIGN - 1)) != 0) {
+        kprintf("process: floating point state is not %u-byte aligned\n",
+                (unsigned)FPU_STATE_ALIGN);
+        vmm_destroy_address_space(p->pml4);
+        kfree(p->fpu_state);
+        kfree(p->kernel_stack);
+        kfree(p);
+        return NULL;
+    }
+
+    /* A program starts with the architectural default: x87 reset, all
+     * exceptions masked, round to nearest. Restoring this before the first
+     * instruction is what makes its first floating point result depend on
+     * its code and not on whatever ran before it. */
+    fpu_init_state(p->fpu_state);
+
     if (!build_address_space(p, image, size)) {
         kprintf("process: cannot build the address space (out of memory?)\n");
         vmm_destroy_address_space(p->pml4);
+        kfree(p->fpu_state);
         kfree(p->kernel_stack);
         kfree(p);
         return NULL;
@@ -198,6 +231,9 @@ void process_destroy(struct process *p)
                      PROCESS_STACK_TOP);
 
     vmm_destroy_address_space(p->pml4);
+
+    if (p->fpu_state)
+        kfree(p->fpu_state);
 
     if (p->kernel_stack)
         kfree(p->kernel_stack);
@@ -237,9 +273,29 @@ int process_run(struct process *p, uint64_t arg)
 
         vmm_switch_to(p->pml4);
 
+        /*
+         * Hand the program its floating point state, and take it back
+         * afterwards.
+         *
+         * This is the seed of a context switch. With one process at a time
+         * the two calls are a round trip through the same memory and
+         * change nothing; with two, they are the difference between the
+         * programs keeping their own arithmetic and sharing one set of
+         * registers by accident.
+         *
+         * Nothing here needs to happen around interrupts: the kernel is
+         * compiled without vector registers, so a handler cannot disturb
+         * them in the first place. See fpu.h.
+         */
+        fpu_restore(p->fpu_state);
+
         /* Leaves through iretq; the next code to run is the program's. */
         usermode_enter(p->entry, p->stack_top, arg);
     }
+
+    /* The process has stopped, however it stopped. Whatever it left in the
+     * floating point registers is its own until the next time it runs. */
+    fpu_save(p->fpu_state);
 
     /* Resumed here by process_exit_hook, which has already switched back
      * to the kernel's address space. */

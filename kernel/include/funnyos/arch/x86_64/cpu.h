@@ -62,6 +62,34 @@ static inline struct cpu_cpuid_result cpu_cpuid(uint32_t leaf, uint32_t subleaf)
     return r;
 }
 
+/* --- Control registers --------------------------------------------- */
+
+static inline uint64_t cpu_read_cr0(void)
+{
+    uint64_t v; __asm__ volatile("mov %%cr0, %0" : "=r"(v)); return v;
+}
+static inline uint64_t cpu_read_cr2(void)
+{
+    uint64_t v; __asm__ volatile("mov %%cr2, %0" : "=r"(v)); return v;
+}
+static inline uint64_t cpu_read_cr3(void)
+{
+    uint64_t v; __asm__ volatile("mov %%cr3, %0" : "=r"(v)); return v;
+}
+static inline uint64_t cpu_read_cr4(void)
+{
+    uint64_t v; __asm__ volatile("mov %%cr4, %0" : "=r"(v)); return v;
+}
+
+static inline void cpu_write_cr0(uint64_t v)
+{
+    __asm__ volatile("mov %0, %%cr0" : : "r"(v) : "memory");
+}
+static inline void cpu_write_cr4(uint64_t v)
+{
+    __asm__ volatile("mov %0, %%cr4" : : "r"(v) : "memory");
+}
+
 /* --- Hints ---------------------------------------------------------- */
 
 /* Tell the CPU this is a spin-wait, so it can yield execution resources

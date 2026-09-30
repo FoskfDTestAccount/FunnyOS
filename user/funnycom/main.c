@@ -17,6 +17,8 @@
 #include <libu/libu.h>
 #include <libk/string.h>
 
+#include <stdbool.h>
+
 #define SHELL_NAME    "FunnyCOM"
 #define SHELL_VERSION "0.1"
 
@@ -31,6 +33,7 @@
 #define ARG_NORMAL     0
 #define ARG_FAULT_TEST 1
 #define ARG_EXIT_TEST  2
+#define ARG_FPU_TEST   3
 
 /* Exit code for the exit test. Deliberately not zero, so that a test
  * which passes has proved the code travelled back through the kernel
@@ -254,6 +257,118 @@ static void run_fault_test(void)
     uputs("FAILED: the write did not fault.\n");
 }
 
+/*
+ * Floating point, and whether it survives being interrupted.
+ *
+ * Two things are being checked and only the second is interesting.
+ *
+ * The first is that floating point works at all: that the kernel enabled
+ * SSE and the x87 unit, and that a program compiled to use them runs
+ * instead of faulting.
+ *
+ * The second is that control leaving the program and coming back does not
+ * destroy its arithmetic. Both halves of the saved state are exercised,
+ * because they are separate things a handler could damage independently:
+ * SSE lives in XMM, and x87 lives on its own register stack, reached
+ * through long double.
+ *
+ * What this does NOT prove, and cannot: that the kernel never touches a
+ * vector register. Whether these loops happen to be holding a value in
+ * the particular register a hypothetical bad handler would clobber is the
+ * compiler's decision, not this test's, and a check that depends on
+ * register allocation is a check that will one day report a false pass.
+ *
+ * That claim is settled statically instead -- see
+ * tools/check-no-vector-regs.sh, which disassembles the linked kernel and
+ * fails the build if a single vector register appears. This is the
+ * end-to-end companion to that: proof that the arrangement works, next to
+ * proof that its precondition holds.
+ *
+ * Everything here is exact in binary floating point, so the comparisons
+ * can be equalities rather than epsilons. A test that needed a tolerance
+ * would be a test that could not tell corruption from rounding.
+ */
+#define FPU_LOOP_MS 40
+
+static void run_fpu_test(void)
+{
+    volatile double      two   = 2.0;
+    volatile long double three = 3.0L;   /* volatile, or it all folds away */
+
+    unsigned long start = u_uptime_ms();
+    unsigned long now   = start;
+
+    /* --- SSE: 2^30 in a register the compiler keeps in XMM --- */
+    unsigned long sse_rounds = 0;
+    unsigned long sse_wrong  = 0;
+
+    do {
+        double value = 1.0;
+        for (int i = 0; i < 30; i++)
+            value = value * two;         /* 2^30, exact */
+
+        value = value - 1073741824.0;    /* exactly zero if nothing was lost */
+        if (value != 0.0)
+            sse_wrong++;
+
+        sse_rounds++;
+        now = u_uptime_ms();
+    } while (now - start < FPU_LOOP_MS);
+
+    unsigned long sse_ticks = now - start;
+
+    /* --- x87: 3^20 on the register stack, reached via long double --- */
+    unsigned long x87_rounds = 0;
+    unsigned long x87_wrong  = 0;
+
+    start = u_uptime_ms();
+    now   = start;
+
+    do {
+        long double value = 1.0L;
+        for (int i = 0; i < 20; i++)
+            value = value * three;       /* 3^20 = 3486784401, exact */
+
+        value = value - 3486784401.0L;
+        if (value != 0.0L)
+            x87_wrong++;
+
+        x87_rounds++;
+        now = u_uptime_ms();
+    } while (now - start < FPU_LOOP_MS);
+
+    unsigned long x87_ticks = now - start;
+
+    /*
+     * And a value carried across system calls.
+     *
+     * Note this one tests the path rather than the registers: the C
+     * compiler is entitled to spill a local around a call, and does, so
+     * what this proves is that a round trip through the kernel does not
+     * corrupt the program's arithmetic -- not that a specific register
+     * survived. The loops above are the ones that pin registers down.
+     */
+    double held = 3.0;
+    (void)u_uptime_ms();
+    held = held * 4.0;
+    (void)u_uptime_ms();
+    held = held + 1.0;
+
+    uprintf("  SSE rounds    : %lu in %lu ms (%lu timer ticks)\n",
+            sse_rounds, sse_ticks, sse_ticks / 10);
+    uprintf("  x87 rounds    : %lu in %lu ms (%lu timer ticks)\n",
+            x87_rounds, x87_ticks, x87_ticks / 10);
+    uprintf("  exact results : %lu wrong out of %lu\n",
+            sse_wrong + x87_wrong, sse_rounds + x87_rounds);
+    uprintf("  across a call : %s (expected 13)\n",
+            held == 13.0 ? "intact" : "CLOBBERED");
+
+    bool ok = sse_wrong == 0 && x87_wrong == 0 &&
+              held == 13.0 && sse_rounds > 0 && x87_rounds > 0;
+
+    uprintf("  result        : %s\n", ok ? "PASS" : "FAIL");
+}
+
 int u_main(uint64_t arg)
 {
     if (arg == ARG_FAULT_TEST) {
@@ -266,6 +381,11 @@ int u_main(uint64_t arg)
          * code, and with the kernel resuming as if it had been called. */
         uputs("Exit self-test: returning a known code.\n");
         return EXIT_TEST_CODE;
+    }
+
+    if (arg == ARG_FPU_TEST) {
+        run_fpu_test();
+        return 0;
     }
 
     banner();

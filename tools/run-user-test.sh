@@ -2,9 +2,9 @@
 #
 # User program test.
 #
-# Three boots of the same image, with the kernel command line as the only
-# difference. Each one ends a process a different way, and each way has
-# its own way of going wrong:
+# Four boots of the same image, with the kernel command line as the only
+# difference. Each one exercises a different way for control to leave a
+# process, and each has its own way of going wrong:
 #
 #   1. Normally. The shell starts in Ring 3 and stays there. Checks the
 #      load path, the iretq into Ring 3, and the system call interface.
@@ -20,8 +20,15 @@
 #      actually travels back rather than the kernel reporting whatever it
 #      had to hand.
 #
-# Three boots rather than one because a process only ends once, and a
-# single boot cannot show three different endings.
+#   4. With `selftest=fputest`. The program does exact floating point
+#      arithmetic for long enough that several timer interrupts land in
+#      the middle of it, and checks the answer. This is the one that
+#      guards the kernel's compile flags: the handlers must not touch
+#      vector registers, and if somebody removes -mgeneral-regs-only they
+#      will, and the answers will stop being exact.
+#
+# Four boots rather than one because a process only ends once, and the
+# command line is the only thing that can differ between them.
 #
 # Usage: bash tools/run-user-test.sh [ISO path] [bios|uefi]
 #
@@ -107,9 +114,11 @@ EOF
 
 FAULT_ISO="$WORK/funyos-userfault.iso"
 EXIT_ISO="$WORK/funyos-userexit.iso"
+FPU_ISO="$WORK/funyos-fputest.iso"
 
 build_image "selftest=userfault" "$FAULT_ISO"
 build_image "selftest=userexit"  "$EXIT_ISO"
+build_image "selftest=fputest"   "$FPU_ISO"
 
 # ---------------------------------------------------------------- boot
 
@@ -201,6 +210,28 @@ expect_present "exited with code 7"          "the code travelled back to the ker
 expect_present "nothing left to run"         "the kernel resumed as if called"      "$LOG3"
 expect_absent  "PANIC"                       "no kernel panic"                      "$LOG3"
 expect_absent  "program fault"               "ending normally is not a fault"       "$LOG3"
+
+# ------------------------------------------------------------ run 4
+
+LOG4="$WORK/serial-fpu-$MODE.log"
+echo
+echo "  Boot 4: floating point under interrupts ($MODE)"
+boot "$FPU_ISO" "$LOG4"
+show "floating point" "$LOG4"
+
+echo "Assertions (floating point, $MODE):"
+expect_present "Startup arg    : 3"          "the FPU mode reached the program"      "$LOG4"
+expect_present "Floating point : x87 and SSE" "the kernel enabled SSE and x87"       "$LOG4"
+expect_present "exact results : 0 wrong"     "no result was corrupted mid-calculation" "$LOG4"
+expect_present "across a call : intact"      "state survived a system call"          "$LOG4"
+expect_present "result        : PASS"        "the whole floating point check passed" "$LOG4"
+expect_present "exited with code 0"          "the program finished normally"         "$LOG4"
+expect_absent  "PANIC"                       "no kernel panic"                       "$LOG4"
+expect_absent  "program fault"               "nothing faulted"                       "$LOG4"
+# A #UD here would mean SSE was left disabled, and #NM would mean CR0.TS
+# was left set. Both are reported as ordinary CPU exceptions, so the
+# absence of the diagnostic is the assertion.
+expect_absent  "CPU EXCEPTION"               "no exception from a vector instruction" "$LOG4"
 
 echo
 if [ "$FAILED" -eq 0 ]; then

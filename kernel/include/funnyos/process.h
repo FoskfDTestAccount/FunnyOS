@@ -102,6 +102,19 @@ struct process {
     void    *kernel_stack;
     size_t   kernel_stack_size;
 
+    /*
+     * This process's floating point state, FPU_STATE_SIZE bytes at
+     * FPU_STATE_ALIGN.
+     *
+     * The kernel never touches a vector register, so an interrupt taken
+     * during a floating point calculation needs no save. But control
+     * passing *between* two processes does, and this is where that state
+     * lives. With one process at a time it goes back exactly where it came
+     * from; the field exists now because the alternative is a scheduler
+     * that silently interleaves two programs' registers.
+     */
+    void    *fpu_state;
+
     /* Set by SYS_EXIT, acted on by the interrupt post-hook. */
     bool     exited;
     int      exit_code;

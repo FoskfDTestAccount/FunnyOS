@@ -22,7 +22,7 @@ DOS 在这里扮演两重角色：**设计参照系**（继承小内核、直白
 - **内存**——物理页帧分配器、页表管理（含 1 GiB / 2 MiB 大页拆分）、内核堆，每次启动跑一遍自检。
 - **中断与时间**——解析 ACPI MADT 找出中断控制器（而非硬编码地址），初始化本地 APIC 与 I/O APIC，把 8259 PIC 重映射出异常向量区间后屏蔽；时间基准是 100 Hz 的 LAPIC 定时器，频率以 8254 PIT 晶振为参考**实测标定**，每次启动用 TSC 复核。
 - **输入**——PS/2 键盘驱动，以及带回显与退格的行编辑。
-- **进程**——Ring 3 执行、私有地址空间、`int 0x80` 系统调用、故障隔离。
+- **进程**——Ring 3 执行、私有地址空间、`int 0x80` 系统调用、故障隔离、**浮点（x87 与 SSE）**。
 - **文件**——一个只读的内存文件系统，文件内容就是编译进内核的字符串。
 - **Shell**——`dir` / `type` / `echo` / `help` / `ver` / `uptime` / `cls` / `exit`。
 
@@ -30,7 +30,7 @@ DOS 在这里扮演两重角色：**设计参照系**（继承小内核、直白
 
 **一个程序崩溃只杀死它自己。** 这是 FunnyOS 明确背离 DOS 的地方，也是整套设计存在的理由。测试套件里有一个专门的用例：让 Shell 去写一块没有映射的地址，然后断言内核报告这次错误、结束那个进程、并继续运行。
 
-测试规模：正常启动 25 项断言 × 两条固件路径，故障注入 9 项，键盘与 Shell 交互 17 项，用户程序 21 项（三种结束方式：正常、崩溃、主动退出）。全部由 `make check` 驱动。
+测试规模：正常启动 25 项断言 × 两条固件路径，故障注入 9 项，键盘与 Shell 交互 17 项，用户程序 30 项（四种模式：正常启动、崩溃、主动退出、浮点自检）。此外构建本身会反汇编内核、校验它一个向量寄存器都没碰。全部由 `make check` 驱动。
 
 | | 交互式 Shell | 程序崩溃 |
 |---|---|---|
@@ -99,6 +99,7 @@ FunnyOS/
 │   │   ├── acpi.c               ACPI MADT 解析（找出中断控制器）
 │   │   ├── apic.c               本地 APIC 与 I/O APIC
 │   │   ├── timer.c              LAPIC 定时器 + PIT 标定 + TSC
+│   │   ├── fpu.c  fpu.asm       启用 x87/SSE，以及 FXSAVE/FXRSTOR
 │   │   └── usermode.asm         iretq 进入 Ring 3，以及退出时的上下文恢复
 │   ├── boot/bootinfo.c          Limine 引导请求与访问接口
 │   ├── mm/
@@ -136,6 +137,7 @@ FunnyOS/
 │   ├── screenshot.sh            无头截图（启动画面）
 │   ├── screenshot-shell.sh      无头截图（Shell 会话中）
 │   ├── bin2c.py                 把用户态程序转成内核里的字节数组
+│   ├── check-no-vector-regs.sh  反汇编内核，确认它没碰向量寄存器
 │   ├── gen-font.py              从 TTF 生成 8x16 点阵字库
 │   ├── github-setup.sh          GitHub 仓库初始化
 │   ├── fix-line-endings.sh      行尾符诊断与修复
@@ -197,13 +199,19 @@ Limine 把所有 HHDM 区域映射为 write-back，**唯独帧缓冲区域用 wr
 
 往 [kernel/console/fb.c](kernel/console/fb.c) 里加任何东西都要守住这条：**永远不要读 `g_addr`。**
 
-### 5. 暂时没有浮点：内核和用户态都没有
+### 5. 内核绝不允许碰向量寄存器
 
-`-mgeneral-regs-only` 同样写在用户程序的编译选项里，理由和内核那边是同一个：**内核收到中断时不保存 FPU/SSE 状态**，所以任何用到向量寄存器的代码，其寄存器内容都会被内核接下来做的事悄悄覆盖。
+**中断不保存 FPU/SSE 状态。** CPU 在中断时只压入通用寄存器和返回帧,XMM 和 x87 栈一概不管——这正是为了让「用不到它们的操作系统」可以完全跳过这件事。
 
-连带的后果是**不能用 `float` / `double`**——SysV 调用约定用 XMM 寄存器传浮点参数，禁用向量寄存器就等于禁用了浮点。这不是"暂时不方便"，而是一条会实际影响设计的约束：M3 的 8087 协处理器模拟必须先把这件事解决掉（在上下文切换和内核入口处保存/恢复 FPU 状态），否则老游戏跑不起来。
+所以内核**永远不能触碰向量寄存器**,`-mgeneral-regs-only` 就是保证这一点的手段。这不是风格偏好,而是整套设计成立的前提:正因为内核不碰,一个正在做浮点运算的程序被定时器中断打断时,它的 XMM 才能原封不动地留着。
 
-碰到需要小数的场合，目前的办法是用整数表示（比如把频率按毫赫兹、千分之一这样的定标整数来打印）。
+**用户程序不受这条限制**——它们可以用 `float` / `double`。进程状态在控制权易手时用 FXSAVE/FXRSTOR 保存恢复;而中断期间不需要保存,因为内核根本不碰那些寄存器。这个不对称就是整个设计。
+
+危险在于失败是**无声的**。如果有人把 `-mgeneral-regs-only` 从内核 CFLAGS 里删掉,每一次中断都会开始破坏被打断程序的数据——不报错,只是过一会儿某个结果变错,而且只在恰好被打断时才错。这种 bug 没人靠阅读能发现。
+
+所以它是**机械校验**的,不是靠自觉:[tools/check-no-vector-regs.sh](tools/check-no-vector-regs.sh) 反汇编链接后的内核,只要出现一个向量寄存器就让构建失败。跑在内核**产物**上而不是源码上,因为源码可能完全无辜,而编译器有权把某个循环向量化。
+
+顺带说明为什么没有 AVX:FXSAVE 的 512 字节镜像**不包含 YMM**,所以 `CR4.OSXSAVE` 被显式关闭。AVX 指令会触发 `#UD`——响亮地失败,而不是安静地漏掉一半状态。
 
 ## 设计要点速查
 
@@ -240,7 +248,7 @@ What works:
 - **Memory** -- a physical frame allocator, page table management including 1 GiB and 2 MiB page splitting, and a kernel heap, all self-tested on every boot.
 - **Interrupts and time** -- the ACPI MADT is parsed to find the interrupt controllers rather than hardcoding their addresses, the local and I/O APICs are brought up, and the 8259 pair is remapped out of the exception vector range and masked. The time base is the LAPIC timer at 100 Hz, *measured* against the 8254 PIT's crystal and re-checked against the TSC on every boot.
 - **Input** -- a PS/2 keyboard driver, and a line discipline with echo and backspace.
-- **Processes** -- Ring 3 execution, private address spaces, `int 0x80` system calls, and fault isolation.
+- **Processes** -- Ring 3 execution, private address spaces, `int 0x80` system calls, fault isolation, and **floating point** (x87 and SSE).
 - **Files** -- a read-only in-memory filesystem whose contents are string literals compiled into the kernel.
 - **Shell** -- `dir`, `type`, `echo`, `help`, `ver`, `uptime`, `cls`, `exit`.
 
@@ -248,7 +256,7 @@ What works:
 
 **A crashing program kills only itself.** This is where FunnyOS deliberately departs from DOS, and it is the reason for the whole design. There is a test that makes the shell write to an address it has no mapping for, and asserts that the kernel reports the fault, ends that process, and carries on.
 
-Test coverage: 25 assertions per boot path across both firmware types, 9 more for fault injection, 17 for keyboard and shell interaction, and 21 for user programs across three different ways of ending one (normal, fault, deliberate exit). All driven by `make check`.
+Test coverage: 25 assertions per boot path across both firmware types, 9 more for fault injection, 17 for keyboard and shell interaction, and 30 for user programs across four modes (normal startup, fault, deliberate exit, and a floating point check). The build itself additionally disassembles the kernel and verifies it touches no vector register. All driven by `make check`.
 
 | | Interactive shell | Program crash |
 |---|---|---|
@@ -317,6 +325,7 @@ FunnyOS/
 │   │   ├── acpi.c               ACPI MADT parsing (locating the interrupt controllers)
 │   │   ├── apic.c               Local APIC and I/O APIC
 │   │   ├── timer.c              LAPIC timer, PIT calibration, TSC
+│   │   ├── fpu.c  fpu.asm       Enabling x87/SSE, and FXSAVE/FXRSTOR
 │   │   └── usermode.asm         iretq into Ring 3, and the context restore on exit
 │   ├── boot/bootinfo.c          Limine boot requests and accessor interface
 │   ├── mm/
@@ -354,6 +363,7 @@ FunnyOS/
 │   ├── screenshot.sh            Headless screendump of the boot
 │   ├── screenshot-shell.sh      Headless screendump mid-shell-session
 │   ├── bin2c.py                 Turn a user program into a byte array
+│   ├── check-no-vector-regs.sh  Disassemble the kernel, prove it touches no XMM
 │   ├── gen-font.py              Rasterise a TTF into the 8x16 bitmap font
 │   ├── github-setup.sh          GitHub repository bootstrap
 │   ├── fix-line-endings.sh      Line ending diagnostics and repair
@@ -415,13 +425,19 @@ So the framebuffer here is **write-only**. The authoritative screen content live
 
 Anything added to [kernel/console/fb.c](kernel/console/fb.c) has to respect that: **never read from `g_addr`.**
 
-### 5. There is no floating point, in the kernel or in user programs
+### 5. The kernel must never touch a vector register
 
-`-mgeneral-regs-only` is in the user program flags too, for the same reason it is in the kernel's: **the kernel does not save FPU or SSE state when an interrupt arrives**, so any code using a vector register would have its contents silently overwritten by whatever the kernel did next.
+**An interrupt does not save floating point state.** The CPU pushes general purpose registers and the return frame, and nothing else -- XMM and the x87 stack are left alone, precisely so that an operating system which never uses them can skip the whole business.
 
-The consequence is that `float` and `double` are unusable -- the SysV calling convention passes them in XMM registers, so banning vector registers bans floating point. This is not a temporary inconvenience; it is a constraint that will shape a milestone. M3's 8087 emulation cannot be built without first fixing this properly, by saving and restoring FPU state on context switches and kernel entry.
+So the kernel never touches a vector register, and `-mgeneral-regs-only` is what enforces that. It is not a style preference; it is the precondition the design rests on. Because the kernel leaves those registers alone, a program interrupted mid-calculation by a timer tick still has its XMM registers exactly where it left them.
 
-Where a fraction is needed in the meantime, it is carried as a scaled integer -- a frequency printed in millihertz, say, rather than as a double.
+**User programs are not bound by this** -- they may use `float` and `double`. A process's state is saved and restored with FXSAVE/FXRSTOR whenever control changes hands, and needs no saving across an interrupt because the kernel never disturbs it. That asymmetry is the whole arrangement.
+
+The danger is that the failure is **silent**. Drop `-mgeneral-regs-only` from the kernel's CFLAGS and every interrupt starts corrupting the interrupted program's data -- no fault, just a wrong answer somewhere later, and only when the timing happens to be unlucky. Nobody finds that by reading.
+
+So it is checked mechanically rather than trusted: [tools/check-no-vector-regs.sh](tools/check-no-vector-regs.sh) disassembles the linked kernel and fails the build if a single vector register appears. It runs on the built artifact rather than on the sources, because the C can be perfectly innocent and the compiler still be entitled to vectorise a loop.
+
+This is also why there is no AVX: the 512-byte FXSAVE image does not cover YMM, so `CR4.OSXSAVE` is explicitly cleared. AVX instructions raise `#UD` -- a loud failure rather than quietly saving half the state.
 
 ## Design decisions at a glance
 
