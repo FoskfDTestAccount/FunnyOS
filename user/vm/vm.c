@@ -515,6 +515,20 @@ static bool run_case(const struct guest_case *c)
         return false;
     }
 
+    /*
+     * The emulator failed, not the guest: the opcode table did not merge,
+     * so nothing in this run reached the handler it should have. Reported
+     * before anything is judged and failed on the spot, because every
+     * check below is about what the guest did and would read a broken
+     * machine as a well-behaved one.
+     */
+    if (result == VM86_INTERNAL_ERROR) {
+        uprintf("  result : INTERNAL ERROR, the opcode table did not "
+                "merge; no instruction in this run can be trusted\n");
+        uprintf("  VM: case %s: FAIL (broken emulator)\n", c->name);
+        return false;
+    }
+
     if (result == VM86_FAULT) {
         uprintf("  result : fault, vector %u (%s)\n",
                 (unsigned)cpu.fault, vector_name(cpu.fault));
