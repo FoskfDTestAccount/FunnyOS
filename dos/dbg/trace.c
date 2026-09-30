@@ -602,6 +602,26 @@ void vm86_dbg_dump_flags(uint16_t flags, struct vm86_dbg_out *out)
     line_end(&l);
 }
 
+/*
+ * How many hex digits an address needs, at least five.
+ *
+ * Five covers the 8086's megabyte, which is what almost every dump will
+ * be inside. Past the end of it a fixed five would wrap: a line at
+ * 0x100008 would print as `00008` and read as a low address, which is the
+ * one kind of mistake a memory dump must not make. Five is the floor
+ * because that is the conventional width; the extra digits appear only
+ * when the address actually has them.
+ */
+static unsigned address_digits(uint32_t value)
+{
+    unsigned digits = 5u;
+
+    while (digits < 8u && (value >> (digits * 4u)) != 0u)
+        digits++;
+
+    return digits;
+}
+
 void vm86_dbg_dump_memory(struct vm86_cpu *cpu, uint32_t linear,
                           uint16_t count, struct vm86_dbg_out *out)
 {
@@ -622,7 +642,7 @@ void vm86_dbg_dump_memory(struct vm86_cpu *cpu, uint32_t linear,
             row[i] = vm86_mem_read8(cpu->mem, linear + done + i);
 
         line_begin(&l, out);
-        line_hex(&l, linear + done, 5u);
+        line_hex(&l, linear + done, address_digits(linear + done));
         line_text(&l, "  ");
 
         for (uint32_t i = 0; i < 16u; i++) {

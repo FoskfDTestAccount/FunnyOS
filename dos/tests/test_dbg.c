@@ -697,6 +697,26 @@ static void test_the_memory_dump_past_the_end_reads_the_floating_bus(struct vm86
     vm86_expect_bool("it survived it", g_writes > 0, true);
 }
 
+/*
+ * An address must not wrap on the way to the screen.
+ *
+ * The megabyte is the 8086's whole address space and almost every dump
+ * lives inside it, where the conventional five hex columns are enough.
+ * Past the end they are not: a line at 0x10000C printed in five would
+ * read as `0000C`, a low address, and a dump that misreports where the
+ * bytes are is worse than no dump at all.
+ */
+static void test_the_memory_dump_keeps_the_address_past_the_megabyte(struct vm86_cpu *cpu)
+{
+    struct vm86_dbg_out out = make_sink();
+
+    vm86_dbg_dump_memory(cpu, VM86_TEST_MEMORY - 4u, 32, &out);
+
+    expect_text("the last of the real memory", "FFFFC");
+    expect_text("and the line past it, not wrapped", "10000C");
+    expect_text("with the bus floating above", "FF FF FF FF");
+}
+
 static void test_the_memory_dump_shows_unprintable_bytes_as_dots(struct vm86_cpu *cpu)
 {
     struct vm86_dbg_out out = make_sink();
@@ -826,6 +846,8 @@ static const struct vm86_test tests[] = {
       test_the_memory_dump_shows_hex_and_ascii },
     { "the memory dump past the end reads the floating bus",
       test_the_memory_dump_past_the_end_reads_the_floating_bus },
+    { "the memory dump keeps the address past the megabyte",
+      test_the_memory_dump_keeps_the_address_past_the_megabyte },
     { "the memory dump shows unprintable bytes as dots",
       test_the_memory_dump_shows_unprintable_bytes_as_dots },
 
