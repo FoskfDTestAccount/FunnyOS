@@ -104,9 +104,18 @@ test: $(addprefix $(BUILD)/test_,$(SUITES))
 	    exit 1; \
 	fi
 
-# Pattern target, so `make test-alu` works for any suite that exists
-# without anything having to know its name in advance.
-test-%: $(BUILD)/test_%
+# A static pattern rule rather than a plain `test-%:` one.
+#
+# The plain form looks right and silently does nothing: make skips the
+# implicit rule search for a phony target, and every suite name is phony
+# here, so `make test-alu` printed "Nothing to be done for 'test-alu'"
+# and exited 0. That is the worst shape a broken command can take --
+# it is documented in the README as the way to run one suite, and it
+# reports success while running nothing.
+#
+# The static form is expanded at parse time, so it is a real rule and
+# .PHONY has nothing to suppress.
+$(addprefix test-,$(SUITES)): test-%: $(BUILD)/test_%
 	@$<
 
 list:
