@@ -1228,27 +1228,27 @@ static void test_a_service_cannot_leave_interrupts_off(struct vm86_cpu *cpu)
 /*
  * *** PINS A KNOWN DEFECT ***  -- see M4-intr-audit-report.md
  *
- * The trap writes the service's flags back into the frame at SS:SP+4,
- * because that is where an INT's three words put FLAGS. A far call
- * pushes two words, not three, so a handler that chains to the previous
- * one with `call far` leaves its own saved CS at SP+2 and whatever was
- * on the stack before that at SP+4 -- and the trap rewrites the second
- * of those.
+ * A far call pushes two words, not three, so a handler that chains to the
+ * previous one with `call far` leaves its own saved CS at SP+2 and
+ * whatever was on the stack before that at SP+4. The trap writes a
+ * service's flags at SP+4, so it rewrote the second of those: a word the
+ * chaining handler was going to use, corrupted on behalf of a frame that
+ * was never an interrupt's.
  *
- * The two paths the firmware installs are both safe: an INT pushes the
- * three words, and a guest executing the trap bytes itself has to build
- * the same frame. Only chaining by far call is exposed, and it is the
- * one path host.h lists as the reason a service must not retry -- so the
- * case exists and was not considered for this.
+ * This case was written to pin that defect, and its own note said what
+ * the expected value would become once it was fixed -- "by checking that
+ * the frame is really an interrupt frame, or by having the trap record
+ * where it pushed -- the expected value becomes 0xBEEF". The fix took the
+ * second of those: vm86_interrupt() records the stack pointer it leaves,
+ * and the trap declines to write when the two disagree. The marker
+ * therefore survives, and a chained call loses a service's flags instead
+ * of gaining a corrupted word.
  *
- * The frame below is what a far call leaves: the return offset at SP,
- * the return segment at SP+2, and a marker where the caller's own data
- * would be. The marker is not a flags word, and the assertion is that it
- * survives. When this is fixed -- by checking that the frame is really
- * an interrupt frame, or by having the trap record where it pushed --
- * the expected value becomes 0xBEEF.
+ * The two paths the firmware installs are unaffected: an INT pushes the
+ * three words, and a guest executing the trap bytes for itself has to
+ * build the same frame.
  */
-static void test_a_chained_far_call_gets_its_stack_rewritten(
+static void test_a_chained_far_call_keeps_its_stack(
         struct vm86_cpu *cpu)
 {
     vm86_clear_services();
@@ -1271,8 +1271,8 @@ static void test_a_chained_far_call_gets_its_stack_rewritten(
 
     vm86_step(cpu);
 
-    vm86_expect_mem16("the caller's word past the frame, rewritten as a flags "
-                      "merge", cpu, 0xFFF4u, 0xF202u);
+    vm86_expect_mem16("the caller's own word, left alone",
+                      cpu, 0xFFF4u, 0xBEEFu);
 }
 
 /*
@@ -1640,8 +1640,8 @@ static const struct vm86_test tests[] = {
       test_a_service_can_hand_a_flag_to_the_guest },
     { "a service cannot leave interrupts off",
       test_a_service_cannot_leave_interrupts_off },
-    { "KNOWN DEFECT: a chained far call gets its stack rewritten",
-      test_a_chained_far_call_gets_its_stack_rewritten },
+    { "a chained far call keeps its stack",
+      test_a_chained_far_call_keeps_its_stack },
 
     { "install_firmware writes the table and the machine description",
       test_install_firmware_writes_the_table_and_the_machine_description },

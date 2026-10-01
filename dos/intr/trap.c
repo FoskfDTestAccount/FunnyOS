@@ -77,15 +77,43 @@ void vm86_clear_services(void)
  * cannot use it to leave interrupts disabled on the way out, and it
  * cannot arm the single-step trap on a guest that did not ask for one.
  *
- * The frame is three words and SP points at the return address, so the
- * saved flags are at SP+4. It is the stack, so the segment is SS with no
- * override -- the same addressing the push used.
+ * ---------------------------------------------------------------------
+ * Which is only true when there is a frame to write into
+ *
+ * A stub is reached two ways and they do not leave the same stack. Through
+ * an INT there are three words on it -- FLAGS, CS, IP -- and the flags sit
+ * at SP+4. Through a TSR that chains in with a far call there are two, and
+ * SP+4 is whatever the chaining handler had there; for a chain made from
+ * inside an interrupt handler it is the saved instruction pointer of the
+ * interrupt that got there first. Writing flags over that corrupts a word
+ * the handler was going to use, and the damage surfaces much later as
+ * something else being wrong.
+ *
+ * vm86_interrupt() records the stack pointer it left behind, and this
+ * declines to write when the two disagree. A chained call therefore gets
+ * no write-back, and that is the direction to fail in: it loses a
+ * service's flags rather than gaining a corrupted word.
+ *
+ * The address is worked out before the service runs rather than after. A
+ * service is allowed to deliver another interrupt -- the timer handler
+ * chains to 1Ch that way -- and that moves the recorded pointer out from
+ * under a check made later.
  */
-static void write_flags_back(struct vm86_cpu *cpu)
+static bool frame_flags_address(struct vm86_cpu *cpu, uint32_t *out)
 {
-    uint32_t at = ((uint32_t)vm86_get_seg(cpu, VM86_SS) << 4)
-                  + (uint16_t)(cpu->sp + 4u);
+    if (cpu->sp != cpu->intr_frame_sp)
+        return false;
 
+    /* It is the stack, so the segment is SS with no override -- the same
+     * addressing the push used. */
+    *out = ((uint32_t)vm86_get_seg(cpu, VM86_SS) << 4)
+           + (uint16_t)(cpu->sp + 4u);
+
+    return true;
+}
+
+static void write_flags_back(struct vm86_cpu *cpu, uint32_t at)
+{
     uint16_t frame = vm86_mem_read16(cpu->mem, at);
 
     uint16_t merged = (uint16_t)((cpu->flags & (uint16_t)~(VM86_IF | VM86_TF))
@@ -112,20 +140,32 @@ enum vm86_result vm86_host_trap(struct vm86_cpu *cpu, uint8_t opcode)
      *
      * The two bytes of FE 38 are behind us by the time this runs: the
      * ModRM was fetched before the group handler looked at it. So the
-     * trap began two bytes back -- and that arithmetic is wrong wherever
-     * the ModRM byte is not the last byte of the instruction, which is
-     * any encoding of this group with a displacement: mod = 01 or 10, or
-     * mod = 00 with r/m = 6. FE 7F 05, for instance, would record the
-     * address of the ModRM instead, and a retry would rewind onto the 7F
-     * and execute it as `jg rel8`.
+     * trap began two bytes back -- and that arithmetic is wrong in two
+     * cases worth naming, because a retry rewinds to what this holds and
+     * a wrong value sends the guest somewhere no instruction ever was:
      *
-     * None of that is reachable from the stub, which is always the
-     * register form with r/m = 0 and no displacement, and no assembler
-     * emits FE /7 in any form. If the dispatcher's own recording is ever
-     * removed, this becomes the only answer and those encodings become
-     * the whole of the difference.
+     *   - a prefix in front of the trap (F3 FE 38, or a segment override),
+     *     where the instruction really began one or two bytes earlier and
+     *     this lands on the FE;
+     *   - any encoding of this group whose ModRM is not the last byte --
+     *     mod = 01 or 10, or mod = 00 with r/m = 6 -- where a displacement
+     *     follows it. FE 7F 05 would record the address of the ModRM, and
+     *     a retry would rewind onto the 7F and execute it as `jg rel8`.
+     *
+     * None of it is reachable from the stub, which is always the register
+     * form with r/m = 0 and no displacement, and no assembler emits FE /7
+     * in any form. If the dispatcher's own recording is ever removed, this
+     * becomes the only answer and those encodings become the whole of the
+     * difference.
      */
     cpu->insn_ip = (uint16_t)(cpu->ip - 2u);
+
+    /*
+     * Where a service's flags would go, worked out now rather than after
+     * the call. See the note on frame_flags_address().
+     */
+    uint32_t flags_at   = 0;
+    bool     have_frame = frame_flags_address(cpu, &flags_at);
 
     uint8_t service = vm86_fetch8(cpu);
 
@@ -143,7 +183,8 @@ enum vm86_result vm86_host_trap(struct vm86_cpu *cpu, uint8_t opcode)
     if (g_service[service])
         g_service[service](cpu, g_ctx[service]);
 
-    write_flags_back(cpu);
+    if (have_frame)
+        write_flags_back(cpu, flags_at);
 
     return VM86_CONTINUE;
 }

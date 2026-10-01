@@ -40,6 +40,14 @@ void vm86_interrupt(struct vm86_cpu *cpu, uint8_t vector)
     vm86_set_seg(cpu, VM86_CS, segment);
     cpu->ip = offset;
 
+    /*
+     * Remember where the frame is, so that a service reached through the
+     * stub can write its flags back into the right place. See the note on
+     * the field: the trap cannot derive this, because the same stub is
+     * reached by chains that push a different number of words.
+     */
+    cpu->intr_frame_sp = cpu->sp;
+
     vm86_flag_set(cpu, VM86_IF, false);
     vm86_flag_set(cpu, VM86_TF, false);
 

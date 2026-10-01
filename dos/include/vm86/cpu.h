@@ -242,6 +242,27 @@ struct vm86_cpu {
      */
     uint16_t insn_ip;
 
+    /*
+     * The stack pointer an interrupt frame is sitting at.
+     *
+     * Written by vm86_interrupt() once it has pushed, and read by the trap
+     * before it writes a service's flags back into that frame. The two
+     * have to agree on where the frame is, and the trap cannot work it out
+     * on its own: reaching the stub through an INT costs three words,
+     * reaching it through a TSR's far call costs two, and writing at SP+4
+     * in the second case lands on something that is not flags at all --
+     * for a chain made from inside an interrupt handler it is the saved
+     * instruction pointer of the interrupt that got there first.
+     *
+     * Zero means no interrupt has happened, which is a value SP cannot have
+     * had after a push sequence and so cannot be matched by accident in
+     * practice. A stale value left behind by an interrupt that has already
+     * returned can only be matched by a chained call that arrives with
+     * exactly the same stack pointer, which is the same assumption the
+     * stub's IRET is already making a few bytes later.
+     */
+    uint16_t intr_frame_sp;
+
     /* Prefixes for the instruction being executed. Cleared per
      * instruction by the run loop. */
     struct vm86_prefix prefix;
