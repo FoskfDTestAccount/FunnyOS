@@ -1,38 +1,113 @@
 #!/usr/bin/env python3
-"""Mutation campaign for dos/tests/test_verify.c.
+"""Mutation campaign for the 8086 subsystem.
 
-Copies the dos/ tree into WSL's own filesystem, applies one deliberate
-defect at a time, rebuilds the verify suite and records which cases go
-red.  The union of the cases that ever fail is the evidence that no case
-is vacuous; whatever is left over is reported so it can be attacked by
-hand.
+Applies one deliberate defect at a time to a *copy* of the tree, rebuilds
+and runs every suite, and records which cases go red. Whatever no mutation
+can redden is reported, because a case that cannot fail is worse than no
+case at all: it occupies the place where a real one would go and gives
+whoever reads the suite a reason to believe the behaviour is checked.
+
+    python3 tools/verify-mutations.py                  every layer
+    python3 tools/verify-mutations.py --layer intr     one layer
+    python3 tools/verify-mutations.py --only rep       by substring
+    python3 tools/verify-mutations.py --json out.json  machine-readable
+
+Pointing it at somebody else's tree, or at somebody else's mutations,
+needs no second copy of this file:
+
+    python3 tools/verify-mutations.py --tree /path/to/checkout
+    python3 tools/verify-mutations.py --mutations mine.json
+
+`--tree` is copied before anything is written to it, and `--mutations` is
+a JSON list of {"name", "file", "old", "new"} -- the shape of the table
+below, written out. A mutation whose anchor does not appear exactly once
+is reported, not skipped, so a table that has gone stale says so.
+
+------------------------------------------------------------------------
+What counts as evidence
+
+Three things can happen to a mutation, and they mean different things. The
+report keeps them apart because collapsing them is how a campaign flatters
+itself:
+
+  caught    the mutant compiled, changed the machine, and at least one
+            case went red. This is the only kind that is evidence that a
+            case is worth having.
+  survived  the mutant compiled and changed the machine, but every case
+            stayed green. That is the finding: an assertion nobody wrote.
+  vacuous   the mutant applied but the *compiled code* came out identical
+            to the pristine build, so nothing was tested at all. That is a
+            defect in the mutant, not a gap in the suite, and a campaign
+            that ignored it would report its own mistakes as coverage.
+
+The probe is the third one: every rebuilt suite binary is hashed and
+compared against the pristine build. Identical output means the compiler
+emitted the same instructions from the mutated source, and no execution of
+those binaries could ever disagree. It is deliberately one-directional --
+"the binary differs" does not prove the behaviour differs, only that the
+emitted code does, so a mutant that survives the probe is reported as a
+*survival* rather than credited as coverage. The conservative direction is
+the one that does not invent evidence.
+
+------------------------------------------------------------------------
+The two ways a campaign lies
+
+Both are handled by construction rather than by care:
+
+A mutation that fails to compile is not a green suite. It would be,
+   if the runner treated "the build failed" as "no cases failed" -- every
+   case would survive and the report would say a great many cases are
+   dead. Compile failures are counted separately and never as survivals.
+
+A mutation that is not picked up by the build is not a green suite
+   either, and this one is nastier because it looks exactly like a
+   survival. make compares timestamps; a source written in the same
+   granularity as the binary built from it can look older, and the suite
+   that runs is the pristine one. So the mutated file is given an mtime
+   strictly newer than every build artefact, and a mutant whose build
+   produced no compile at all is reported as a runner error rather than
+   as a result.
+
+------------------------------------------------------------------------
+Why the tree is copied
+
+Builds happen in /var/tmp, not in the repository: writing object files
+onto a 9p mount is slow, and a run interrupted halfway would otherwise
+leave the working tree holding a mutant. Copying also means the campaign
+cannot corrupt the checkout it was pointed at, however badly it is
+interrupted, and it needs dos/, libk/ and tools/ -- the last two for the
+corpus suite, which assembles nasm samples with tools/bin2c.py.
 """
+import argparse
+import hashlib
+import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
+import time
 
-# The repository root: the directory above this script's own.
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SRC = os.path.join(ROOT, 'dos')
 
-# The build happens outside the repository, and outside /mnt if the tree
-# is there: writing object files onto a 9p mount is slow, and a build that
-# is interrupted halfway leaves files the other side cannot stat or remove.
-REPO = os.environ.get('MUTATION_WORK', '/var/tmp/funyos-mutations/repo')
-WORK = os.path.join(REPO, 'dos')
-BIN = os.path.join(os.path.dirname(REPO), 'test_verify')
+WORK_ROOT = os.environ.get('MUTATION_WORK', '/var/tmp/funyos-mutations/m4')
+REPO      = os.path.join(WORK_ROOT, 'repo')
+DOS       = os.path.join(REPO, 'dos')
+BUILD     = os.path.join(WORK_ROOT, 'build')
+PRISTINE  = os.path.join(WORK_ROOT, 'pristine')
 
-SOURCES = [
-    'tests/test_verify.c', 'tests/harness.c',
-    'cpu/cpu.c', 'cpu/decode.c', 'cpu/step.c', 'cpu/flags.c',
-    'cpu/ops_alu.c', 'cpu/ops_mov.c', 'cpu/ops_str.c', 'cpu/ops_ctl.c',
-    'cpu/ops_186.c',
-    'mem/mem.c', '../libk/string.c',
-]
+# ---------------------------------------------------------------------
+# The campaign that was written for test_verify.c, kept as it was.
+#
+# Its anchors were verified against the tree of the time and most
+# still apply; the ones that no longer do are reported by name
+# rather than silently skipped. Keeping them is worth it: they are
+# the set that was shown to make M3's cases fail, so re-running
+# them here says for free whether M4 changed any of that.
+# ---------------------------------------------------------------------
 
-MUTATIONS = [
+M3_MUTATIONS = [
     # ---- mem.c -----------------------------------------------------
     ('a20 gate ignored', 'mem/mem.c',
      '    if (!mem->a20)\n        linear &= VM86_A20_MASK;\n', ''),
@@ -214,10 +289,11 @@ MUTATIONS = [
      '    if (mr.reg > 1) {', '    if (mr.mod == 3 || mr.reg > 1) {'),
     ('pop cs is executed', 'cpu/ops_alu.c',
      '        if (form == 7 && segment == VM86_CS) {', '        if (false) {'),
+    # Retargeted: the segment push and pop branches gained braces in M4.
     ('push es becomes push ss', 'cpu/ops_alu.c',
-     '        if (form == 6)\n'
+     '        if (form == 6) {\n'
      '            vm86_push16(cpu, vm86_get_seg(cpu, (enum vm86_seg)segment));',
-     '        if (form == 6)\n'
+     '        if (form == 6) {\n'
      '            vm86_push16(cpu, vm86_get_seg(cpu, VM86_SS));'),
 
     # ---- ops_mov.c -------------------------------------------------
@@ -303,7 +379,7 @@ MUTATIONS = [
      '    if (mr.reg > VM86_DS)'),
     ('segment registers 4-7 are accepted', 'cpu/ops_mov.c',
      '    if (mr.reg > VM86_DS || (opcode == 0x8E && mr.reg == VM86_CS))',
-     '    if (false)'),
+     '    (void)opcode;\n    if (false)'),
 
     # ---- ops_str.c -------------------------------------------------
     ('the direction flag is ignored', 'cpu/ops_str.c',
@@ -376,13 +452,9 @@ MUTATIONS = [
      '    uint16_t segment = vm86_pop16(cpu);\n'
      '    uint16_t offset  = vm86_pop16(cpu);\n\n'
      '    cpu->flags = vm86_pop16(cpu);'),
-    ('the interrupt frame goes on in the wrong order', 'cpu/ops_ctl.c',
-     '    vm86_push16(cpu, cpu->flags);\n'
-     '    vm86_push16(cpu, cpu->cs);\n'
-     '    vm86_push16(cpu, cpu->ip);',
-     '    vm86_push16(cpu, cpu->flags);\n'
-     '    vm86_push16(cpu, cpu->ip);\n'
-     '    vm86_push16(cpu, cpu->cs);'),
+    # The frame-order entry now lives in the M4 list below, where the code
+    # it edits lives -- the frame moved to intr/deliver.c with the INT path,
+    # and writing it twice would mean two mutants with one name.
     ('popf does not normalise the flags', 'cpu/ops_ctl.c',
      '    cpu->flags = vm86_pop16(cpu);\n\n'
      '    /* A wholesale write, so normalise. Without it a program could clear\n'
@@ -399,7 +471,8 @@ MUTATIONS = [
     ('into fires without overflow', 'cpu/ops_ctl.c',
      '    if (!vm86_flag_test(cpu, VM86_OF))',
      '    if (vm86_flag_test(cpu, VM86_OF))'),
-    ('the vector table is based on cs', 'cpu/ops_ctl.c',
+    # Retargeted: the vector table lookup moved to intr/deliver.c.
+    ('the vector table is based on cs', 'intr/deliver.c',
      '    uint32_t entry = (uint32_t)vector * 4u;',
      '    uint32_t entry = (uint32_t)vector * 4u\n'
      '                     + vm86_linear(cpu, VM86_CS, 0);'),
@@ -484,103 +557,720 @@ MUTATIONS = [
      'vm86_expect_u16("AX read the folded byte", cpu->ax, 0xBEEE);'),
 ]
 
+# ---------------------------------------------------------------------
+# What this milestone added
+# ---------------------------------------------------------------------
 
-def reset():
-    if os.path.exists(REPO):
-        shutil.rmtree(REPO)
+M4_MUTATIONS = [
+    # ---- intr/deliver.c --------------------------------------------
+    ('a raise overwrites the pending set', 'intr/deliver.c',
+     '    cpu->intr_pending[vector >> 3] |= (uint8_t)(1u << (vector & 7u));',
+     '    cpu->intr_pending[vector >> 3] = (uint8_t)(1u << (vector & 7u));'),
+    ('clearing a pending vector does nothing', 'intr/deliver.c',
+     '    cpu->intr_pending[vector >> 3] &= (uint8_t)~(1u << (vector & 7u));',
+     '    (void)vector;\n    (void)cpu;'),
+    ('the highest pending vector is chosen', 'intr/deliver.c',
+     '        unsigned bit = 0;\n'
+     '        while (!(bits & (1u << bit)))\n'
+     '            bit++;',
+     '        unsigned bit = 7;\n'
+     '        while (!(bits & (1u << bit)))\n'
+     '            bit--;'),
+    ('recognition ignores the shadow', 'intr/deliver.c',
+     '    if (cpu->intr_shadow)\n        return false;\n\n', ''),
+    ('recognition ignores the interrupt flag', 'intr/deliver.c',
+     '    if (!vm86_flag_test(cpu, VM86_IF))\n        return false;\n\n', ''),
+    ('the interrupt frame goes on in the wrong order', 'intr/deliver.c',
+     '    vm86_push16(cpu, cpu->flags);\n'
+     '    vm86_push16(cpu, cpu->cs);\n'
+     '    vm86_push16(cpu, cpu->ip);',
+     '    vm86_push16(cpu, cpu->flags);\n'
+     '    vm86_push16(cpu, cpu->ip);\n'
+     '    vm86_push16(cpu, cpu->cs);'),
+    ('entering a handler leaves interrupts on', 'intr/deliver.c',
+     '    vm86_flag_set(cpu, VM86_IF, false);\n', ''),
+
+    # ---- intr/trap.c -----------------------------------------------
+    ('the trap does not read the service number', 'intr/trap.c',
+     '    uint8_t service = vm86_fetch8(cpu);', '    uint8_t service = 0;'),
+    ('the trap forgets where it began', 'intr/trap.c',
+     '    cpu->insn_ip = (uint16_t)(cpu->ip - 2u);\n\n', ''),
+    ('the trap rewinds to the wrong byte', 'intr/trap.c',
+     'cpu->insn_ip = (uint16_t)(cpu->ip - 2u);',
+     'cpu->insn_ip = (uint16_t)(cpu->ip - 1u);'),
+    ('a retry does not re-run the instruction', 'intr/trap.c',
+     '    cpu->ip = cpu->insn_ip;', '    (void)0;'),
+    ('a retry leaves interrupts off', 'intr/trap.c',
+     '    vm86_flag_set(cpu, VM86_IF, true);', '    (void)0;'),
+
+    # ---- intr/ivt.c ------------------------------------------------
+    ('the stub does not end in iret', 'intr/ivt.c',
+     '    vm86_mem_write8(cpu->mem, at + 3u, VM86_TRAP_IRET);',
+     '    vm86_mem_write8(cpu->mem, at + 3u, 0x90u);'),
+    ('the table points somewhere else', 'intr/ivt.c',
+     '        vm86_mem_write16(cpu->mem, vector_entry(vector) + 2u,\n'
+     '                         VM86_TRAP_SEGMENT);',
+     '        vm86_mem_write16(cpu->mem, vector_entry(vector) + 2u,\n'
+     '                         0x0000u);'),
+    ('the stubs are spaced wrong', 'intr/ivt.c',
+     '    return (uint16_t)((uint32_t)vector * VM86_TRAP_STRIDE);',
+     '    return (uint16_t)((uint32_t)vector * 8u);'),
+    ('the stub is not written into the table', 'intr/ivt.c',
+     '        vm86_mem_write16(cpu->mem, vector_entry(vector), offset);\n', ''),
+    ('every vector looks hooked', 'intr/ivt.c',
+     '    return offset == stub_offset(vector) && segment == VM86_TRAP_SEGMENT;',
+     '    (void)offset; (void)segment;\n    return true;'),
+    ('nothing looks hooked', 'intr/ivt.c',
+     '    return offset == stub_offset(vector) && segment == VM86_TRAP_SEGMENT;',
+     '    (void)offset; (void)segment;\n    return false;'),
+
+    # ---- intr/firmware.c -------------------------------------------
+    ('int 12h answers the equipment word', 'intr/firmware.c',
+     '    cpu->ax = vm86_mem_read16(cpu->mem, bda(VM86_BDA_MEMORY_KB));',
+     '    cpu->ax = vm86_mem_read16(cpu->mem, bda(VM86_BDA_EQUIPMENT));'),
+    ('int 11h answers the memory word', 'intr/firmware.c',
+     '    cpu->ax = vm86_mem_read16(cpu->mem, bda(VM86_BDA_EQUIPMENT));',
+     '    cpu->ax = vm86_mem_read16(cpu->mem, bda(VM86_BDA_MEMORY_KB));'),
+    ('the conventional memory size is wrong', 'intr/firmware.c',
+     '#define VM86_CONVENTIONAL_KB 640u', '#define VM86_CONVENTIONAL_KB 512u'),
+    ('the equipment word loses its video bits', 'intr/firmware.c',
+     '#define VM86_EQUIPMENT_WORD 0x002Du',
+     '#define VM86_EQUIPMENT_WORD 0x0001u'),
+    ('the memory service is never registered', 'intr/firmware.c',
+     '    vm86_register_service(VM86_INT_MEMORY_SIZE, service_memory_size, NULL);\n',
+     '    (void)service_memory_size;\n'),
+    ('the memory size is never written', 'intr/firmware.c',
+     '    vm86_mem_write16(cpu->mem, bda(VM86_BDA_MEMORY_KB), '
+     'VM86_CONVENTIONAL_KB);\n', ''),
+    ('the vector table is not installed', 'intr/firmware.c',
+     '    vm86_install_ivt(cpu);\n', ''),
+
+    # ---- intr/run.c ------------------------------------------------
+    ('a halted machine stops before delivery', 'intr/run.c',
+     '        if (cpu->intr_shadow == 0) {\n            int vector = vm86_interruptible',
+     '        if (cpu->halted)\n            return VM86_STOP_HALT;\n\n'
+     '        if (cpu->intr_shadow == 0) {\n            int vector = vm86_interruptible'),
+    ('the budget is checked before delivery', 'intr/run.c',
+     '        if (cpu->intr_shadow == 0) {\n            int vector = vm86_interruptible',
+     '        if (retired >= steps)\n            return VM86_STOP_STEPS;\n\n'
+     '        if (cpu->intr_shadow == 0) {\n            int vector = vm86_interruptible'),
+    ('hlt returns instead of waiting', 'intr/run.c',
+     '            */\n            break;\n\n        case VM86_FAULT: {',
+     '            */\n            return VM86_STOP_HALT;\n\n        case VM86_FAULT: {'),
+    ('the shadow is never spent', 'intr/run.c',
+     '        if (cpu->intr_shadow != 0)\n            cpu->intr_shadow--;\n\n', ''),
+    ('the shadow is spent before the budget', 'intr/run.c',
+     '    for (;;) {\n        /*\n         * 1. The shadow, then delivery.',
+     '    for (;;) {\n        if (cpu->intr_shadow) cpu->intr_shadow--;\n'
+     '        /*\n         * 1. The shadow, then delivery.'),
+    ('a delivery leaves the vector pending', 'intr/run.c',
+     '                vm86_clear_pending(cpu, (uint8_t)vector);\n', ''),
+    ('a delivery does not wake the machine', 'intr/run.c',
+     '                cpu->halted = false;\n', ''),
+    ('every fault stops the machine', 'intr/run.c',
+     '            if (vm86_vector_is_stub(cpu, vector)) {', '            if (true) {'),
+    ('no fault ever stops the machine', 'intr/run.c',
+     '            if (vm86_vector_is_stub(cpu, vector)) {', '            if (false) {'),
+
+    # ---- cpu: the three debts, and what the trap needs --------------
+    ('sti does not open the grace period', 'cpu/ops_ctl.c',
+     '        vm86_flag_set(cpu, VM86_IF, true);\n        cpu->intr_shadow = 1;',
+     '        vm86_flag_set(cpu, VM86_IF, true);'),
+    ('mov ss does not open the grace period', 'cpu/ops_mov.c',
+     '    if (mr.reg == VM86_SS)\n        cpu->intr_shadow = 1;', '    (void)0;'),
+    ('pop ss does not open the grace period', 'cpu/ops_alu.c',
+     '            if (segment == VM86_SS)\n                cpu->intr_shadow = 1;',
+     '            (void)segment;'),
+    ('fe /7 is refused instead of trapped', 'cpu/ops_alu.c',
+     '    if (mr.reg == 7)\n        return vm86_host_trap(cpu, opcode);\n\n', ''),
+    ('rep never yields between iterations', 'cpu/ops_str.c',
+     '        if (vm86_interruptible(cpu)) {\n'
+     '            cpu->ip = cpu->insn_ip;\n'
+     '            return VM86_CONTINUE;\n'
+     '        }\n', ''),
+    ('rep yields before the first element', 'cpu/ops_str.c',
+     '    while (cpu->cx != 0) {\n        body(cpu, bits, delta, source);',
+     '    while (cpu->cx != 0) {\n'
+     '        if (vm86_interruptible(cpu)) {\n'
+     '            cpu->ip = cpu->insn_ip;\n'
+     '            return VM86_CONTINUE;\n'
+     '        }\n'
+     '        body(cpu, bits, delta, source);'),
+    ('rep rewinds past its prefixes', 'cpu/ops_str.c',
+     '            cpu->ip = cpu->insn_ip;',
+     '            cpu->ip = (uint16_t)(cpu->insn_ip + 2u);'),
+    ('where the instruction began is not recorded', 'cpu/step.c',
+     '    cpu->insn_ip = cpu->ip;\n\n    uint8_t opcode;', '    uint8_t opcode;'),
+    ('the fault is not cleared per instruction', 'cpu/step.c',
+     '    cpu->fault = VM86_NO_FAULT;', '    (void)0;'),
+
+    # ---- mem -------------------------------------------------------
+    ('the a20 wrap runs the wrong way', 'mem/mem.c',
+     '        linear &= VM86_A20_MASK;', '        linear |= VM86_A20_MASK;'),
+
+    # ---- bios/bios13.c ---------------------------------------------
+    ('the cylinder loses its top two bits', 'bios/bios13.c',
+     '    return (uint16_t)((((uint16_t)cl >> BIOS13_CL_CYLINDER_SHIFT) << 8) | ch);',
+     '    (void)cl;\n    return (uint16_t)ch;'),
+    ('the cylinder and the sector share bits', 'bios/bios13.c',
+     '    return (uint8_t)(cl & BIOS13_CL_SECTOR_MASK);',
+     '    return (uint8_t)(cl & 0x3Fu);'),
+    ('the lba forgets the head', 'bios/bios13.c',
+     '    return ((uint32_t)cylinder * disk->heads + head) * disk->sectors\n'
+     '           + (uint32_t)(sector - 1);',
+     '    (void)head;\n'
+     '    return ((uint32_t)cylinder * disk->heads) * disk->sectors\n'
+     '           + (uint32_t)(sector - 1);'),
+    ('sector zero is accepted', 'bios/bios13.c',
+     '    if (sector == 0 ||', '    if (false ||'),
+    ('a request for no sectors is accepted', 'bios/bios13.c',
+     '    if (count == 0)\n        return BIOS13_STATUS_BAD_COMMAND;',
+     '    if (false)\n        return BIOS13_STATUS_BAD_COMMAND;'),
+    ('a successful call reports a failure', 'bios/bios13.c',
+     '    disk->last_status = BIOS13_STATUS_OK;\n'
+     '    cpu->ah           = BIOS13_STATUS_OK;\n'
+     '    vm86_flag_set(cpu, VM86_CF, false);',
+     '    disk->last_status = BIOS13_STATUS_OK;\n'
+     '    cpu->ah           = BIOS13_STATUS_OK;\n'
+     '    vm86_flag_set(cpu, VM86_CF, true);'),
+    ('a failed call leaves the sector count standing', 'bios/bios13.c',
+     '    cpu->al = 0;\n\n    vm86_flag_set(cpu, VM86_CF, true);',
+     '    vm86_flag_set(cpu, VM86_CF, true);'),
+    ('a read writes to the disk instead', 'bios/bios13.c',
+     '        if (write)', '        if (!write)'),
+    ('the dma boundary test is off by one', 'bios/bios13.c',
+     '    if (((request->address & 0xFFFFu) + request->bytes) > 0x10000u)',
+     '    if (((request->address & 0xFFFFu) + request->bytes) >= 0x10000u)'),
+    ('a drive other than a: is accepted', 'bios/bios13.c',
+     '    if (drive != BIOS13_DRIVE_A)', '    (void)drive;\n    if (false)'),
+
+    # ---- bios/bios10.c ---------------------------------------------
+    ('a text cell is one byte wide', 'bios/bios10.c',
+     '    return page_base(st, page) + ((uint32_t)row * st->columns + col) * 2u;',
+     '    return page_base(st, page) + ((uint32_t)row * st->columns + col);'),
+    ('a page ignores its own base', 'bios/bios10.c',
+     '    return VM86_TEXT_BASE + (uint32_t)page * st->page_bytes;',
+     '    (void)page; (void)st;\n    return VM86_TEXT_BASE;'),
+    ('a teletype write clobbers the attribute', 'bios/bios10.c',
+     '    vm86_mem_write8(cpu->mem, cell_linear(st, page, row, col), ch);\n}',
+     '    uint32_t linear = cell_linear(st, page, row, col);\n'
+     '    vm86_mem_write8(cpu->mem, linear, ch);\n'
+     '    vm86_mem_write8(cpu->mem, linear + 1u, ch);\n}'),
+    ('a backspace climbs to the line above', 'bios/bios10.c',
+     '        if (col > 0)\n            col--;', '        col--;'),
+    ('the fill attribute is read from the wrong row', 'bios/bios10.c',
+     '    return cell_attr(cpu, st, page, BIOS10_ROWS - 1u, col);',
+     '    return cell_attr(cpu, st, page, BIOS10_ROWS - 2u, col);'),
+
+    # ---- what main added while this tool was being written -----------
+    ('the service flags are not merged into the frame', 'intr/trap.c',
+     '    uint16_t merged = (uint16_t)((cpu->flags & (uint16_t)~(VM86_IF '
+     '| VM86_TF))\n'
+     '                                 | (frame & (VM86_IF | VM86_TF)));\n\n'
+     '    vm86_mem_write16(cpu->mem, at, merged);',
+     '    uint16_t merged = frame;\n\n'
+     '    vm86_mem_write16(cpu->mem, at, merged);'),
+    ('the frame is written back to the wrong word', 'intr/trap.c',
+     '           + (uint16_t)(cpu->sp + 4u);',
+     '           + (uint16_t)(cpu->sp + 2u);'),
+    ('the video mode byte is never written', 'intr/firmware.c',
+     '    vm86_mem_write8 (cpu->mem, bda(VM86_BDA_VIDEO_MODE), 3u);\n', ''),
+    ('the active page byte is never written', 'intr/firmware.c',
+     '    vm86_mem_write8 (cpu->mem, bda(VM86_BDA_ACTIVE_PAGE), 0u);\n', ''),
+    ('the frame is written back without checking whose stack it is',
+     'intr/trap.c',
+     '    if (cpu->sp != cpu->intr_frame_sp)\n        return false;',
+     '    if (false)\n        return false;'),
+    ('the frame pointer is recorded in the wrong place', 'intr/deliver.c',
+     '    cpu->intr_frame_sp = cpu->sp;',
+     '    cpu->intr_frame_sp = (uint16_t)(cpu->sp + 6u);'),
+
+    # ---- bios/bios16.c ---------------------------------------------
+    ('the keyboard ring does not wrap', 'bios/bios16.c',
+     '    return (offset >= VM86_BDA_KB_BUFFER_END) ? (uint16_t)VM86_BDA_KB_BUFFER',
+     '    return (false) ? (uint16_t)VM86_BDA_KB_BUFFER'),
+    ('a full keyboard buffer overwrites the oldest key', 'bios/bios16.c',
+     '    if (next == kb_head(mem)) {',
+     '    if (false && next == kb_head(mem)) {'),
+    ('taking a key leaves the head where it was', 'bios/bios16.c',
+     '    vm86_mem_write16(mem, bda_linear(VM86_BDA_KB_HEAD), kb_advance(head));',
+     '    vm86_mem_write16(mem, bda_linear(VM86_BDA_KB_HEAD), head);'),
+    ('a look at the queue consumes the key', 'bios/bios16.c',
+     '    *word = vm86_mem_read16(mem, bda_linear(kb_head(mem)));\n\n'
+     '    return true;',
+     '    *word = vm86_mem_read16(mem, bda_linear(kb_head(mem)));\n'
+     '    vm86_mem_write16(mem, bda_linear(VM86_BDA_KB_HEAD),\n'
+     '                     kb_advance(kb_head(mem)));\n\n'
+     '    return true;'),
+    ('an empty queue reports a key waiting', 'bios/bios16.c',
+     '            vm86_flag_set(cpu, VM86_ZF, true);',
+     '            vm86_flag_set(cpu, VM86_ZF, false);'),
+    ('a blocking read does not wait', 'bios/bios16.c',
+     '            vm86_service_retry(cpu);',
+     '            (void)cpu;'),
+
+    # ---- bios/bios1a.c ---------------------------------------------
+    ('the tick count is read big-endian', 'bios/bios1a.c',
+     '    return (uint32_t)vm86_mem_read16(mem, at)\n'
+     '         | ((uint32_t)vm86_mem_read16(mem, at + 2) << 16);',
+     '    return (uint32_t)vm86_mem_read16(mem, at + 2)\n'
+     '         | ((uint32_t)vm86_mem_read16(mem, at) << 16);'),
+    ('the tick count is written big-endian', 'bios/bios1a.c',
+     '    vm86_mem_write16(mem, at, (uint16_t)(value & 0xFFFFu));\n'
+     '    vm86_mem_write16(mem, at + 2, (uint16_t)(value >> 16));',
+     '    vm86_mem_write16(mem, at, (uint16_t)(value >> 16));\n'
+     '    vm86_mem_write16(mem, at + 2, (uint16_t)(value & 0xFFFFu));'),
+    ('the leftover fraction of a tick is thrown away', 'bios/bios1a.c',
+     '    st->fraction = (uint32_t)(total % BIOS1A_TICKS_PER_MS_DEN);',
+     '    st->fraction = 0;'),
+    ('the count goes into the wrong registers', 'bios/bios1a.c',
+     '        cpu->cx = (uint16_t)(ticks >> 16);\n'
+     '        cpu->dx = (uint16_t)(ticks & 0xFFFFu);',
+     '        cpu->dx = (uint16_t)(ticks >> 16);\n'
+     '        cpu->cx = (uint16_t)(ticks & 0xFFFFu);'),
+    ('al does not get the midnight flag', 'bios/bios1a.c',
+     '        cpu->al = flags;', '        cpu->al = 0;\n        (void)flags;'),
+    ('setting the count leaves the midnight flag up', 'bios/bios1a.c',
+     '        vm86_mem_write8(mem, bda_linear(VM86_BDA_TICK_ROLLOVER), 0);\n'
+     '        set_tick_count(mem, ((uint32_t)cpu->cx << 16) | (uint32_t)cpu->dx);',
+     '        set_tick_count(mem, ((uint32_t)cpu->cx << 16) | (uint32_t)cpu->dx);'),
+
+    # ---- cpu/ops_ctl.c: the jumps nothing was mutating --------------
+    ('a short jump does not jump', 'cpu/ops_ctl.c',
+     '    branch_short(cpu);', '    (void)cpu;\n    (void)branch_short;'),
+    ('a near jump does not jump', 'cpu/ops_ctl.c',
+     '    branch_near(cpu);', '    (void)cpu;\n    (void)branch_near;'),
+    ('cmc clears the carry instead of inverting it', 'cpu/ops_ctl.c',
+     '    vm86_flag_set(cpu, VM86_CF, !vm86_flag_test(cpu, VM86_CF));',
+     '    vm86_flag_set(cpu, VM86_CF, false);'),
+]
+
+
+def layer_of(path):
+    """Which layer a mutant belongs to, from the file it edits."""
+    head = path.split('/')[0]
+    return head if head in ('cpu', 'mem', 'intr', 'bios') else 'tests'
+
+
+MUTATIONS = list(M3_MUTATIONS) + M4_MUTATIONS
+
+
+# ---------------------------------------------------------------------
+# The tree under test
+# ---------------------------------------------------------------------
+
+def refresh_tree(source):
+    """A private copy, so the campaign cannot touch the checkout."""
+    if os.path.exists(WORK_ROOT):
+        shutil.rmtree(WORK_ROOT)
     os.makedirs(REPO)
-    shutil.copytree(SRC, WORK)
-    shutil.copytree(ROOT + '/libk', REPO + '/libk')
+    for part in ('dos', 'libk', 'tools'):
+        shutil.copytree(os.path.join(source, part), os.path.join(REPO, part))
 
 
-def build():
-    cmd = ['gcc', '-std=c17', '-g', '-O2', '-Wall', '-Wextra', '-Werror',
-           '-fno-builtin', '-Iinclude', '-I../libk/include', '-o', BIN] + SOURCES
-    return subprocess.run(cmd, cwd=WORK, capture_output=True, text=True)
+# Not every suite uses the standard harness, and the exceptions do not
+# announce themselves: the corpus prints its own summary and names a
+# failing case with an outcome word instead of a count, and the bios
+# programs suite calls itself "bios programs" -- with a space, which is
+# not a suite name anywhere else -- and appends nothing at all. A parser
+# that only understood the common shape would drop that suite silently.
+#
+# Silently is the part that matters. A suite missing from the report looks
+# exactly like a suite with nothing to say, and the report still reads as
+# complete; the check below refuses to produce one unless every binary
+# that ran was seen.
+SUITE_HEADER = re.compile(r'^=== (.+?): (\d+) cases.*===$')
+CASE_OK      = re.compile(r'^  ok  (.+)$')
+CASE_RED     = re.compile(r'^  --  (.+)$')
+RED_SUFFIX   = re.compile(r' \([^()]*\)$')
 
 
-CASE = re.compile(r'^  --  (.*) \(\d+ failed\)$', re.M)
+def case_name(tail):
+    """The name of a red case, with whatever the suite appended removed.
 
-
-def run():
-    """Run the suite, with a bound on the wall clock.
-
-    A mutation that removes a loop's exit condition makes the emulator
-    spin inside a single instruction and the step limit in the harness
-    cannot help, because the step never returns.  That is a caught
-    mutation like any other -- the suite does not pass -- but it has to
-    be caught by a timeout rather than by a red case.
+    What follows the name is not the same in any two harnesses -- "(3
+    failed)", a corpus outcome word, or nothing -- so the suffix is
+    stripped and the result is then *checked* against the names the
+    pristine run reported. A name that comes out of the strip and was
+    never a case is a defect in this parser, and the campaign says so
+    rather than inventing a case no suite contains.
     """
-    try:
-        proc = subprocess.run([BIN], capture_output=True, text=True,
-                              timeout=20)
-    except subprocess.TimeoutExpired:
-        return None, 'TIMEOUT'
+    stripped = RED_SUFFIX.sub('', tail)
+    return stripped or tail
 
-    return set(CASE.findall(proc.stdout)), proc.stdout
+
+def parse(out, universe=None):
+    """Per suite, which cases ran and which of them failed.
+
+    Suite names are normalised to the spelling the binaries use, so that
+    "bios programs" and test_bios_programs are the same suite here.
+    """
+    results = {}
+    suite = None
+    for line in out.splitlines():
+        head = SUITE_HEADER.match(line)
+        if head:
+            suite = head.group(1).replace(' ', '_')
+            results.setdefault(suite, {})
+            continue
+        ok = CASE_OK.match(line)
+        if ok and suite:
+            results[suite][ok.group(1)] = True
+            continue
+        red = CASE_RED.match(line)
+        if red and suite:
+            name = case_name(red.group(1))
+            if universe is not None and name not in universe.get(suite, ()):
+                name = red.group(1)
+            results[suite][name] = False
+    return results
+
+
+def build_and_run(jobs, timeout):
+    """make test, forced, with a wall clock on the whole thing.
+
+    The timeout has to kill the process *group*: make's children are the
+    suite binaries, and a mutant that makes an instruction spin forever
+    hangs inside one of those rather than inside make.
+    """
+    cmd = ['make', '-B', '-j%d' % jobs, 'BUILD=%s' % BUILD, 'test']
+    proc = subprocess.Popen(cmd, cwd=DOS, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True,
+                            start_new_session=True)
+    try:
+        out, _ = proc.communicate(timeout=timeout)
+        return proc.returncode, out, False
+    except subprocess.TimeoutExpired:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        out, _ = proc.communicate()
+        return None, out, True
+
+
+def digest_binaries():
+    """A hash per suite binary: the probe's whole input."""
+    out = {}
+    if not os.path.isdir(BUILD):
+        return out
+    for name in os.listdir(BUILD):
+        if not name.startswith('test_'):
+            continue
+        with open(os.path.join(BUILD, name), 'rb') as fh:
+            out[name] = hashlib.sha256(fh.read()).hexdigest()
+    return out
+
+
+def save_binaries(where):
+    if os.path.exists(where):
+        shutil.rmtree(where)
+    shutil.copytree(BUILD, where)
+
+
+def make_newer_than_the_build(path):
+    """Defeat the timestamp granularity that make compares on.
+
+    A source written in the same tick as the binary built from it looks
+    older to make, the rebuild is skipped, and the suite that runs is the
+    pristine one -- which reads as a mutant that survived. The check on
+    the build output below catches that too; this is the belt.
+    """
+    newest = 0.0
+    for dirpath, _, files in os.walk(BUILD):
+        for name in files:
+            newest = max(newest, os.path.getmtime(os.path.join(dirpath, name)))
+    stamp = max(time.time(), newest + 1.0)
+    os.utime(path, (stamp, stamp))
+
+
+# ---------------------------------------------------------------------
+# The campaign
+# ---------------------------------------------------------------------
+
+def first_error(out):
+    """The compiler's own words for why a mutant did not build.
+
+    A mutation that removes the only use of a variable fails -Werror, and
+    "did not compile" on its own sends the next reader to work out which
+    one -- when the answer is one line further down the build log. It is
+    also the difference between a mutant that was wrong and one that the
+    suite caught, which is the whole point of counting them apart.
+    """
+    for line in out.splitlines():
+        if 'error:' in line:
+            return line.strip()
+    return 'did not compile'
+
+
+def campaign(args, mutations, table_size):
+    refresh_tree(args.tree or ROOT)
+
+    sys.stdout.write('baseline: building and running every suite...\n')
+    sys.stdout.flush()
+    rc, out, hung = build_and_run(args.jobs, args.timeout)
+    if hung:
+        print('the pristine tree does not finish; refusing to report')
+        return 1
+    if rc != 0:
+        print('the pristine tree is not green:')
+        for line in out.splitlines():
+            if line.startswith('  --  '):
+                print('   ' + line.strip())
+        return 1
+
+    baseline = parse(out)
+    all_cases = {}
+    for suite, cases in baseline.items():
+        for case, ok in cases.items():
+            if not ok:
+                print('the pristine tree has a red case: %s / %s'
+                      % (suite, case))
+                return 1
+            all_cases.setdefault(suite, []).append(case)
+
+    total = sum(len(v) for v in all_cases.values())
+    print('baseline: %d suites, %d cases, all green\n'
+          % (len(all_cases), total))
+
+    # Every binary that ran has to be visible in that output. A suite the
+    # tool cannot see is worse than a suite that fails: its cases are
+    # missing from the coverage rather than wrong in it, and the report
+    # still reads as complete. This is not hypothetical -- it caught
+    # "bios programs", whose header has a space in it.
+    unseen = sorted(name[len('test_'):] for name in digest_binaries()
+                    if name[len('test_'):] not in all_cases)
+    if unseen:
+        print('these suites ran but nothing in their output was parsed: %s'
+              % ', '.join(unseen))
+        print('refusing to report: their cases would be missing from the '
+              'coverage rather than red in it')
+        return 1
+
+    # The probe is only a probe if the build is reproducible. Built twice
+    # from the same source, the binaries have to be identical -- otherwise
+    # "the binary changed" says nothing about the mutation.
+    first = digest_binaries()
+    rc, _, hung = build_and_run(args.jobs, args.timeout)
+    second = digest_binaries()
+    if hung or rc != 0 or first != second:
+        print('the build is not reproducible, so the probe proves nothing;'
+              ' refusing to report')
+        return 1
+
+    save_binaries(PRISTINE)
+    print('probe: the build is reproducible (%d suite binaries)\n'
+          % len(first))
+
+    covered = {}      # case -> [mutant, ...]
+    caught    = []    # (mutant, [case, ...])
+    survived  = []    # mutant that changed the code and reddened nothing
+    vacuous   = []    # mutant the compiler threw away
+    broken    = []    # (mutant, why)
+
+    for name, path, old, new in mutations:
+        full = os.path.join(DOS, path)
+        if not os.path.exists(full):
+            broken.append((name, 'no such file: %s' % path))
+            continue
+
+        with open(full, encoding='utf-8') as fh:
+            original = fh.read()
+
+        if original.count(old) != 1:
+            broken.append((name, 'the anchor appears %d times in %s'
+                           % (original.count(old), path)))
+            continue
+
+        with open(full, 'w', encoding='utf-8', newline='\n') as fh:
+            fh.write(original.replace(old, new))
+        make_newer_than_the_build(full)
+
+        try:
+            rc, out, hung = build_and_run(args.jobs, args.timeout)
+
+            if hung:
+                # It compiled and ran and something never came back. That
+                # is a caught mutation -- the machine is broken -- but
+                # which case hung cannot be said, so it is not credited.
+                mark, red = 'HUNG', []
+                broken.append((name, 'the suite hung'))
+            elif rc is None or '  CCh ' not in out:
+                mark, red = 'NOBUILD', []
+                broken.append((name, 'the build did not recompile'))
+            elif 'error:' in out or ': error' in out:
+                mark, red = 'NOCOMPILE', []
+                broken.append((name, first_error(out)))
+            else:
+                red, unknown = [], []
+                for suite, cases in parse(out, all_cases).items():
+                    for case, ok in cases.items():
+                        if ok:
+                            continue
+                        if case in all_cases.get(suite, ()):
+                            red.append(case)
+                        else:
+                            unknown.append('%s / %s' % (suite, case))
+                red.sort()
+
+                if unknown:
+                    mark = 'PARSER'
+                    red = []
+                    broken.append((name, 'case name(s) this parser invented: '
+                                   '%s' % ', '.join(unknown)))
+                elif digest_binaries() == second:
+                    mark = 'VACUOUS'
+                    vacuous.append(name)
+                elif red:
+                    mark = 'caught'
+                    caught.append((name, red))
+                    for case in red:
+                        covered.setdefault(case, []).append(name)
+                else:
+                    mark = 'SURVIVED'
+                    survived.append(name)
+        finally:
+            with open(full, 'w', encoding='utf-8', newline='\n') as fh:
+                fh.write(original)
+
+        print('%-9s %-46s %d case(s) red' % (mark, name, len(red)),
+              flush=True)
+
+    return report(args, all_cases, caught, survived, vacuous, broken,
+                  covered, len(mutations), table_size)
+
+
+def report(args, all_cases, caught, survived, vacuous, broken, covered,
+           ran, table_size):
+    partial = ran != table_size
+
+    missed_by_suite = {}
+    for suite, cases in sorted(all_cases.items()):
+        missed_by_suite[suite] = [c for c in cases if c not in covered]
+
+    never = [c for suite in missed_by_suite.values() for c in suite]
+    total = sum(len(v) for v in all_cases.values())
+
+    if partial:
+        print('\n(these %d mutations are a subset of the %d in the table, so '
+              '"never reddened" below means "not reddened by this subset")'
+              % (ran, len(MUTATIONS)))
+
+    print('\n%d mutations: %d caught, %d survived, %d vacuous, %d broken'
+          % (len(caught) + len(survived) + len(vacuous) + len(broken),
+             len(caught), len(survived), len(vacuous), len(broken)))
+    print('%d of %d cases were reddened by at least one mutation'
+          % (total - len(never), total))
+
+    print('\n%-12s %6s %6s %s' % ('suite', 'cases', 'red', 'never red'))
+    for suite, cases in sorted(all_cases.items()):
+        red = len(cases) - len(missed_by_suite[suite])
+        print('%-12s %6d %6d %6d' % (suite, len(cases), red,
+                                     len(missed_by_suite[suite])))
+
+    if never:
+        print('\nnever reddened by any mutation -- no case here can fail:')
+        for suite, cases in sorted(missed_by_suite.items()):
+            for case in cases:
+                print('  %-10s %s' % (suite, case))
+
+    if survived:
+        print('\nmutations that changed the machine and nothing noticed:')
+        for name in survived:
+            print('  - %s' % name)
+
+    if vacuous:
+        print('\nmutations the compiler threw away -- a defect in the '
+              'mutant, not a gap in the suite:')
+        for name in vacuous:
+            print('  - %s' % name)
+
+    if broken:
+        print('\nmutations that did not run:')
+        for name, why in broken:
+            print('  - %-46s %s' % (name, why))
+
+    if args.json:
+        with open(args.json, 'w', encoding='utf-8', newline='\n') as fh:
+            json.dump({
+                'cases': all_cases,
+                'caught': [{'mutant': n, 'cases': c} for n, c in caught],
+                'survived': survived,
+                'vacuous': vacuous,
+                'broken': [{'mutant': n, 'why': w} for n, w in broken],
+                'never_reddened': never,
+            }, fh, indent=2, sort_keys=True)
+        print('\nwrote %s' % args.json)
+
+    # A campaign whose mutants mostly failed to apply is not a result.
+    return 1 if len(broken) * 2 > len(caught) + len(survived) else 0
+
+
+def load_mutations(path):
+    """Extra mutations from a file, so nobody has to edit this one.
+
+    A campaign run against somebody else's suite should not mean a second
+    copy of this tool: the table is data, and a file of it is enough. The
+    format is either a list of {"name", "file", "old", "new"} objects or a
+    list of four-element lists, which is what this file's own table looks
+    like written out.
+    """
+    with open(path, encoding='utf-8') as fh:
+        loaded = json.load(fh)
+
+    out = []
+    for entry in loaded:
+        if isinstance(entry, dict):
+            out.append((entry['name'], entry['file'], entry['old'],
+                        entry['new']))
+        else:
+            name, path_, old, new = entry
+            out.append((name, path_, old, new))
+    return out
 
 
 def main():
-    reset()
-    result = build()
-    if result.returncode != 0:
-        print('the pristine tree does not build:')
-        print(result.stderr[-4000:])
+    parser = argparse.ArgumentParser(description=__doc__.split('\n')[0])
+    parser.add_argument('--tree', default=None,
+                        help='the checkout to test; default is the one this '
+                             'script lives in, and it is copied, never '
+                             'edited in place')
+    parser.add_argument('--mutations', default=None,
+                        help='a JSON file of extra mutations, in the shape of '
+                             'the table in this file')
+    parser.add_argument('--layer', action='append', default=None,
+                        help='cpu, mem, intr, bios or tests; repeatable')
+    parser.add_argument('--only', default=None,
+                        help='run mutations whose name contains this')
+    parser.add_argument('--jobs', type=int, default=os.cpu_count() or 1)
+    parser.add_argument('--timeout', type=float, default=600.0,
+                        help='seconds for one build-and-run')
+    parser.add_argument('--json', default=None,
+                        help='write the full result here')
+    parser.add_argument('--list', action='store_true',
+                        help='print the mutations and stop')
+    args = parser.parse_args()
+
+    table = list(MUTATIONS)
+    if args.mutations:
+        table += load_mutations(args.mutations)
+
+    mutations = table
+    if args.layer:
+        wanted = set(args.layer)
+        mutations = [m for m in mutations if layer_of(m[1]) in wanted]
+    if args.only:
+        mutations = [m for m in mutations if args.only in m[0]]
+
+    if args.list:
+        for name, path, _, _ in mutations:
+            print('%-12s %-46s %s' % (layer_of(path), name, path))
+        print('\n%d mutations' % len(mutations))
+        return 0
+
+    if not mutations:
+        print('no mutation matched; nothing to do')
         return 1
 
-    failing, out = run()
-    if failing is None:
-        print('the pristine tree does not finish')
-        return 1
-    if failing:
-        print('the pristine tree is not green: %s' % sorted(failing))
-        print(out[-4000:])
-        return 1
-
-    all_cases = set(re.findall(r'\{ "([^"]+)",', open(
-        os.path.join(WORK, 'tests/test_verify.c'), encoding='utf-8').read()))
-    print('pristine: %d cases, all green\n' % len(all_cases))
-
-    covered = {}
-    problems = []
-    for name, path, old, new in MUTATIONS:
-        full = os.path.join(WORK, path)
-        original = open(full, encoding='utf-8').read()
-        if original.count(old) != 1:
-            problems.append('%s: pattern appears %d times in %s'
-                            % (name, original.count(old), path))
-            continue
-        open(full, 'w', encoding='utf-8', newline='\n').write(
-            original.replace(old, new))
-        result = build()
-        if result.returncode != 0:
-            problems.append('%s: did not compile' % name)
-            print('%-46s did not compile' % name, flush=True)
-        else:
-            failing, _ = run()
-            if failing is None:
-                problems.append('%s: the suite hung' % name)
-                print('%-46s the suite hung' % name, flush=True)
-            else:
-                for case in failing:
-                    covered.setdefault(case, []).append(name)
-                print('%-46s %2d case(s) red' % (name, len(failing)),
-                      flush=True)
-        open(full, 'w', encoding='utf-8', newline='\n').write(original)
-
-    missed = sorted(all_cases - set(covered))
-    print('\n%d of %d cases were made to fail by at least one mutation'
-          % (len(covered), len(all_cases)))
-    if missed:
-        print('\nnever failed by any mutation:')
-        for case in missed:
-            print('  - %s' % case)
-    if problems:
-        print('\nmutations that did not apply or did not compile:')
-        for line in problems:
-            print('  - %s' % line)
-
-    return 0
+    return campaign(args, mutations, len(table))
 
 
-sys.exit(main())
+if __name__ == '__main__':
+    sys.exit(main())
