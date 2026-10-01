@@ -3,8 +3,8 @@
 ; M4-8 says the text buffer at 0xB8000 is ordinary guest memory: the host
 ; renders from it and does not redirect the writes. This program is the one
 ; that can tell. It never executes an INT; it stores characters and
-; attributes straight into 0xB8000, and the screen it leaves behind has to
-; be byte for byte what hello.asm leaves behind with the same text.
+; attributes straight into 0xB8000, and the text it leaves behind has to be
+; byte for byte what hello.asm leaves behind with the same message.
 ;
 ; If the two ever disagree then somebody has made the display two pieces of
 ; state -- a shadow copy, a redirection at the memory layer, a service that
@@ -32,16 +32,22 @@
 ; does not move the firmware's cursor, on this machine or on a real one:
 ; the position at 0040:0050 is a BIOS variable and only the service that
 ; owns it may write it. So this program leaves the cursor where it found it
-; and hello.asm leaves it at cell 22, and the two screens still match.
+; and hello.asm leaves it at cell 22, and the text the two leave is still
+; the same bytes.
 ;
 ; Entry convention: the corpus convention, from replay.h -- a flat binary
-; at 0x100, CS=DS=ES=SS=0, SP=0xFFFE, FLAGS=0xF002. IF is clear and this
-; program never needs it: no interrupt is involved anywhere in it.
+; at 0x100 of its own segment, CS=DS=ES=SS=0x1000, SP=0xFFFE,
+; FLAGS=0xF002. IF is clear and this program never needs it: no interrupt
+; is involved anywhere in it.
 ;
 ; Expected at HLT:
 ;   page 0, cells 0..21 = "M4 hello from the BIOS", attribute 0x07 each
 ;   the cursor untouched (cell 0 on a freshly powered-on machine)
-;   the 4000-byte page identical to the one hello.asm leaves
+;   every other cell of the page still zero -- this program sets no video
+;     mode and clears nothing, so what surrounds the message is what the
+;     machine was cleared to. hello.asm leaves the same message on a page
+;     the mode set filled with spaces, and that difference is the one the
+;     two pages are allowed to have.
 
         bits 16
         org 0x100

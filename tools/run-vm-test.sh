@@ -26,7 +26,14 @@ ISO="${1:-$BUILD_DIR/funyos.iso}"
 MODE="${2:-bios}"
 
 WORK="$BUILD_DIR/vm-test"
-TIMEOUT_SECS="${QEMU_TIMEOUT:-20}"
+
+# The budget is a guard against a hang, not a schedule. It has to cover a
+# boot plus the whole run, and one of the M4 cases waits for five ticks of
+# a real clock -- 275 ms of wall time that software emulation stretches,
+# since this machine's QEMU may have no KVM. A machine with KVM finishes in
+# a fraction of this; the run stops as soon as the kernel says it is done,
+# so the number only matters when something is wrong.
+TIMEOUT_SECS="${QEMU_TIMEOUT:-60}"
 
 FAILED=0
 
@@ -106,10 +113,44 @@ LOG="$WORK/serial-$MODE.log"
 
 echo "  Boot: 8086 interpreter ($MODE)"
 rm -f "$LOG"
-timeout "$TIMEOUT_SECS" qemu-system-x86_64 \
+
+# Stopped when the program is done, not when the clock runs out.
+#
+# The kernel idles after the last process exits, so QEMU never stops on its
+# own and the old form of this -- a plain `timeout` -- spent the whole
+# budget on every run, passing or failing. That also made the result a race
+# against the budget rather than a statement about the program, which is
+# exactly what a flaky test is made of: under software emulation a boot
+# plus a case that waits for a real clock can come close to a budget that
+# was sized for a boot alone.
+#
+# So: wait for the line the kernel prints when it has nothing left to run,
+# and keep the timeout as the guard against a hang. If the marker is never
+# seen the behaviour is what it was -- the budget runs out and the
+# assertions decide.
+qemu_started=$(date +%s)
+qemu-system-x86_64 \
     -m 512 -cdrom "$VM_ISO" $BOOT_ARGS \
     -serial "file:$LOG" -display none -no-reboot \
-    $FIRMWARE_ARGS $ACCEL >/dev/null 2>&1
+    $FIRMWARE_ARGS $ACCEL >/dev/null 2>&1 &
+qemu_pid=$!
+
+deadline=$(( qemu_started + TIMEOUT_SECS ))
+
+while kill -0 "$qemu_pid" 2>/dev/null; do
+    if grep -qF "nothing left to run" "$LOG" 2>/dev/null; then
+        break
+    fi
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+        break
+    fi
+    sleep 0.2
+done
+
+kill "$qemu_pid" 2>/dev/null
+wait "$qemu_pid" 2>/dev/null
+
+echo "  Took: $(( $(date +%s) - qemu_started ))s of a ${TIMEOUT_SECS}s budget"
 
 printf '\n=================== 8086 interpreter ===================\n'
 sed -n '/\[vm86 interpreter\]/,$p' "$LOG" 2>/dev/null | cat -s

@@ -13,7 +13,7 @@
 ;         the trap calls bios1a_irq   (the count at 0040:006C goes up)
 ;           which calls INT 1Ch       (vm86_interrupt again)
 ;             IVT[1Ch] is OURS        (this program wrote it)
-;               so the handler runs  (counts into 0000:0802, then IRET)
+;               so the handler runs  (counts into 1000:0802, then IRET)
 ;             IRET lands back on the 08h stub's CF
 ;           which IRETs to the code that was interrupted
 ;
@@ -26,7 +26,7 @@
 ; (docs/dos-refs.md section 6). This program never reads it through INT 1Ah
 ; and never divides it, so the rate only matters in that the host must
 ; raise exactly as many ticks as the plan says; the counter it does read is
-; its own, at 0000:0802.
+; its own, at 1000:0802.
 ;
 ; The program waits with `hlt` rather than spinning. With IF=1 that is a
 ; real wait -- M4-6 -- and the wake-up comes from the run loop delivering
@@ -42,14 +42,15 @@
 ; forgetting that is fatal rather than cosmetic.
 ;
 ; Entry convention: the corpus convention, from replay.h -- a flat binary
-; at 0x100, CS=DS=ES=SS=0, SP=0xFFFE, FLAGS=0xF002. IF is clear at entry
+; at 0x100 of its own segment, CS=DS=ES=SS=0x1000, SP=0xFFFE, FLAGS=0xF002.
+; IF is clear at entry
 ; and this program sets it.
 ;
 ; Expected at HLT, with the host having raised exactly five ticks:
 ;   page 0, cell 0 = '5', attribute 0x07 -- the attribute the mode set's
 ;     clear left, because 0Eh writes no attribute byte (dos-refs section 1)
 ;   0040:006C = 5                 the firmware counted what was raised
-;   0000:0802 = 5                 our own handler was called as often
+;   1000:0802 = 5                 our own handler was called as often
 
         bits 16
         org 0x100
@@ -60,9 +61,19 @@
         mov     ax, 0x0003
         int     0x10
 
-        ; the user timer hook: 08h calls 1Ch when it has finished its own work
-        mov     word [0x1C*4], tick
-        mov     word [0x1C*4+2], 0x0000
+        ; The user timer hook: 08h calls 1Ch when it has finished its own
+        ; work.
+        ;
+        ; The table is at address zero and this program is not, so the hook
+        ; takes a segment: an offset stored as a bare number would be read
+        ; out of the program's own segment, which holds the program. The
+        ; handler's segment is CS, and this is the one place a sample has
+        ; to say so.
+        xor     ax, ax
+        mov     es, ax
+        mov     word [es:0x1C*4], tick
+        mov     ax, cs
+        mov     word [es:0x1C*4+2], ax
 
         sti
 

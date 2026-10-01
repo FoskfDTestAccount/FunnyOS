@@ -43,7 +43,8 @@
 ; interrupted and the wait would be permanent.
 ;
 ; Entry convention: the corpus convention, from replay.h -- a flat binary
-; at 0x100, CS=DS=ES=SS=0, SP=0xFFFE, FLAGS=0xF002. IF is clear at entry
+; at 0x100 of its own segment, CS=DS=ES=SS=0x1000, SP=0xFFFE, FLAGS=0xF002.
+; IF is clear at entry
 ; and this program sets it.
 ;
 ; Expected at HLT, with the host having fed scancode 0x1E after several

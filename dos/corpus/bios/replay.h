@@ -91,14 +91,57 @@
 /* ------------------------------------------------------------------ */
 
 /*
- * Identical to the ones in corpus/replay.h, and deliberately restated
- * rather than included: those are a bare processor's and these are a
- * machine's, and a change to one should not silently move the other.
+ * The entry convention, and the one place it differs from M3's.
+ *
+ * M3's samples run on a bare processor with no firmware in it, and
+ * corpus/replay.h loads them at linear 0x100 with every segment zero.
+ * That is fine when nothing else lives at the bottom of memory.
+ *
+ * A machine has something else there. The interrupt vector table is at
+ * 0x0000-0x03FF -- it is where the 8086 looks when it takes an interrupt,
+ * and nothing in this machine moves it -- so a program loaded at linear
+ * 0x100 with CS = 0 sits *on top of the table*, and the first 768 bytes of
+ * its image ARE vector entries 64 and up.
+ *
+ * That was survivable by luck, and only by luck. Nothing in this corpus
+ * uses a vector above 0x1C, so nothing was ever overwritten in a way that
+ * showed; and the program's own bytes were safe because the firmware is
+ * installed *before* the program is loaded. Both are accidents of what
+ * these seven programs happen to do. A TSR -- which is what M5 is for --
+ * hooks a vector of its own choosing, conventionally somewhere above 0x60,
+ * and would find its handler's entry buried under its own code.
+ *
+ * So a program here gets a segment of its own, the way a real .COM does:
+ * DOS loads one at a PSP segment and points CS, DS, ES and SS at it, and
+ * that is exactly why real .COM programs never had this problem. All four
+ * and not just CS, because a program's data and stack are in its image
+ * too -- `mov si, message` against DS = 0 reads the vector table rather
+ * than the program.
+ *
+ * 0x1000 is a choice and not a fact: any paragraph that keeps the image
+ * out of the table's way and leaves room for a stack below it will do.
+ * 0x1000 gives a 64 KiB block from linear 0x10000, the stack at 0x1FFFE,
+ * and the scratch a sample keeps for itself from 0x10800 up -- all of it
+ * inside the program's own memory and none of it near a vector entry.
+ *
+ * The absolute addresses the samples still use are the ones that are
+ * genuinely absolute: the vector table at 0x0000 (timer.asm hooks 1Ch),
+ * the data area at segment 0x0040, and video memory at 0xB8000. Those take
+ * an explicit segment, which is what the hardware requires and what a
+ * program of the era wrote.
+ *
+ * M5 inherits this. A loader that builds a PSP will put the program at
+ * PSP:0x100 and point the four segment registers at the PSP, and nothing
+ * here has to change for that to work.
  */
-#define VM86_BIOS_LOAD_SEGMENT  0x0000u
+#define VM86_BIOS_LOAD_SEGMENT  0x1000u
 #define VM86_BIOS_LOAD_OFFSET   0x0100u
 #define VM86_BIOS_STACK_TOP     0xFFFEu
 #define VM86_BIOS_INITIAL_FLAGS VM86_FLAG_ALWAYS_SET
+
+/* Where that segment lands in guest memory. A sample's own scratch is
+ * addressed from its segment, so the suite adds this to read it back. */
+#define VM86_BIOS_LOAD_LINEAR   ((uint32_t)VM86_BIOS_LOAD_SEGMENT << 4)
 
 /*
  * Guest memory a case gets. A megabyte, which is what an 8086 can address,
