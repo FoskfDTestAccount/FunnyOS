@@ -534,30 +534,25 @@ void bios16_service(struct vm86_cpu *cpu, void *ctx)
     case 0x00:
         if (!kb_take(cpu, &word)) {
             /*
-             * Interrupts have to be live for the wait to end.
+             * Ask to be run again rather than answer with nothing. This
+             * is the only shape a wait can take here: the interpreter is
+             * one thread, so a service that spins never returns and the
+             * key it waits for never arrives. Re-running the trap puts
+             * the wait outside, where the run loop still gets a look in
+             * and can deliver the keyboard interrupt.
              *
-             * Reaching this service at all means an INT ran, and an INT
-             * clears IF: the frame on the stack carries the caller's IF
-             * and the processor runs the handler with interrupts off. So
-             * the wait would be a wait nothing could interrupt -- IRQ1
-             * would arrive, the run loop would find the guest unwilling
-             * to take it, and the read would spin forever with the key
-             * sitting in the controller.
+             * Interrupts are not turned on here even though the wait
+             * needs them and the INT that got us here turned them off.
+             * vm86_service_retry() does it, along with the reasoning.
              *
-             * The firmware's own blocking read opens the same door for
-             * the same reason: it executes STI before it starts waiting.
-             *
-             * What is deliberately NOT done is the other half of STI --
-             * the one instruction during which a pending interrupt is not
-             * yet recognised. That shadow is one-shot, and this service
-             * is re-entered from the top on every retry, so re-arming it
-             * would arm it again before the boundary that would have
-             * cleared it and the machine would never deliver anything.
-             * The delay the hardware gives is real; here the return to
-             * the run loop already provides it.
+             * That is a change from how this service was first written,
+             * which set IF itself. It worked, and it was one line in the
+             * wrong place: every blocking service would have had to
+             * remember it, and forgetting is not a compile error or a
+             * failed test -- it is a machine that stops moving. The
+             * service that forgets is the one that never gets written
+             * against a test that waits.
              */
-            vm86_flag_set(cpu, VM86_IF, true);
-
             vm86_service_retry(cpu);
             return;
         }

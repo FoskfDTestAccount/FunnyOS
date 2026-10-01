@@ -71,40 +71,11 @@ static void hook_vector(struct vm86_cpu *cpu, uint8_t vector,
 }
 
 /*
- * A few lines of the run loop, for the case that needs one.
- *
- * Same reasoning as the same function in test_bios16.c: the real loop is
- * task A's and has not landed, this is a test fixture and not a second
- * implementation, and each suite being its own program means the two
- * copies cannot drift into each other's way. When vm86_run() exists,
- * both should go.
+ * The timer cases run the machine with vm86_run(), the real run loop.
+ * They used to carry their own copy of it while the real one was still
+ * being written; see the note in test_bios16.c about why that copy had
+ * to go once the real one landed.
  */
-static enum vm86_stop run(struct vm86_cpu *cpu, uint64_t steps)
-{
-    for (uint64_t i = 0; i < steps; i++) {
-        if (cpu->intr_shadow) {
-            cpu->intr_shadow--;
-        } else if (vm86_interruptible(cpu)) {
-            int vector = vm86_next_pending(cpu);
-
-            vm86_clear_pending(cpu, (uint8_t)vector);
-            cpu->halted = false;
-            vm86_interrupt(cpu, (uint8_t)vector);
-            continue;
-        } else if (cpu->halted) {
-            return VM86_STOP_HALT;
-        }
-
-        enum vm86_result result = vm86_step(cpu);
-
-        if (result == VM86_HALT)
-            continue;
-        if (result != VM86_CONTINUE)
-            return VM86_STOP_FAULT;
-    }
-
-    return VM86_STOP_STEPS;
-}
 
 /* ------------------------------------------------------------------ */
 /* The conversion from the host's clock to the guest's                 */
@@ -485,11 +456,11 @@ static void test_the_timer_chains_to_the_user_hook(struct vm86_cpu *cpu)
     poke(cpu, HANDLER_LINEAR, guest_handler, sizeof(guest_handler));
 
     /* Let the guest reach its HLT, with interrupts on. */
-    run(cpu, 10);
+    vm86_run(cpu, 10);
 
     /* --- nothing hooked: the tick happens and 1Ch does nothing --- */
     vm86_raise(cpu, VM86_INT_TIMER);
-    vm86_expect_u16("the machine runs", run(cpu, 60), VM86_STOP_STEPS);
+    vm86_expect_u16("the machine runs", vm86_run(cpu, 60), VM86_STOP_STEPS);
     vm86_expect_u16("one tick happened", (uint16_t)ticks(cpu), 1);
     vm86_expect_u16("and the stub's 1Ch did nothing", counter(cpu), 0);
 
@@ -497,12 +468,12 @@ static void test_the_timer_chains_to_the_user_hook(struct vm86_cpu *cpu)
     hook_vector(cpu, VM86_INT_USER_TIMER, 0x0000, HANDLER_LINEAR);
 
     vm86_raise(cpu, VM86_INT_TIMER);
-    run(cpu, 60);
+    vm86_run(cpu, 60);
     vm86_expect_u16("two ticks", (uint16_t)ticks(cpu), 2);
     vm86_expect_u16("and now the hook has run", counter(cpu), 1);
 
     vm86_raise(cpu, VM86_INT_TIMER);
-    run(cpu, 60);
+    vm86_run(cpu, 60);
     vm86_expect_u16("three ticks", (uint16_t)ticks(cpu), 3);
     vm86_expect_u16("twice, not once and not four times", counter(cpu), 2);
 
@@ -510,7 +481,7 @@ static void test_the_timer_chains_to_the_user_hook(struct vm86_cpu *cpu)
     vm86_install_ivt(cpu);   /* every vector back on its stub */
 
     vm86_raise(cpu, VM86_INT_TIMER);
-    run(cpu, 60);
+    vm86_run(cpu, 60);
     vm86_expect_u16("four ticks", (uint16_t)ticks(cpu), 4);
     vm86_expect_u16("and the counter did not move", counter(cpu), 2);
 }
@@ -528,11 +499,11 @@ static void test_the_chain_returns_through_both_stubs(struct vm86_cpu *cpu)
     setup(cpu, &st);
     vm86_test_load(cpu, program, sizeof(program));
 
-    run(cpu, 10);
+    vm86_run(cpu, 10);
 
     for (unsigned i = 0; i < 8; i++) {
         vm86_raise(cpu, VM86_INT_TIMER);
-        run(cpu, 60);
+        vm86_run(cpu, 60);
     }
 
     vm86_expect_u16("every tick got through", (uint16_t)ticks(cpu), 8);
