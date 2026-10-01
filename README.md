@@ -44,6 +44,8 @@ DOS 在这里扮演两重角色：**设计参照系**（继承小内核、直白
 
 **M3 已完成**：一个纯软件的 8086 解释器，全部 256 个操作码槽位，加 80186 扩展，加一个单步调试器。**它作为 Ring 3 进程运行在 FunnyOS 里**——以 `vm=1` 启动时，内核会跑起解释器，接上 16 MB 的 guest 内存，执行一段手工汇编的 guest 程序并把终态交给自动化断言（`make test-vm`）。验收标准「能执行手工汇编的二进制，寄存器与标志位状态正确」因此是可复现的，不是靠看屏幕。
 
+**M4 已完成**：IBM PC 兼容机的**固件**——中断向量表、宿主陷阱、中断投递，六个 BIOS 服务（10h/11h/12h/13h/16h/1Ah），以及那块程序可以直接读写的文本显存。验收标准「能跑一个自己写的、通过 BIOS 输出的 `.COM` 程序」达成了，而 `make test-vm` 断言的是**屏幕上那行字本身**——退出码对一台"跑了程序但什么都没画"的机器同样成立。**这一层是靠交叉审查验的**：五个模块各由一个没有写它的人独立审过，十七条发现里有四条是**作者自己的套件完全看不见**的——服务回不了 CF（`INT 13h` 的每次失败都长得像成功，而 24 个用例里 23 个看不见）、验收的断言只验了一半、语料声称的行为从没被走到、文档在代码改过之后还说反话。**它诚实地说没有证明什么，写在 DESIGN 的 M4 一节里。**
+
 操作码与内存模型的那四百多个用例**在宿主上跑**，不在 QEMU 里：解释器是纯逻辑，给它一块内存和几个字节它就能执行，所以 `cd dos && make test` 是毫秒级的。但**绿灯不算证据，除非证明它会红**——所以每一层都做过**变异测试**：往实现里种一个缺陷，看对应用例变不变红。三处独立活动共种了一百二十多处，每一条用例都被至少一个变异体弄红过。
 
 各组按编码切成互不重叠的任务，任务书在 [docs/tasks/](docs/tasks/)，其中一份是**独立验证**，交给没有参与实现的人：它回答的不是「我写的代码做了我以为它做的事吗」，而是「**有没有什么事所有人都以为做了、但没做**」——它也确实找出来了。
@@ -279,6 +281,8 @@ The same ISO in **VMware Workstation** (BIOS path, not QEMU):
 `make run` boots interactively; `bash tools/screenshot.sh` and `bash tools/screenshot-shell.sh` capture the screen headlessly.
 
 **M3 is done.** A software 8086 interpreter, all 256 opcode slots, the 80186 additions, and a single-step debugger. **It runs inside FunnyOS as a Ring 3 process** -- boot with `vm=1` and the kernel starts the interpreter, gives it 16 MB of guest memory, runs a hand-assembled guest and hands the terminal state to automated assertions (`make test-vm`). The acceptance criterion -- execute a hand-assembled binary with the registers and flags correct -- is therefore reproducible, not something somebody looked at.
+
+**M4 is done.** The firmware of an IBM PC compatible: the interrupt vector table, the host trap, interrupt delivery, six BIOS services (10h/11h/12h/13h/16h/1Ah), and the text memory a program can read and write directly. The acceptance criterion -- run a self-written `.COM` that outputs through the BIOS -- is met, and `make test-vm` asserts **the line on the screen itself**; an exit code would be satisfied by a machine that ran the program and drew nothing. **This layer was verified by cross-review**: every module was audited by someone who did not write it, and four of the seventeen findings were invisible to the author's own suite -- a service that could not return CF (so every `INT 13h` failure looked like success to 23 of 24 cases), an acceptance assertion that checked only half of what it claimed, a sample whose stated behaviour was never exercised, and documents still describing code that had moved on. What M4 honestly does not establish is in DESIGN's M4 section.
 
 The four hundred-odd cases covering the opcodes and the memory model **run on the host**, not in QEMU: the interpreter is pure logic, and given a block of memory and some bytes it executes, so `cd dos && make test` answers in milliseconds. But **a green light is not evidence unless it can be shown to go red** -- so every layer was put through **mutation testing**: inject one defect, watch which case turns red. Three independent campaigns injected well over a hundred, and every case was turned red by at least one of them.
 
