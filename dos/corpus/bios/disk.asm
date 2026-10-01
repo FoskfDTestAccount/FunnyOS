@@ -47,6 +47,10 @@
 ; Expected at HLT:
 ;   page 0, cells 0..1 = "OK", attribute 0x07, cursor at cell 2
 ;   (and "FAIL" at cells 0..3 if either read behaved wrongly)
+;   the attribute is the one the mode set's clear left: 0Eh writes no
+;   attribute byte, so the 0x0F in BL is ignored -- and set to a value the
+;   cells do not have, so a machine that writes BL fails here rather than
+;   passing by luck
 ;   the buffer at 0000:0600 = 4D 34 0D 0A, then the rest of the sector
 ;   the buffer at 0000:0900 = CD AB 34 12, exactly as it was planted
 
@@ -92,16 +96,21 @@ read_bad:
 
 say:
         mov     [say_text], si
-        mov     bh, 0x00
-        mov     bl, 0x07
 say_loop:
+        ; The pointer comes out of memory every time round, because INT 10h
+        ; may change SI and DI and this loop must not depend on it. BX is
+        ; the pointer AND the register BL lives in, so the page and the
+        ; colour go in after it is loaded and before the call.
         mov     bx, [say_text]
         mov     al, [bx]
         or      al, al
         jz      finished
         mov     ah, 0x0E
-        mov     bh, 0x00
-        int     0x10
+        mov     bh, 0x00                ; the page; all 0Eh takes
+        mov     bl, 0x0F                ; ignored in text mode, so the cells
+        int     0x10                    ; keep 0x07 -- and set to a value
+                                        ; they do NOT have, so a machine that
+                                        ; wrongly writes BL is caught here
         mov     bx, [say_text]
         add     bx, 1
         mov     [say_text], bx
