@@ -438,6 +438,23 @@ static struct bios1a_state g_clock;
 static struct vm_screen    g_screen;
 static struct vm86_display g_display;
 
+/*
+ * The machine itself, at file scope and not on run_corpus's stack.
+ *
+ * The processor holds a pointer to the memory, and the cases that read the
+ * guest's screen after a run go through that pointer -- so a processor
+ * that outlived its own stack frame would be a processor pointing at
+ * whatever the next call left there. That is not hypothetical: it was this
+ * file's shape until the screen assertions started reading guest memory
+ * directly, at which point it was a page fault in Ring 3 reading an
+ * address 35 KiB below the guest's RAM.
+ *
+ * One machine at a time, which is what the rest of this file assumes
+ * anyway -- the four services each have one device too.
+ */
+static struct vm86_mem g_mem;
+static struct vm86_cpu g_cpu;
+
 /* How much time the host handed the clock over the whole run. Asserted
  * rather than merely printed: it is the host's own account of the time
  * that really passed, taken from the kernel's millisecond counter, and it
@@ -468,6 +485,18 @@ static bool frame_same(const uint8_t *a, const uint8_t *b, uint32_t count)
 }
 
 /*
+ * What the display last drew, one row at a time, exactly as it was written
+ * out.
+ *
+ * Kept because "the line reached the screen" is not a statement anybody
+ * can check by looking at the frame the backend copied: a backend that
+ * ignored the guest's memory and printed a string of its own would satisfy
+ * it. What can be checked is that the rows drawn ARE the guest's screen,
+ * and that needs the rows as they went out.
+ */
+static char g_drawn[BIOS10_ROWS][VM86_TEXT_COLUMNS + 1u];
+
+/*
  * One row at a time: the characters, and the attributes dropped.
  *
  * A console has one colour and the guest's attributes select a palette
@@ -493,6 +522,10 @@ static void draw_frame(const struct bios10_state *video, const uint8_t *cells)
         }
 
         line[video->columns] = '\0';
+
+        for (uint16_t col = 0; col <= video->columns; col++)
+            g_drawn[row][col] = line[col];
+
         uputsln(line);
     }
 }
@@ -873,29 +906,26 @@ static bool run_case(const struct guest_case *c)
  * host-suite case. M4-README.md section 8 records the gap in full; nothing
  * here pretends to close it.
  */
-static bool run_corpus(const char *name, const uint8_t *image, uint32_t size,
-                       struct vm86_cpu *result)
+static bool run_corpus(const char *name, const uint8_t *image, uint32_t size)
 {
-    struct vm86_mem mem;
-    struct vm86_cpu cpu;
     enum vm86_stop  stop = VM86_STOP_STEPS;
     unsigned        slices;
     unsigned long   last_ms;
 
     uprintf("\n  --- guest case \"%s\" ---\n", name);
 
-    machine_build(&mem, &cpu, image, size);
+    machine_build(&g_mem, &g_cpu, image, size);
 
     uprintf("  image  : %u bytes at %04X:%04X, SP=%04X\n",
-            (unsigned)size, (unsigned)cpu.cs, (unsigned)cpu.ip,
-            (unsigned)cpu.sp);
+            (unsigned)size, (unsigned)g_cpu.cs, (unsigned)g_cpu.ip,
+            (unsigned)g_cpu.sp);
 
     last_ms = u_uptime_ms();
 
     for (slices = 0; slices < VM_RUN_MAX_TURNS; slices++) {
-        uint64_t retired = cpu.insn_count;
+        uint64_t retired = g_cpu.insn_count;
 
-        stop = vm86_run(&cpu, VM_SLICE_STEPS);
+        stop = vm86_run(&g_cpu, VM_SLICE_STEPS);
 
         /*
          * Draw only when the guest actually executed something.
@@ -908,8 +938,8 @@ static bool run_corpus(const char *name, const uint8_t *image, uint32_t size,
          * count the core keeps is what makes this exact rather than a
          * guess about which stop means "it ran".
          */
-        if (cpu.insn_count != retired)
-            present(&cpu);
+        if (g_cpu.insn_count != retired)
+            present(&g_cpu);
 
         if (stop == VM86_STOP_FAULT || stop == VM86_STOP_BROKEN)
             break;
@@ -919,7 +949,7 @@ static bool run_corpus(const char *name, const uint8_t *image, uint32_t size,
          * With IF set the processor is waiting, and the way out is to give
          * it something to wake for, which is the clock below.
          */
-        if (stop == VM86_STOP_HALT && !vm86_flag_test(&cpu, VM86_IF))
+        if (stop == VM86_STOP_HALT && !vm86_flag_test(&g_cpu, VM86_IF))
             break;
 
         /*
@@ -951,15 +981,15 @@ static bool run_corpus(const char *name, const uint8_t *image, uint32_t size,
         }
 
         /* One raise per turn, and only when nothing is still pending. */
-        if (g_ticks_owed > 0u && vm86_next_pending(&cpu) < 0) {
+        if (g_ticks_owed > 0u && vm86_next_pending(&g_cpu) < 0) {
             g_ticks_owed--;
             g_ticks_raised++;
-            vm86_raise(&cpu, VM86_INT_TIMER);
+            vm86_raise(&g_cpu, VM86_INT_TIMER);
         }
     }
 
-    present(&cpu);
-    *result = cpu;
+    present(&g_cpu);
+
 
     if (stop == VM86_STOP_BROKEN) {
         uprintf("  result : INTERNAL ERROR, the opcode table did not "
@@ -970,7 +1000,7 @@ static bool run_corpus(const char *name, const uint8_t *image, uint32_t size,
 
     if (stop == VM86_STOP_FAULT) {
         uprintf("  result : fault, vector %u (%s)\n",
-                (unsigned)cpu.fault, vector_name(cpu.fault));
+                (unsigned)g_cpu.fault, vector_name(g_cpu.fault));
         uprintf("  VM: case %s: FAIL (the guest faulted)\n", name);
         return false;
     }
@@ -989,26 +1019,109 @@ static bool run_corpus(const char *name, const uint8_t *image, uint32_t size,
     return true;
 }
 
-/* Report at most one difference: a wrong screen of eighty cells should not
- * produce eighty lines to scroll through. */
-static void check_text(const char *what, const char *want, uint32_t length,
-                       const uint8_t *frame, unsigned *checks,
-                       unsigned *failures)
+/*
+ * The whole page the guest left, not just the cells the message is on.
+ *
+ * Two thousand cells in an eighty-column mode, each checked against what
+ * the sample's own header says it leaves there: the message where the
+ * message went, and the fill everywhere else. Reporting stops at the first
+ * difference, because a wrong screen of two thousand cells should not
+ * produce two thousand lines.
+ *
+ * This reads the page out of guest memory rather than out of the copy the
+ * backend kept, so that a backend which recorded one thing and drew
+ * another is not judged against its own record.
+ *
+ * The earlier version of this looked at the twenty-two cells of text and
+ * nothing else. That is a whole-screen claim tested by looking at one line
+ * of it: a machine whose mode set cleared the first row and left the rest
+ * of the page as it found it passed every assertion here.
+ */
+static void check_page(const char *what, const char *message, uint32_t length,
+                       uint8_t message_attr, uint8_t fill_char,
+                       uint8_t fill_attr, const struct vm86_cpu *cpu,
+                       unsigned *checks, unsigned *failures)
 {
+    const uint8_t *page    = bios10_active_page(cpu, &g_video);
+    uint16_t       columns = g_video.columns;
+
     (*checks)++;
 
-    for (uint32_t i = 0; i < length; i++) {
-        uint8_t ch   = frame[i * 2u];
-        uint8_t attr = frame[i * 2u + 1u];
+    if (!page) {
+        uprintf("      FAIL  %s: the active page is not in guest memory\n",
+                what);
+        (*failures)++;
+        return;
+    }
 
-        if (ch == (uint8_t)want[i] && attr == VM86_ATTR_DEFAULT)
+    if (columns == 0 || columns > VM86_TEXT_COLUMNS)
+        columns = VM86_TEXT_COLUMNS;
+
+    for (uint32_t cell = 0; cell < (uint32_t)columns * BIOS10_ROWS; cell++) {
+        uint8_t want_char = cell < length ? (uint8_t)message[cell] : fill_char;
+        uint8_t want_attr = cell < length ? message_attr : fill_attr;
+        uint8_t got_char  = page[cell * 2u];
+        uint8_t got_attr  = page[cell * 2u + 1u];
+
+        if (got_char == want_char && got_attr == want_attr)
             continue;
 
         uprintf("      FAIL  %s: cell %u is (%02X, %02X), expected "
-                "(%02X, %02X)\n", what, (unsigned)i, ch, attr,
-                (uint8_t)want[i], VM86_ATTR_DEFAULT);
+                "(%02X, %02X)\n", what, (unsigned)cell, got_char, got_attr,
+                want_char, want_attr);
         (*failures)++;
         return;
+    }
+}
+
+/*
+ * What the display drew, against what the guest's memory holds.
+ *
+ * This is the assertion a backend that does not read video memory cannot
+ * pass. "The guest's line reached the screen" says only that something
+ * emitted that string, and something can: a draw_frame() that ignored its
+ * argument and printed a line of its own satisfied it with every other
+ * assertion green, which is how this was found.
+ *
+ * A screen that is a picture of the guest's memory has to be reproducible
+ * from the guest's memory, so this reads the page itself -- independently
+ * of the copy the backend kept, and independently of anything the backend
+ * recorded -- and compares it with the rows that actually went out.
+ *
+ * Characters only. This console has one colour, the attributes are dropped
+ * on purpose, and what is being compared is what a screen could show.
+ */
+static void check_drawn(const char *what, const struct vm86_cpu *cpu,
+                        unsigned *checks, unsigned *failures)
+{
+    const uint8_t *page    = bios10_active_page(cpu, &g_video);
+    uint16_t       columns = g_video.columns;
+
+    (*checks)++;
+
+    if (!page || columns == 0 || columns > VM86_TEXT_COLUMNS) {
+        uprintf("      FAIL  %s: there is no page to compare the drawn "
+                "rows with\n", what);
+        (*failures)++;
+        return;
+    }
+
+    for (uint16_t row = 0; row < BIOS10_ROWS; row++) {
+        for (uint16_t col = 0; col < columns; col++) {
+            uint8_t ch   = page[((uint32_t)row * columns + col) * 2u];
+            char    want = (ch >= 0x20u && ch < 0x7Fu) ? (char)ch : ' ';
+
+            if (g_drawn[row][col] == want)
+                continue;
+
+            uprintf("      FAIL  %s: row %u column %u was drawn as %02X and "
+                    "the guest's memory holds %02X -- the screen is not a "
+                    "picture of the guest's memory\n", what,
+                    (unsigned)row, (unsigned)col,
+                    (unsigned char)g_drawn[row][col], (unsigned)ch);
+            (*failures)++;
+            return;
+        }
     }
 }
 
@@ -1035,52 +1148,51 @@ static bool run_acceptance(void)
     static const char TEXT[] = "M4 hello from the BIOS";
     const uint32_t text_length = (uint32_t)(sizeof TEXT - 1u);
 
-    struct vm86_cpu cpu;
-    uint8_t         hello_frame[VM_PAGE_CELLS * 2u];
     unsigned        checks   = 0;
     unsigned        failures = 0;
     unsigned        before;
 
     if (!run_corpus("hello", vm_corpus_hello,
-                    (uint32_t)vm_corpus_hello_size, &cpu)) {
+                    (uint32_t)vm_corpus_hello_size)) {
         uprintf("  VM: case hello: FAIL\n");
         return false;
     }
 
-    check_text("hello", TEXT, text_length, g_screen.frame, &checks,
-               &failures);
-
-    for (uint32_t i = 0; i < sizeof hello_frame; i++)
-        hello_frame[i] = g_screen.frame[i];
+    check_page("hello", TEXT, text_length, VM86_ATTR_DEFAULT,
+               ' ', VM86_ATTR_DEFAULT, &g_cpu, &checks, &failures);
+    check_drawn("hello", &g_cpu, &checks, &failures);
 
     uprintf("  VM: case hello: %s\n", failures ? "FAIL" : "PASS");
 
     before = failures;
 
     if (!run_corpus("direct", vm_corpus_direct,
-                    (uint32_t)vm_corpus_direct_size, &cpu)) {
+                    (uint32_t)vm_corpus_direct_size)) {
         uprintf("  VM: case direct: FAIL\n");
         return false;
     }
 
-    check_text("direct", TEXT, text_length, g_screen.frame, &checks,
-               &failures);
+    /*
+     * direct.asm executes no interrupt at all, so its page is the one the
+     * machine was cleared to -- zeroes -- with the same twenty-two cells
+     * written by hand. That the two pages agree where the message is, and
+     * differ everywhere else in exactly the way each program's own header
+     * says, follows from the two whole-page calls: if both pass, the
+     * message cells are the same bytes by construction.
+     */
+    check_page("direct", TEXT, text_length, VM86_ATTR_DEFAULT,
+               0x00, 0x00, &g_cpu, &checks, &failures);
 
-    /* M4-8, on the real machine: the two cells below came from a service
-     * and from a store instruction, and they have to be the same bytes. */
-    checks++;
-
-    for (uint32_t i = 0; i < text_length * 2u; i++) {
-        if (hello_frame[i] == g_screen.frame[i])
-            continue;
-
-        uprintf("      FAIL  M4-8: cell %u %s is %02X after hello and "
-                "%02X after direct\n", (unsigned)(i / 2u),
-                (i & 1u) ? "attribute" : "character",
-                hello_frame[i], g_screen.frame[i]);
-        failures++;
-        break;
-    }
+    /*
+     * M4-8, and this is the assertion that can see it. hello.asm's
+     * characters reach the screen through a service and direct.asm's never
+     * pass through one: a display kept as a second copy of the screen
+     * would still show hello and would not show direct. What says the two
+     * paths end in the same place is the drawn rows being a picture of the
+     * guest's memory -- for the program that used the BIOS and, here, for
+     * the one that did not.
+     */
+    check_drawn("direct (M4-8)", &g_cpu, &checks, &failures);
 
     uprintf("  VM: case direct: %s\n", failures == before ? "PASS" : "FAIL");
     uprintf("  checks : %u ok, %u failed\n", checks - failures, failures);
@@ -1109,23 +1221,53 @@ static bool run_acceptance(void)
  * clock to move.
  */
 
-/* 18.2 Hz: 65536 / 1.193182 MHz, the divisor the PC's timer has used since
- * 1981 and the one docs/dos-refs.md section 6 gives. Five of them is
- * 274.6 ms.
+/*
+ * 18.2 Hz: 65536 / 1.193182 MHz, the divisor the PC's timer has used since
+ * 1981 and the one docs/dos-refs.md section 6 gives. Five ticks is
+ * 274.627 ms.
  *
- * The lower bound is the load-bearing one and it is tight: a host that
- * raised a tick per slice instead of per tick's worth of time would finish
- * this in microseconds and fail here. The upper bound allows one tick of
- * slack, which is what a host that hands the clock time as it passes can
- * be ahead by -- the guest acts on its fifth tick at the turn after the
- * one that produced it, and a turn on a slow machine can be a fraction of
- * a tick long.
+ * WHERE THE BOUNDS COME FROM, in full, because this is the comment a
+ * person changing the clock rate will be reading and the arithmetic is not
+ * where they would look for it.
  *
- * A run that comes in *under* the lower bound is the interesting failure
- * and it happened while this was being written: two million turns of this
- * loop was 270 ms, which is less than the 275 ms the guest was waiting
- * for, so the guest was four ticks in when the budget ran out. See
- * VM_RUN_MAX_MS. */
+ *   Elapsed time is measured with SYS_UPTIME_MS, which is timer_millis()
+ *   in kernel/arch/x86_64/timer.c:
+ *
+ *       return g_ticks * 1000 / TIMER_HZ;
+ *
+ *   with TIMER_HZ = 100. So the milliseconds this program hands the clock
+ *   on any turn are always a multiple of ten, and nothing between two
+ *   multiples is reachable.
+ *
+ *   Five ticks need 274.627 ms. The first multiple of ten at or above that
+ *   is 280, so 280 is the smallest reading this machine can produce for
+ *   five ticks -- and 270 is the largest it can produce for four.
+ *
+ *   The lower bound of 274 therefore sits between the two values the
+ *   guest's counting can actually reach. It holds, and it holds because
+ *   274.627 is not itself a multiple of ten.
+ *
+ *   That is a margin created by quantisation and not one chosen here. It
+ *   survives TIMER_HZ = 250 (readings are multiples of four, the smallest
+ *   five-tick reading 276) and TIMER_HZ = 1000 (multiples of one, 275).
+ *   It does NOT survive a rate coarse enough that the step is wider than
+ *   the 55 ms between four ticks and five: at TIMER_HZ = 10 the readings
+ *   are multiples of a hundred, four ticks reads 300, and this bound stops
+ *   telling four from five at all. Anyone moving TIMER_HZ downward has to
+ *   work these numbers out again; nothing in this file will tell them.
+ *
+ *   What quantisation did not do is let a wrong host through. A host that
+ *   raised a tick per turn instead of per tick's worth of time finishes in
+ *   microseconds, and zero is below 274 however finely it is measured.
+ *
+ * An earlier failure is worth recording next to this one because it looked
+ * like it and was not. Two million turns of this loop was 270 ms, which is
+ * under the 275 ms the guest was waiting for -- so the guest was one tick
+ * short when the budget ran out. That was the budget counting turns
+ * instead of counting time; see VM_RUN_MAX_MS. Having these numbers is
+ * what made the two tellable apart: 270 is what four ticks reads, and four
+ * ticks was exactly what the guest had.
+ */
 #define VM_TICKS_WANTED       5u
 #define VM_TICKS_MIN_MS       274u
 #define VM_TICKS_MAX_MS       340u
@@ -1141,26 +1283,26 @@ static bool run_acceptance(void)
 
 static bool run_ticks_case(void)
 {
-    struct vm86_cpu cpu;
     unsigned        checks   = 0;
     unsigned        failures = 0;
     unsigned long   started;
     unsigned long   elapsed;
     uint32_t        bda;
+    uint32_t        counter;
     uint32_t        ticks;
+    uint16_t        counted;
+    char            shown[2];
 
     started = u_uptime_ms();
     g_ms_advanced = 0;
 
     if (!run_corpus("timer", vm_corpus_timer,
-                    (uint32_t)vm_corpus_timer_size, &cpu)) {
+                    (uint32_t)vm_corpus_timer_size)) {
         uprintf("  VM: case timer: FAIL\n");
         return false;
     }
 
     elapsed = u_uptime_ms() - started;
-
-    check_text("timer", "5", 1u, g_screen.frame, &checks, &failures);
 
     /* The firmware's own count, read out of the data area rather than
      * through the service -- a program reads it directly and so does this,
@@ -1172,11 +1314,45 @@ static bool run_ticks_case(void)
             ((uint32_t)g_guest_ram[bda + 2u] << 16) |
             ((uint32_t)g_guest_ram[bda + 3u] << 24);
 
+    /* And the one the guest kept, which is the one it printed. */
+    counter = ((uint32_t)GUEST_SEGMENT << 4) + 0x0802u;
+
+    counted = (uint16_t)(g_guest_ram[counter] |
+                         ((uint16_t)g_guest_ram[counter + 1u] << 8));
+
+    uprintf("  clock  : the firmware counted %u, the guest counted %u\n",
+            (unsigned)ticks, (unsigned)counted);
+
+    /*
+     * The character the screen must show, computed from the guest's own
+     * counter rather than written here as '5'.
+     *
+     * That is the difference between an assertion and a coincidence. A
+     * literal is a string a display backend that never read video memory
+     * could have printed; a character computed from a number this test
+     * reads out of the guest's RAM is not.
+     */
+    shown[0] = (char)('0' + (counted & 0x0Fu));
+    shown[1] = '\0';
+
+    check_page("timer", shown, 1u, VM86_ATTR_DEFAULT, ' ', VM86_ATTR_DEFAULT,
+               &g_cpu, &checks, &failures);
+    check_drawn("timer", &g_cpu, &checks, &failures);
+
     checks++;
 
     if (ticks != VM_TICKS_WANTED) {
         uprintf("      FAIL  timer: the firmware counted %u ticks, "
                 "expected %u\n", (unsigned)ticks, VM_TICKS_WANTED);
+        failures++;
+    }
+
+    checks++;
+
+    if (counted != ticks) {
+        uprintf("      FAIL  timer: the guest counted %u and the firmware "
+                "counted %u, so the 08h -> 1Ch chain lost or invented a "
+                "tick\n", (unsigned)counted, (unsigned)ticks);
         failures++;
     }
 
