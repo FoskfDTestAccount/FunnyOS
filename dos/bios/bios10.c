@@ -123,28 +123,27 @@ static void put_cell(struct vm86_cpu *cpu, const struct bios10_state *st,
 /* ------------------------------------------------------------------ */
 
 /*
- * Two more video words, which firmware.h does not name.
+ * The two display bytes firmware.h does not... did not use to name.
  *
- *   0040:0084  rows on screen minus one
- *   0040:0087  the video control byte, whose bit 7 means "do not clear
- *              the screen on a mode set" -- the copy of AL bit 7 that
- *              AH=00h is given and that AH=0Fh is expected to hand back
- *              with the mode number.
+ *   0040:0084  rows on screen minus one          (VM86_BDA_ROWS)
+ *   0040:0087  the video control byte, whose     (VM86_BDA_VIDEO_CONTROL)
+ *              bit 7 means "do not clear the
+ *              screen on a mode set"
  *
- * They are spelled out here rather than in the frozen header because the
- * header is frozen, and recorded rather than dropped for the same reason
- * bios16.c records 0040:0071. Unlike that one these really are the video
- * service's: nothing else writes them, nothing else has a claim, and both
- * describe the display the rest of this state describes.
+ * They were defined here first, because this module needed them and the
+ * header is frozen -- the same move bios16.c made for 0040:0071, and for
+ * the same reason. The difference is what happened next: an audit found
+ * they belonged in the map, they went into the map, and this file uses
+ * the map's names now. One fact, one spelling; a second one here would be
+ * the thing firmware.h exists to prevent.
  *
- * Ralf Brown's memory list names them ("ROWS ON SCREEN MINUS ONE", and
- * "VIDEO ... CONTROL" whose bit 7 is "do not clear RAM on mode set"), and
- * vgabios is the second source: its scroll reads the row count from
- * 0040:0084, and its AH=0Fh handler ORs bit 7 of 0040:0087 into the mode
- * byte it returns.
+ * The row count is written on every call rather than only on a mode set,
+ * because it is derived from the state and cannot differ between two
+ * calls -- twenty-five rows is 24, always.
  */
-#define BIOS10_BDA_ROWS_MINUS_1  0x0084u
-#define BIOS10_BDA_VIDEO_CTL     0x0087u
+
+/* Bit 7 of 0040:0087. The header names the byte; the bit inside it is
+ * this module's because nothing else sets it. */
 #define BIOS10_CTL_NO_CLEAR      0x80u
 
 /*
@@ -177,9 +176,9 @@ static void sync_bda(struct vm86_cpu *cpu, const struct bios10_state *st)
                      (uint16_t)((st->cursor_start << 8) | st->cursor_end));
 
     vm86_mem_write8 (mem, bda + VM86_BDA_ACTIVE_PAGE, st->active_page);
-    vm86_mem_write8 (mem, bda + BIOS10_BDA_ROWS_MINUS_1,
+    vm86_mem_write8 (mem, bda + VM86_BDA_ROWS,
                      (uint8_t)(BIOS10_ROWS - 1u));
-    vm86_mem_write8 (mem, bda + BIOS10_BDA_VIDEO_CTL, st->video_ctl);
+    vm86_mem_write8 (mem, bda + VM86_BDA_VIDEO_CONTROL, st->video_ctl);
 }
 
 /* ------------------------------------------------------------------ */

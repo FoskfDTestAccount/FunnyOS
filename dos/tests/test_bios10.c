@@ -891,7 +891,7 @@ static void test_0f_hands_back_the_control_bit_with_the_mode(
     vm86_expect_u16("and BH the active page", cpu->bh, 0u);
 
     vm86_expect_mem8("0040:0087 bit 7 says the same thing",
-                     cpu, (VM86_BDA_SEGMENT << 4) + 0x0087u, 0x80u);
+                     cpu, (VM86_BDA_SEGMENT << 4) + VM86_BDA_VIDEO_CONTROL, 0x80u);
 
     /* A mode set without the bit puts it back down. */
     cpu->al = 0x03;
@@ -902,7 +902,7 @@ static void test_0f_hands_back_the_control_bit_with_the_mode(
 
     vm86_expect_u16("and clearing it clears the bit", cpu->al, 0x03u);
     vm86_expect_mem8("in the data area too",
-                     cpu, (VM86_BDA_SEGMENT << 4) + 0x0087u, 0x00u);
+                     cpu, (VM86_BDA_SEGMENT << 4) + VM86_BDA_VIDEO_CONTROL, 0x00u);
 }
 
 /*
@@ -1076,9 +1076,9 @@ static void test_the_data_area_is_synced(struct vm86_cpu *cpu)
     vm86_expect_mem8 ("0040:0062 is the active page",
                       cpu, bda + VM86_BDA_ACTIVE_PAGE, 1);
     vm86_expect_mem8 ("0040:0084 is the last row number",
-                      cpu, bda + 0x0084u, 24u);
+                      cpu, bda + VM86_BDA_ROWS, 24u);
     vm86_expect_mem8 ("0040:0087 carries the video control byte",
-                      cpu, bda + 0x0087u, 0x00u);
+                      cpu, bda + VM86_BDA_VIDEO_CONTROL, 0x00u);
 }
 
 /* ------------------------------------------------------------------ */

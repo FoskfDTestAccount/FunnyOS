@@ -370,30 +370,28 @@ static void test_the_pointers_stay_inside_the_ring(struct vm86_cpu *cpu)
 }
 
 /*
- * *** PINS A KNOWN DEFECT ***  -- see M4-bios16-audit-report.md
+ * *** WAS A KNOWN DEFECT, FIXED ON MAIN ***
  *
- * 0040:0071 is the Ctrl-Break flag. Ralf Brown's memory list gives it as
- * "bit 7 is set when Ctrl-Break has been pressed", cross-referenced to INT
- * 1Bh, and that is the byte everything from FreeDOS to DOSBox reads to
- * find out whether the user hit the break key. It is not an overflow flag,
- * and the real firmware sets nothing there when the keyboard buffer fills
- * -- it beeps and discards the keystroke.
+ * 0040:0071 is the Ctrl-Break flag -- "bit 7 is set when Ctrl-Break has
+ * been pressed", cross-referenced to INT 1Bh -- and polling it is how a
+ * program finds out that the user hit Break; FreeDOS's break.c reads that
+ * address directly. It is not an overflow flag, and the firmware sets
+ * nothing there when the keyboard buffer fills: it beeps and throws the
+ * keystroke away.
  *
- * The code writes bit 7 there on overflow, because the task book's
- * pitfalls list says to (M4-C-kbd-time.md, "把 0040:0071 的 bit 7 置位").
- * The module's own comment notices that the offset is not in firmware.h's
- * map and not in the list of fields the module owns -- and then trusts the
- * pitfall note over the ownership rule, which is exactly the rule that
- * would have caught this.
+ * This module used to set bit 7 there on every dropped keystroke, because
+ * the task book's pitfall list said to. The module's own comment noticed
+ * that the offset was in neither firmware.h's map nor its own list of
+ * fields, and then trusted the note over both -- which is the rule that
+ * would have caught it. The consequence was not cosmetic: a program
+ * polling the byte saw "the user pressed Break" once per keystroke it
+ * fell behind on.
  *
- * The consequence is not cosmetic. A program polling 40:71 bit 7 to
- * detect Ctrl-Break -- which is the ordinary way to do it -- sees the
- * break flag set every time it falls behind on reading keys, and a
- * program that treats the bit as "stop what you are doing" stops.
- *
- * When this is fixed, the last assertion becomes `0x00`.
+ * The write is gone and the offset is in the map now. The assertions
+ * below are the same ones, inverted: the byte does not move, whether the
+ * buffer is filling, full, or overflowing.
  */
-static void test_an_overflow_touches_the_ctrl_break_flag(struct vm86_cpu *cpu)
+static void test_an_overflow_touches_nothing(struct vm86_cpu *cpu)
 {
     struct machine m;
 
@@ -404,18 +402,25 @@ static void test_an_overflow_touches_the_ctrl_break_flag(struct vm86_cpu *cpu)
 
     install(cpu, &m);
 
-    vm86_expect_u16("0040:0071 starts clear", bda8(cpu, 0x0071u), 0x00u);
+    vm86_expect_u16("the Ctrl-Break flag starts clear",
+                    bda8(cpu, VM86_BDA_CTRL_BREAK), 0x00u);
 
     for (unsigned i = 0; i < 15; i++)
         press(cpu, &m.kb, keys[i]);
 
-    vm86_expect_u16("and is still clear with the buffer merely full",
-                    bda8(cpu, 0x0071u), 0x00u);
+    vm86_expect_u16("still clear with the buffer full",
+                    bda8(cpu, VM86_BDA_CTRL_BREAK), 0x00u);
 
-    press(cpu, &m.kb, 0x23);            /* the sixteenth */
+    press(cpu, &m.kb, 0x23);            /* the sixteenth, which is dropped */
 
-    vm86_expect_u16("but overflowing it sets bit 7 of the Ctrl-Break flag",
-                    (uint16_t)(bda8(cpu, 0x0071u) & 0x80u), 0x80u);
+    vm86_expect_u16("and still clear after a keystroke is thrown away",
+                    bda8(cpu, VM86_BDA_CTRL_BREAK), 0x00u);
+
+    /* The keystroke really was dropped, so this is not a case that passes
+     * because the buffer never filled. */
+    vm86_expect_u16("with the tail still where fifteen left it",
+                    bda16(cpu, VM86_BDA_KB_TAIL),
+                    VM86_BDA_KB_BUFFER_END - 2u);
 }
 
 /* ------------------------------------------------------------------ */
@@ -910,8 +915,8 @@ static const struct vm86_test tests[] = {
       test_the_ring_holds_fifteen_and_drops_the_newest },
     { "the pointers stay inside the ring",
       test_the_pointers_stay_inside_the_ring },
-    { "KNOWN DEFECT: an overflow touches the Ctrl-Break flag",
-      test_an_overflow_touches_the_ctrl_break_flag },
+    { "an overflow touches nothing",
+      test_an_overflow_touches_nothing },
 
     { "02h answers in AL and leaves AH alone",
       test_02h_answers_in_al_and_leaves_ah_alone },
