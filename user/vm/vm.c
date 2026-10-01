@@ -1355,41 +1355,68 @@ static bool run_ticks_case(void)
                &g_cpu, &checks, &failures);
     check_drawn("timer", &g_cpu, &checks, &failures);
 
+    /*
+     * Two questions that used to share one message, and they point at
+     * completely different places.
+     *
+     * FIRST: did the guest and the firmware both count five? That is about
+     * the guest, the clock service and the 08h -> 1Ch chain. If it is not
+     * five then the rate means nothing, so the rate is not looked at -- a
+     * wrong count and a wrong rate are different faults with different
+     * causes, and reading one as the other sends the reader somewhere the
+     * problem is not.
+     *
+     * SECOND, and only when the count is right: did five ticks take a sane
+     * amount of real time? The lower bound is structural -- five ticks
+     * cannot have come out of less than 274.6 ms of clock, whatever the
+     * machine did. The upper bound is NOT structural: it allows one tick of
+     * slack for a host that hands the clock time as it passes, and this
+     * process can be taken off the CPU for longer than that. So tripping
+     * the upper bound with the count right is a statement about the MACHINE
+     * rather than about the guest, and the message says so.
+     */
     checks++;
 
-    if (ticks != VM_TICKS_WANTED) {
-        uprintf("      FAIL  timer: the firmware counted %u ticks, "
-                "expected %u\n", (unsigned)ticks, VM_TICKS_WANTED);
-        failures++;
-    }
-
-    checks++;
-
-    if (counted != ticks) {
-        uprintf("      FAIL  timer: the guest counted %u and the firmware "
-                "counted %u, so the 08h -> 1Ch chain lost or invented a "
-                "tick\n", (unsigned)counted, (unsigned)ticks);
-        failures++;
-    }
-
-    checks++;
-
-    if (g_ms_advanced < VM_TICKS_MIN_MS || g_ms_advanced > VM_TICKS_MAX_MS) {
-        uprintf("      FAIL  timer: %u ticks came out of %u ms handed to "
-                "the clock, expected between %u and %u\n", VM_TICKS_WANTED,
-                (unsigned)g_ms_advanced, VM_TICKS_MIN_MS, VM_TICKS_MAX_MS);
+    if (counted != VM_TICKS_WANTED || ticks != VM_TICKS_WANTED) {
+        uprintf("      FAIL  timer: THE COUNT IS WRONG -- the guest counted "
+                "%u ticks and the firmware counted %u, and the case waits "
+                "for exactly %u. That is the clock or the 08h -> 1Ch chain, "
+                "not the scheduler: fewer means the interrupts did not "
+                "arrive and more means something counted twice. The rate is "
+                "not judged until the count is right.\n", (unsigned)counted,
+                (unsigned)ticks, VM_TICKS_WANTED);
         failures++;
     } else {
-        uprintf("  clock  : %u ticks out of %u ms of real time\n",
-                VM_TICKS_WANTED, (unsigned)g_ms_advanced);
+        checks++;
+
+        if (g_ms_advanced < VM_TICKS_MIN_MS) {
+            uprintf("      FAIL  timer: THE CLOCK RAN FAST -- %u ticks came "
+                    "out of only %u ms of real time, and five of them are "
+                    "worth %u. The guest counted right, so what is wrong is "
+                    "the rate the host hands the clock.\n",
+                    (unsigned)ticks, (unsigned)g_ms_advanced,
+                    VM_TICKS_MIN_MS);
+            failures++;
+        } else if (g_ms_advanced > VM_TICKS_MAX_MS) {
+            uprintf("      FAIL  timer: THE MACHINE WAS DESCHEDULED -- the "
+                    "guest counted %u ticks, which is right, but %u ms of "
+                    "real time went by while it did and this bound is %u. "
+                    "The guest is not at fault and neither is the clock; "
+                    "this process was taken off the CPU.\n",
+                    (unsigned)ticks, (unsigned)g_ms_advanced,
+                    VM_TICKS_MAX_MS);
+            failures++;
+        } else {
+            uprintf("  clock  : %u ticks out of %u ms of real time\n",
+                    (unsigned)ticks, (unsigned)g_ms_advanced);
+        }
     }
 
-    uprintf("  clock  : %u ms of clock, %u ms of wall time\n",
-            (unsigned)g_ms_advanced, (unsigned)elapsed);
+    uprintf("  clock  : %u ms of clock, %u ms of wall time, %u reads, "
+            "%u ticks raised\n", (unsigned)g_ms_advanced, (unsigned)elapsed,
+            (unsigned)g_clock_reads, (unsigned)g_ticks_raised);
 
     uprintf("  VM: case timer: %s\n", failures ? "FAIL" : "PASS");
-    uprintf("  clock  : %u clock reads, %u ticks raised\n",
-            (unsigned)g_clock_reads, (unsigned)g_ticks_raised);
     uprintf("  checks : %u ok, %u failed\n", checks - failures, failures);
 
     return failures == 0;
