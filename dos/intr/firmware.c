@@ -43,7 +43,7 @@
  *   bit 0      a diskette drive is attached                      -> 1
  *   bit 1      an 8087 is present                                -> 0
  *   bits 2-3   motherboard RAM: 00 = 16K, 01 = 32K, 10 = 64K,
- *              11 = 64K or more
+ *              11 = 64K or more                                 -> 11
  *   bits 4-5   initial video: 00 = none, 01 = 40x25 colour,
  *              10 = 80x25 colour, 11 = 80x25 monochrome           -> 10
  *   bits 6-7   diskette drives minus one                         -> 00
@@ -53,14 +53,18 @@
  *   bit 13     a serial printer is attached                      -> 0
  *   bits 14-15 number of parallel printers                       -> 00
  *
- * The two bits that are not certain are bits 2-3. Their meaning is "how
- * much RAM is on the motherboard", which is a question this machine has
- * no answer to -- it has no motherboard to describe, and the memory it
- * actually has is what INT 12h reports out of the data area. They are
- * left at 00, which is the reading an XT gives, and nothing in this
- * machine reads them back.
+ * Bits 2-3 used to read 00 here, with a note claiming that was the
+ * value an XT gives and that nothing read them back. Both halves of
+ * that were wrong, and the second half was wrong in the way that
+ * matters: INT 11h is exactly the channel that hands this word to a
+ * program. A machine reporting a 16K motherboard while INT 12h reports
+ * 640K of conventional memory is a machine contradicting itself in two
+ * places a program can read, and the fix is one field.
+ *
+ * Beware of setting these bits by adding a number: 0x30 in the low byte
+ * would move bits 4 and 5 as well, turning the display monochrome.
  */
-#define VM86_EQUIPMENT_WORD 0x0021u
+#define VM86_EQUIPMENT_WORD 0x002Du
 
 /*
  * Conventional memory, which INT 12h hands back in AX.
@@ -110,6 +114,41 @@ void vm86_install_firmware(struct vm86_cpu *cpu)
 {
     vm86_mem_write16(cpu->mem, bda(VM86_BDA_EQUIPMENT), VM86_EQUIPMENT_WORD);
     vm86_mem_write16(cpu->mem, bda(VM86_BDA_MEMORY_KB), VM86_CONVENTIONAL_KB);
+
+    /*
+     * The display, as a machine comes up: 80x25 colour text on page 0,
+     * the cursor at home in the shape an AT gives it.
+     *
+     * This is the one place the who-writes-what rule is broken on
+     * purpose, and the reason is that POST is a thing that happens.
+     * Until now nothing wrote these four bytes, so a program that read
+     * the video mode or the page stride out of the data area before
+     * calling INT 10h got zeroes -- and the page stride being zero is
+     * not a wrong answer, it is a division by zero in the program that
+     * trusted it. Two separate reviews found this and neither could fix
+     * it, because the field belongs to a service whose reset() has no
+     * CPU to write with.
+     *
+     * It stays correct afterwards by itself: the video service publishes
+     * its whole state on every call, so the first INT 10h overwrites
+     * every byte here with the same values or with better ones. What
+     * this buys is the window before anybody has called it, which is the
+     * window a program reads the data area in.
+     *
+     * The values are repeated rather than taken from bios10.h on
+     * purpose -- firmware does not depend on the video service, and a
+     * test that wants a bare machine without one should still get a
+     * machine that describes itself coherently.
+     */
+    vm86_mem_write8 (cpu->mem, bda(VM86_BDA_VIDEO_MODE), 3u);
+    vm86_mem_write16(cpu->mem, bda(VM86_BDA_COLUMNS), VM86_TEXT_COLUMNS);
+    vm86_mem_write16(cpu->mem, bda(VM86_BDA_PAGE_BYTES),
+                     VM86_TEXT_PAGE_STRIDE);
+    vm86_mem_write8 (cpu->mem, bda(VM86_BDA_ACTIVE_PAGE), 0u);
+    vm86_mem_write16(cpu->mem, bda(VM86_BDA_CURSOR_SHAPE), 0x0607u);
+
+    for (uint16_t page = 0; page < 8u; page++)
+        vm86_mem_write16(cpu->mem, bda(VM86_BDA_CURSOR) + page * 2u, 0u);
 
     vm86_install_ivt(cpu);
 

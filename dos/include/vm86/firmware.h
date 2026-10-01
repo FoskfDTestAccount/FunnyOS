@@ -148,6 +148,19 @@
 #define VM86_TEXT_CELLS        (VM86_TEXT_COLUMNS * VM86_TEXT_ROWS)
 #define VM86_TEXT_PAGE_BYTES   (VM86_TEXT_CELLS * 2u)
 
+/*
+ * The stride from one text page to the next, which is not the size of a
+ * page.
+ *
+ * Eighty columns of twenty-five rows is 4000 bytes of characters and
+ * attributes, and pages are laid out 4096 apart -- the 96 bytes in
+ * between are padding no program ever sees. 0040:004C holds *this*
+ * number, and a program that uses the other one gets page 0 right, which
+ * is the page almost everything uses, and page 1 wrong. Both numbers are
+ * here so that the wrong one has to be named on purpose.
+ */
+#define VM86_TEXT_PAGE_STRIDE  0x1000u
+
 /* The attribute byte: the low nibble is the foreground, the next three
  * bits the background, and the top bit makes the foreground blink -- or
  * the background bright, depending on a bit in the attribute controller
@@ -158,8 +171,14 @@
 #define VM86_ATTR_BG_MASK      0x70u
 #define VM86_ATTR_BLINK        0x80u
 
-/* The attribute a machine comes up in, and the one a teletype write uses
- * when the program never asked for another. */
+/* The attribute a page is filled with when a mode is set, and the one
+ * this machine's own console uses.
+ *
+ * It is deliberately not described as "what a teletype write uses": in
+ * text mode AH=0Eh keeps whatever attribute is already in the cell it is
+ * writing to and ignores the colour it was handed. That correction was
+ * made once already and this line was left behind by it, still saying the
+ * old thing. */
 #define VM86_ATTR_DEFAULT      0x07u
 
 #endif /* VM86_FIRMWARE_H */

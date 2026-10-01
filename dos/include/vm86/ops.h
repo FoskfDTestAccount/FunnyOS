@@ -307,8 +307,34 @@ typedef void (*vm86_str_body)(struct vm86_cpu *cpu, uint8_t bits,
  * branches on that number afterwards, so it is part of the result rather
  * than an implementation detail.
  *
- * With no prefix at all the body is called exactly once. Always returns
- * VM86_CONTINUE: no string instruction can fault.
+ * With no prefix at all the body is called exactly once.
+ *
+ * ---------------------------------------------------------------------
+ * The loop is interruptible between iterations
+ *
+ * This is part of the contract rather than an implementation detail,
+ * because a caller has to be able to see it happen. On real hardware an
+ * interrupt is recognized between one iteration and the next, which is
+ * what keeps moving a megabyte from making the keyboard unresponsive for
+ * hundreds of milliseconds.
+ *
+ * So between iterations the loop asks vm86_interruptible(), and when the
+ * answer is yes it rewinds the instruction pointer to where the
+ * instruction began -- in front of any prefix -- and returns. The run
+ * loop then delivers the interrupt at the boundary that was just made,
+ * and the instruction is re-executed there.
+ *
+ * Two things about that are easy to get wrong and expensive to find:
+ *
+ *   - The work already done is *not* undone. CX, SI and DI keep their
+ *     advanced values, so what resumes is the rest of the repeat rather
+ *     than a second attempt at the whole of it.
+ *   - The pointer goes back to the start of the instruction, prefixes
+ *     included. Rewinding to just past the opcode instead would silently
+ *     drop the repeat, and the symptom would be one byte copied where a
+ *     buffer was expected -- on a machine that looks like it is working.
+ *
+ * Always returns VM86_CONTINUE: no string instruction can fault.
  */
 enum vm86_result vm86_str_repeat(struct vm86_cpu *cpu, uint8_t bits,
                                  vm86_str_body body, bool conditional);
