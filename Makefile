@@ -190,9 +190,39 @@ USER_C_SOURCES   := $(shell find user -name '*.c' | sort) libk/printf.c libk/str
                     $(wildcard dos/intr/*.c) $(wildcard dos/bios/*.c)
 USER_ASM_SOURCES := $(shell find user -name '*.asm' | sort)
 
+# --- The BIOS corpus, for the interpreter to run in Ring 3 ------------
+#
+# The same samples the host suite runs, assembled by the same nasm
+# invocation dos/Makefile uses and embedded the same way the init program
+# is. Not copied into a C file by hand: the acceptance sentence is about
+# one of these programs printing on a real screen, and a second copy of
+# the bytes, kept in step by editing, is a copy that would eventually not
+# be.
+#
+# Three of the seven, not all of them. The others are about services
+# answering registers, which the host suite checks in a millisecond; they
+# would buy nothing here and cost a user image that is embedded inside the
+# kernel. `direct` is here because the pair is the point: it writes the
+# same text with no interrupt at all, so if the two screens differ on the
+# real machine, the display is two pieces of state and this is where that
+# shows. `timer` is here because it is the only sample that makes the clock
+# do anything, and the clock is a device this machine really has -- the
+# calibrated LAPIC timer -- rather than one the host is pretending about.
+VM_CORPUS_SRC  := dos/corpus/bios/hello.asm dos/corpus/bios/direct.asm \
+                  dos/corpus/bios/timer.asm
+VM_CORPUS_BIN  := $(patsubst dos/corpus/bios/%.asm,$(BUILD_DIR)/vmcorpus/%.bin,$(VM_CORPUS_SRC))
+VM_CORPUS_C    := $(patsubst dos/corpus/bios/%.asm,$(BUILD_DIR)/generated/vm_corpus_%.c,$(VM_CORPUS_SRC))
+VM_CORPUS_OBJS := $(patsubst %.c,%.c.o,$(VM_CORPUS_C))
+
+# Kept rather than deleted after use, for the reason dos/Makefile gives for
+# the same two lines: make removes intermediates at the end of a run, and a
+# deleted .c whose .o survives comes back newer than it on the next build,
+# so the corpus would be re-assembled and re-embedded on every build.
+.SECONDARY: $(VM_CORPUS_BIN) $(VM_CORPUS_C)
+
 USER_C_OBJS   := $(patsubst %.c,  $(USER_OBJ_DIR)/%.c.o,$(USER_C_SOURCES))
 USER_ASM_OBJS := $(patsubst %.asm,$(USER_OBJ_DIR)/%.asm.o,$(USER_ASM_SOURCES))
-USER_OBJS     := $(USER_C_OBJS) $(USER_ASM_OBJS)
+USER_OBJS     := $(USER_C_OBJS) $(USER_ASM_OBJS) $(VM_CORPUS_OBJS)
 
 USER_ELF := $(BUILD_DIR)/funnycom.elf
 USER_BIN := $(BUILD_DIR)/funnycom.bin
@@ -240,6 +270,25 @@ $(USER_OBJ_DIR)/%.asm.o: %.asm
 	@mkdir -p $(@D)
 	@echo "  NASMu   $<"
 	@$(NASM) $(NASMFLAGS) $< -o $@
+
+# The corpus: assembled flat, then turned into a C array. `-f bin` rather
+# than the elf64 the rest of the user side uses, because a guest program
+# is a flat binary by definition -- see the entry convention in
+# dos/corpus/bios/replay.h.
+$(BUILD_DIR)/vmcorpus/%.bin: dos/corpus/bios/%.asm
+	@mkdir -p $(@D)
+	@echo "  NASM    $<"
+	@$(NASM) -f bin $< -o $@
+
+$(BUILD_DIR)/generated/vm_corpus_%.c: $(BUILD_DIR)/vmcorpus/%.bin $(TOOLS_DIR)/bin2c.py
+	@mkdir -p $(@D)
+	@echo "  EMBED   $@"
+	@python3 $(TOOLS_DIR)/bin2c.py $< vm_corpus_$* $@
+
+$(BUILD_DIR)/generated/vm_corpus_%.c.o: $(BUILD_DIR)/generated/vm_corpus_%.c
+	@mkdir -p $(@D)
+	@echo "  CCu     $<"
+	@$(CC) $(USER_CFLAGS) -c $< -o $@
 
 $(USER_ELF): $(USER_OBJS) user/link.ld
 	@echo "  LDu     $@"
