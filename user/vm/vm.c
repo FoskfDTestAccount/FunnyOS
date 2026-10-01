@@ -514,6 +514,21 @@ static void draw_frame(const struct bios10_state *video, const uint8_t *cells)
     if (video->columns == 0 || video->columns > VM86_TEXT_COLUMNS)
         return;
 
+    /*
+     * Cleared before drawing, so that what this records is only what THIS
+     * frame put on the screen.
+     *
+     * Without it, a backend that drew some rows and skipped the rest would
+     * leave the skipped rows holding the previous frame's text, and a
+     * check of "what was drawn against what the guest's memory holds"
+     * would pass for every row whose contents had not changed since. That
+     * is exactly the shape of hole this whole arrangement exists to close:
+     * a screen nobody drew, agreeing with the guest by being out of date.
+     */
+    for (uint16_t row = 0; row < BIOS10_ROWS; row++)
+        for (uint16_t col = 0; col <= video->columns; col++)
+            g_drawn[row][col] = '\0';
+
     for (uint16_t row = 0; row < BIOS10_ROWS; row++) {
         for (uint16_t col = 0; col < video->columns; col++) {
             uint8_t ch = cells[(row * video->columns + col) * 2u];
@@ -1115,10 +1130,11 @@ static void check_drawn(const char *what, const struct vm86_cpu *cpu,
                 continue;
 
             uprintf("      FAIL  %s: row %u column %u was drawn as %02X and "
-                    "the guest's memory holds %02X -- the screen is not a "
-                    "picture of the guest's memory\n", what,
-                    (unsigned)row, (unsigned)col,
-                    (unsigned char)g_drawn[row][col], (unsigned)ch);
+                    "the screen should show %02X there (the page holds "
+                    "%02X) -- the screen is not a picture of the guest's "
+                    "memory\n", what, (unsigned)row, (unsigned)col,
+                    (unsigned char)g_drawn[row][col], (unsigned char)want,
+                    (unsigned)ch);
             (*failures)++;
             return;
         }
