@@ -88,6 +88,15 @@ struct open_file *process_open_files(void)
     return g_current ? g_current->files : NULL;
 }
 
+bool process_kernel_stack_contains(uint64_t sp)
+{
+    if (!g_current || !g_current->kernel_stack)
+        return false;
+
+    uint64_t low = (uint64_t)g_current->kernel_stack;
+    return sp >= low && sp < low + g_current->kernel_stack_size;
+}
+
 /*
  * Copy a flat image into a freshly mapped run of pages, zero the rest of
  * the region the caller asked for, and map the stack above it.
@@ -218,7 +227,22 @@ struct process *process_create(const char *name, const void *image,
     if (!p)
         return NULL;
     memset(p, 0, sizeof(*p));
-    p->name = name;
+
+    /*
+     * The name is copied, not borrowed.
+     *
+     * Every caller today passes a string literal, so storing the pointer
+     * would work and go on working -- until a caller passes a buffer that
+     * is gone by the time anybody reads the name back. A structure that
+     * keeps the bytes cannot have that argument with itself.
+     */
+    if (name) {
+        size_t length = strlen(name);
+        if (length >= sizeof p->name)
+            length = sizeof p->name - 1;
+        memcpy(p->name, name, length);
+        p->name[length] = '\0';
+    }
 
     p->pml4 = vmm_create_address_space();
     if (!p->pml4) {
@@ -322,6 +346,41 @@ int process_run(struct process *p, uint64_t arg)
     if (!p)
         return -1;
 
+    /*
+     * Everything this function is about to overwrite, saved before it is
+     * overwritten.
+     *
+     * With one program in the machine, "the current process" could be set
+     * on entry and cleared on the way out and nothing could tell the
+     * difference. That stops being true the moment a program can start
+     * another one: the child runs with g_current pointing at itself, and
+     * when it ends the parent is still there -- clearing the pointer
+     * announces that it is not. Four pieces of machine state have the same
+     * problem, and they are saved and restored as a set because they
+     * describe the same machine:
+     *
+     *   g_current            who is running
+     *   the current PML4     what it can see
+     *   the TSS rsp0         where its next Ring 3 interrupt will land
+     *   the vector registers what its arithmetic is in the middle of
+     *
+     * The third is the one that bites hardest. rsp0 left pointing at a
+     * child's kernel stack after the child has been destroyed means the
+     * parent's next interrupt pushes its frame onto freed memory -- which
+     * is silent until the allocator hands that memory to somebody else.
+     *
+     * The fourth is not a context switch yet and is not treated as one:
+     * the kernel touches no vector register (see fpu.h), so saving the
+     * caller's state here captures exactly what the caller had when it
+     * called in, with nothing of the kernel's mixed in.
+     */
+    struct process *previous       = g_current;
+    uint64_t        previous_pml4  = process_current_pml4();
+    uint64_t        previous_stack = tss_get_kernel_stack();
+
+    if (previous)
+        fpu_save(previous->fpu_state);
+
     g_current = p;
 
     /*
@@ -369,9 +428,23 @@ int process_run(struct process *p, uint64_t arg)
      * floating point registers is its own until the next time it runs. */
     fpu_save(p->fpu_state);
 
-    /* Resumed here by process_exit_hook, which has already switched back
-     * to the kernel's address space. */
-    g_current = NULL;
+    /*
+     * Put the machine back the way the caller left it. See the save above
+     * for why each of these is here. The order matters once: the address
+     * space has to be the caller's before the caller resumes in it.
+     *
+     * Control arrives here from process_exit_hook, which has already
+     * switched to the kernel's address space -- so the switch below is
+     * always from the kernel's tables to the caller's, never out of a
+     * child's that is about to be destroyed.
+     */
+    if (previous)
+        fpu_restore(previous->fpu_state);
+
+    vmm_switch_to(previous_pml4);
+    tss_set_kernel_stack(previous_stack);
+    g_current = previous;
+
     return p->exit_code;
 }
 

@@ -48,6 +48,19 @@ bool timer_ready(void);
 /* Ticks since timer_init(). Wraps after roughly 5.8 billion years. */
 uint64_t timer_ticks(void);
 
+/*
+ * Ticks that arrived while a program was in Ring 3, and how many of those
+ * landed somewhere other than that program's kernel stack.
+ *
+ * The second number is an invariant, not a statistic: it is zero on a
+ * machine where every run gives rsp0 back the way it found it, and a
+ * non-zero value means an interrupt pushed its frame onto a stack that
+ * belonged to somebody else -- which after a nested run is a stack that
+ * has since been freed. See process_kernel_stack_contains.
+ */
+uint64_t timer_ring3_ticks(void);
+uint64_t timer_off_stack_ticks(void);
+
 /* Milliseconds since timer_init(), derived from the tick count. */
 uint64_t timer_millis(void);
 

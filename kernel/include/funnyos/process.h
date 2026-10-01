@@ -101,8 +101,13 @@ struct kernel_context {
     uint64_t rip;
 };
 
+/* Longest name a process can carry, including the terminator. Short
+ * because it is a diagnostic label, not a path. */
+#define PROCESS_NAME_MAX 32
+
 struct process {
-    const char *name;
+    /* The name is owned, not borrowed -- see process_create. */
+    char     name[PROCESS_NAME_MAX];
 
     uint64_t pml4;          /* physical address of the top-level table */
     uint64_t entry;
@@ -211,6 +216,26 @@ void process_abort_on_fault(uint64_t vector) __attribute__((noreturn));
 /* The address space currently in use by a running process, or 0 when the
  * kernel is on its own. */
 uint64_t process_current_pml4(void);
+
+/*
+ * Does `sp` point into the running process's kernel stack?
+ *
+ * This exists so that one claim can be checked continuously rather than
+ * argued about: **an interrupt taken while a process is in Ring 3 lands on
+ * that process's kernel stack.** The CPU does it by way of the TSS, so the
+ * claim is really about rsp0 -- and rsp0 is the piece of state a nested run
+ * has to give back, because leaving it pointing at a finished child means
+ * the parent's next interrupt pushes its frame onto freed memory.
+ *
+ * Watching the machine rather than the variable is the point. Asserting
+ * that rsp0 was restored would only assert that the line which restores it
+ * ran; this asks where the frame actually went.
+ *
+ * False when no process is running, which for an interrupt from Ring 3 is
+ * itself the violation -- a program was running and the kernel did not
+ * know about it.
+ */
+bool process_kernel_stack_contains(uint64_t sp);
 
 /*
  * The open-file table of the running process, or NULL when the kernel is

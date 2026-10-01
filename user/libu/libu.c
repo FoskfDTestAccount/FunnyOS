@@ -62,6 +62,11 @@ void u_clear(void)
     u_syscall(SYS_CLEAR, 0, 0, 0);
 }
 
+long u_spawn(const char *image, unsigned long arg)
+{
+    return u_syscall(SYS_SPAWN, (uint64_t)(uintptr_t)image, (uint64_t)arg, 0);
+}
+
 /* --- Buffered console output --------------------------------------- */
 
 /*

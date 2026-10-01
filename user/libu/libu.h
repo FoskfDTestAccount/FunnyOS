@@ -64,6 +64,20 @@ unsigned long u_uptime_ms(void);
 /* Clear the screen. */
 void u_clear(void);
 
+/*
+ * Run another program to completion and return its exit code.
+ *
+ * Blocking: control comes back when that program finishes. That is what
+ * DOS does when one program runs another, and with no scheduler it is also
+ * the only thing the kernel could do -- a caller that did not wait would
+ * have nothing to return to.
+ *
+ * A negative return means the kernel would not start it at all (no such
+ * image, or not enough memory). That is never a child's exit code, because
+ * an exit code is not negative, so the two cannot be confused.
+ */
+long u_spawn(const char *image, unsigned long arg);
+
 /* --- Console ------------------------------------------------------- */
 
 void uputc(char c);

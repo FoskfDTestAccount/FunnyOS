@@ -50,6 +50,60 @@
  * rather than the kernel reporting whatever it had to hand. */
 #define EXIT_TEST_CODE 7
 
+/*
+ * One program starting another.
+ *
+ * The parent asks the kernel to run this same image in the child's mode
+ * and gets the child's exit code back. What is being tested is not the
+ * code that travels back -- it is everything the kernel had to put back
+ * afterwards: the address space, the current process, and the kernel stack
+ * an interrupt lands on. See process_run, and the "Stack check" line in
+ * the boot log that says whether it worked.
+ */
+#define ARG_SPAWN_TEST  5
+#define ARG_SPAWN_CHILD 6
+
+/* Deliberately not zero, for the same reason EXIT_TEST_CODE is not. */
+#define SPAWN_CHILD_CODE 42
+
+/*
+ * How long each side spins, in milliseconds.
+ *
+ * Long enough for several timer ticks at 100 Hz, and that is the point
+ * rather than incidental: a tick has to arrive *while* each side is in Ring
+ * 3, or the check has nothing to look at. The one that matters most is the
+ * parent's second spin -- the one after the child is gone, when a stack
+ * that was not given back would be the child's, already freed.
+ */
+#define SPAWN_SPIN_MS 60
+
+/*
+ * Spin for `ms`, burning the time in Ring 3 rather than in the kernel.
+ *
+ * The inner loop is what makes that true, and it is not a detail. Asking
+ * the clock every turn -- which is the obvious way to write this, and what
+ * the floating point check does -- spends nearly all of the wall time
+ * inside a system call, and a system call is the kernel. A tick arriving
+ * there is on the kernel's own stack with no program behind it, so the
+ * question this whole test asks never comes up. The outer loop still asks
+ * the clock, but only once every few hundred microseconds of arithmetic.
+ *
+ * The count is not calibrated to anything. It does not need to be: what
+ * matters is that the program is running rather than waiting, and a
+ * thousand times too long is the same as a thousand times too short.
+ */
+static void spin_ms(unsigned long ms)
+{
+    unsigned long until = u_uptime_ms() + ms;
+
+    volatile unsigned long sink = 0;
+
+    while (u_uptime_ms() < until) {
+        for (unsigned long i = 0; i < 200000; i++)
+            sink += i;
+    }
+}
+
 /* ------------------------------------------------------------------ */
 /* The memory the kernel builds and the image does not contain         */
 /* ------------------------------------------------------------------ */
@@ -499,6 +553,29 @@ int u_main(uint64_t arg)
 
     if (arg == ARG_FPU_TEST) {
         run_fpu_test();
+        return 0;
+    }
+
+    if (arg == ARG_SPAWN_CHILD) {
+        uputs("spawn: child running\n");
+        spin_ms(SPAWN_SPIN_MS);
+        return SPAWN_CHILD_CODE;
+    }
+
+    if (arg == ARG_SPAWN_TEST) {
+        uputs("spawn: parent running\n");
+
+        /* Before, so that a tick lands on this side while the machine is
+         * still the parent's own. */
+        spin_ms(SPAWN_SPIN_MS);
+
+        long code = u_spawn("funnycom", ARG_SPAWN_CHILD);
+        uprintf("spawn: child returned %ld\n", code);
+
+        /* And after, which is the one that matters: the child is gone by
+         * now, and if the kernel did not take its kernel stack back, this
+         * is where the next interrupt pushes a frame onto freed memory. */
+        spin_ms(SPAWN_SPIN_MS);
         return 0;
     }
 

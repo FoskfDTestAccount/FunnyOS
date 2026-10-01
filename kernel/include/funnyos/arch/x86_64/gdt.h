@@ -41,6 +41,17 @@ void gdt_init(void);
  * (stacks grow downwards). */
 void tss_set_kernel_stack(uint64_t rsp0);
 
+/*
+ * Read that back.
+ *
+ * It exists because setting it is not a one-way door once one program can
+ * start another: the stack has to be given back when a nested run ends,
+ * and what to give back is whatever was there before. Without a reader the
+ * only way to restore it would be to remember it somewhere else, which
+ * works right up until two places remember it differently.
+ */
+uint64_t tss_get_kernel_stack(void);
+
 /* Address of the TSS, for diagnostics. */
 uint64_t tss_address(void);
 

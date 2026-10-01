@@ -6,6 +6,7 @@
 #include <funnyos/arch/x86_64/timer.h>
 #include <funnyos/console.h>
 #include <funnyos/fb.h>
+#include <funnyos/image.h>
 #include <funnyos/kbd.h>
 #include <funnyos/kprintf.h>
 #include <funnyos/process.h>
@@ -240,6 +241,50 @@ static int64_t sys_readdir(uint64_t index, uint64_t out_ptr)
     return 0;
 }
 
+/* --- Starting another program --------------------------------------- */
+
+/*
+ * Run `image` to completion and hand back its exit code.
+ *
+ * Blocking, and that is the DOS semantics rather than a shortcut: a DOS
+ * program that runs another one gets control back when it finishes, not
+ * before. It is also the only thing this process model can do today --
+ * there is no scheduler, so a program that did not wait would have nothing
+ * to return to.
+ *
+ * Nothing of the child outlives the call except the exit code. Its address
+ * space and its kernel stack are gone before this returns, which is what
+ * makes the caller's state, saved on the way in, safe to restore.
+ */
+static int64_t sys_spawn(uint64_t name_ptr, uint64_t arg)
+{
+    char name[PROCESS_NAME_MAX];
+
+    int64_t problem = copy_path_from_user(name, sizeof name, name_ptr);
+    if (problem < 0)
+        return problem;
+
+    struct image_info image;
+    if (!image_lookup(name, &image))
+        return SYSCALL_ENOENT;
+
+    struct process *child = process_create(name, image.data, image.size,
+                                           image.memory_size);
+    if (!child)
+        return SYSCALL_ENOMEM;
+
+    int code = process_run(child, arg);
+
+    /*
+     * Destroyed here, from the caller's context and after process_run has
+     * put the caller's address space back -- so this runs on tables that
+     * are staying, and it is the last thing that looks at the child's.
+     */
+    process_destroy(child);
+
+    return code;
+}
+
 /* --- Dispatch ------------------------------------------------------ */
 
 static int64_t syscall_dispatch(uint64_t number, uint64_t a0, uint64_t a1,
@@ -278,6 +323,9 @@ static int64_t syscall_dispatch(uint64_t number, uint64_t a0, uint64_t a1,
     case SYS_CLEAR:
         fb_clear();
         return 0;
+
+    case SYS_SPAWN:
+        return sys_spawn(a0, a1);
 
     case SYS_EXIT:
         /*

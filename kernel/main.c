@@ -643,6 +643,8 @@ void kmain(void)
             arg = 3;
         else if (strstr(cmdline, "vm=1"))
             arg = 4;
+        else if (strstr(cmdline, "selftest=spawn"))
+            arg = 5;
 
         kprintf("  Loaded at      : 0x%llx, stack top 0x%llx\n",
                 (unsigned long long)PROCESS_CODE_BASE,
@@ -656,6 +658,35 @@ void kmain(void)
                     code - PROCESS_EXIT_FAULT_BASE);
         } else {
             kprintf("  Result         : exited with code %d\n", code);
+        }
+
+        /*
+         * Did every interrupt that arrived while a program was in Ring 3
+         * land on that program's kernel stack?
+         *
+         * Reported here rather than asserted in a test because the answer
+         * only exists after the fact, and printed as three outcomes rather
+         * than two: "nothing was observed" is not the same as "everything
+         * was fine", and a check that reports the first as the second is
+         * how a test comes to prove nothing. The counts come from
+         * timer_tick, which is the only place a frame's address is known.
+         */
+        uint64_t ring3 = timer_ring3_ticks();
+        uint64_t off   = timer_off_stack_ticks();
+
+        if (ring3 == 0) {
+            kprintf("  Stack check    : NO TICKS -- no interrupt arrived "
+                    "while a program was in Ring 3 (%llu ticks in total), so "
+                    "nothing was checked\n",
+                    (unsigned long long)timer_ticks());
+        } else if (off != 0) {
+            kprintf("  Stack check    : FAIL (%llu of %llu Ring 3 ticks "
+                    "landed off the running program's kernel stack)\n",
+                    (unsigned long long)off, (unsigned long long)ring3);
+        } else {
+            kprintf("  Stack check    : PASS (%llu Ring 3 ticks, all on the "
+                    "running program's stack)\n",
+                    (unsigned long long)ring3);
         }
 
         process_destroy(program);

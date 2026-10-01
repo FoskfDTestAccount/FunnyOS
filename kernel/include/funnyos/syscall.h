@@ -61,7 +61,8 @@
 #define SYS_GETKEY     6   /* ()                                -> key */
 #define SYS_UPTIME_MS  7   /* ()                                -> ms  */
 #define SYS_CLEAR      8   /* ()                                -> 0   */
-#define SYS_COUNT      9
+#define SYS_SPAWN      9   /* (const char *image, uint64_t arg) -> code */
+#define SYS_COUNT      10
 
 /* File descriptors 0, 1 and 2 are the console, so that a program can be
  * written without opening anything. Ramfs file descriptors start above

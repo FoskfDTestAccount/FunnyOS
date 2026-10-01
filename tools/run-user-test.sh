@@ -27,13 +27,32 @@
 #      had to hand.
 #
 #   4. With `selftest=fputest`. The program does exact floating point
-#      arithmetic for long enough that several timer interrupts land in
-#      the middle of it, and checks the answer. This is the one that
-#      guards the kernel's compile flags: the handlers must not touch
-#      vector registers, and if somebody removes -mgeneral-regs-only they
-#      will, and the answers will stop being exact.
+#      arithmetic and checks the answer, which is proof that the
+#      arrangement works: SSE is enabled, x87 works, and a program built
+#      to use them runs instead of faulting.
 #
-# Four boots rather than one because a process only ends once, and the
+#      It is NOT proof that the kernel's handlers leave vector registers
+#      alone, and the program's own comment says as much. That was
+#      measured rather than assumed: the loops ask the clock every round,
+#      so a tick that falls inside one lands in a system call, with the
+#      kernel on its own stack and no program behind it -- this boot
+#      reports 33 ticks in total and none of them from Ring 3. (The
+#      "Stack check" line below is where that number comes from, and it
+#      is why that line exists.) The claim is settled statically instead,
+#      by tools/check-no-vector-regs.sh, which disassembles the linked
+#      kernel and fails the build if a single vector register appears.
+#
+#   5. With `selftest=spawn`. The program asks the kernel to run another
+#      program and waits for its exit code. This is the one that checks
+#      what a nested run has to give back: the address space, the current
+#      process, and -- the one that bites -- the kernel stack an interrupt
+#      lands on. Both sides spin long enough for timer ticks to arrive in
+#      Ring 3, and the kernel says afterwards where those frames went. The
+#      assertion that matters is the parent's spin *after* the child is
+#      gone, because that is where a stack that was not given back would
+#      still be the child's, and freed.
+#
+# Five boots rather than one because a process only ends once, and the
 # command line is the only thing that can differ between them.
 #
 # Usage: bash tools/run-user-test.sh [ISO path] [bios|uefi]
@@ -121,10 +140,12 @@ EOF
 FAULT_ISO="$WORK/funyos-userfault.iso"
 EXIT_ISO="$WORK/funyos-userexit.iso"
 FPU_ISO="$WORK/funyos-fputest.iso"
+SPAWN_ISO="$WORK/funyos-spawn.iso"
 
 build_image "selftest=userfault" "$FAULT_ISO"
 build_image "selftest=userexit"  "$EXIT_ISO"
 build_image "selftest=fputest"   "$FPU_ISO"
+build_image "selftest=spawn"     "$SPAWN_ISO"
 
 # ---------------------------------------------------------------- boot
 
@@ -248,6 +269,36 @@ expect_absent  "program fault"               "nothing faulted"                  
 # was left set. Both are reported as ordinary CPU exceptions, so the
 # absence of the diagnostic is the assertion.
 expect_absent  "CPU EXCEPTION"               "no exception from a vector instruction" "$LOG4"
+
+# ------------------------------------------------------------ run 5
+
+LOG5="$WORK/serial-spawn-$MODE.log"
+echo
+echo "  Boot 5: one program starts another ($MODE)"
+boot "$SPAWN_ISO" "$LOG5"
+show "spawn" "$LOG5"
+
+echo "Assertions (spawn, $MODE):"
+expect_present "Startup arg    : 5"          "the spawn mode reached the program"      "$LOG5"
+expect_present "spawn: parent running"       "the parent ran"                          "$LOG5"
+expect_present "spawn: child running"        "the child ran"                           "$LOG5"
+expect_present "spawn: child returned 42"    "the child's exit code came back"         "$LOG5"
+expect_present "exited with code 0"          "the parent finished normally after it"   "$LOG5"
+
+# The claim.
+#
+# Three outcomes are refused here, not two. "No interrupt arrived while a
+# program was in Ring 3" would satisfy "none landed in the wrong place"
+# without the check having looked at anything, so the kernel reports it as
+# its own outcome and the line below refuses it. Both sides spin for 60 ms
+# at 100 Hz precisely so that this case cannot come up by accident.
+expect_present "Stack check    : PASS"       "every Ring 3 interrupt landed on the running program's stack" "$LOG5"
+expect_absent  "Stack check    : NO TICKS"   "and there were interrupts there to check"                  "$LOG5"
+expect_absent  "landed off the running"      "none landed on a stack that was not the running one"       "$LOG5"
+
+expect_absent  "PANIC"                       "no kernel panic"                         "$LOG5"
+expect_absent  "program fault"               "neither program faulted"                 "$LOG5"
+expect_absent  "CPU EXCEPTION"               "no CPU exception"                        "$LOG5"
 
 echo
 if [ "$FAILED" -eq 0 ]; then

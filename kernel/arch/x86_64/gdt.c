@@ -158,6 +158,11 @@ void tss_set_kernel_stack(uint64_t rsp0)
     g_tss.rsp0 = rsp0;
 }
 
+uint64_t tss_get_kernel_stack(void)
+{
+    return g_tss.rsp0;
+}
+
 uint64_t tss_address(void)
 {
     return (uint64_t)&g_tss;

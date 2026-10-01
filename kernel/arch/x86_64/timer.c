@@ -4,6 +4,7 @@
 #include <funnyos/arch/x86_64/io.h>
 #include <funnyos/arch/x86_64/irq.h>
 #include <funnyos/kprintf.h>
+#include <funnyos/process.h>
 
 #include <stddef.h>
 
@@ -44,6 +45,12 @@
 
 static volatile uint64_t g_ticks;
 
+/* Ticks that arrived while a program was in Ring 3, and how many of those
+ * landed somewhere other than that program's kernel stack. See the check
+ * in timer_tick. */
+static uint64_t g_ring3_ticks;
+static uint64_t g_off_stack_ticks;
+
 static uint64_t g_lapic_hz;   /* measured, after the divide register */
 static uint64_t g_tsc_hz;     /* measured */
 static bool     g_ready;
@@ -52,7 +59,6 @@ static bool     g_ready;
 
 static void timer_tick(struct interrupt_frame *frame, void *ctx)
 {
-    (void)frame;
     (void)ctx;
 
     /*
@@ -61,6 +67,32 @@ static void timer_tick(struct interrupt_frame *frame, void *ctx)
      * of them gets slower if the handler does more than this.
      */
     g_ticks++;
+
+    /*
+     * The one thing worth doing here besides counting, and it is here
+     * because this is the only place it *can* be observed.
+     *
+     * The claim is that an interrupt taken while a program is in Ring 3
+     * lands on that program's kernel stack. The CPU gets there through the
+     * TSS, so the claim is really about rsp0 -- and rsp0 is exactly what a
+     * nested run has to give back when it ends. A tick landing anywhere
+     * else means some run left rsp0 pointing at a stack that is not the
+     * running program's, which is what a finished child's freed stack
+     * looks like.
+     *
+     * The address printed is the frame's, not rsp0's, and the difference
+     * is the whole point: rsp0 says where the CPU was told to go, this
+     * says where the frame actually ended up.
+     *
+     * Ring 3 only. A tick taken while the kernel is running is already on
+     * whatever stack the kernel was using, and there is nothing to say
+     * about it.
+     */
+    if ((frame->cs & 3u) == 3u) {
+        g_ring3_ticks++;
+        if (!process_kernel_stack_contains((uint64_t)frame))
+            g_off_stack_ticks++;
+    }
 }
 
 /* --- PIT-based reference interval ---------------------------------- */
@@ -167,6 +199,9 @@ static bool calibrate(void)
 
 bool timer_ready(void)     { return g_ready; }
 uint64_t timer_ticks(void) { return g_ticks; }
+
+uint64_t timer_ring3_ticks(void)     { return g_ring3_ticks; }
+uint64_t timer_off_stack_ticks(void) { return g_off_stack_ticks; }
 uint32_t timer_hz(void)    { return TIMER_HZ; }
 uint64_t timer_tsc_hz(void) { return g_tsc_hz; }
 uint64_t timer_lapic_hz(void) { return g_lapic_hz; }
