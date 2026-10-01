@@ -130,8 +130,8 @@ static void test_one_second_is_eighteen_ticks(struct vm86_cpu *cpu)
 
     bios1a_reset(&st);
 
-    vm86_expect_u16("18.2065 ticks in a second, floored",
-                    bios1a_advance(&st, 1000), 18);
+    expect_ticks("18.2065 ticks in a second, floored",
+                 bios1a_advance(&st, 1000), 18);
 }
 
 static void test_the_conversion_is_exact_at_the_tick_boundary(
@@ -148,12 +148,10 @@ static void test_the_conversion_is_exact_at_the_tick_boundary(
      * value alone cannot, which is the point of asking for two.
      */
     bios1a_reset(&st);
-    vm86_expect_u16("54 ms is not yet a tick",
-                    bios1a_advance(&st, 54), 0);
+    expect_ticks("54 ms is not yet a tick", bios1a_advance(&st, 54), 0);
 
     bios1a_reset(&st);
-    vm86_expect_u16("55 ms is",
-                    bios1a_advance(&st, 55), 1);
+    expect_ticks("55 ms is", bios1a_advance(&st, 55), 1);
 }
 
 static void test_a_minute_and_an_hour(struct vm86_cpu *cpu)
@@ -215,12 +213,12 @@ static void test_a_zero_millisecond_slice_is_not_a_tick(struct vm86_cpu *cpu)
 
     bios1a_reset(&st);
 
-    vm86_expect_u16("nothing went by", bios1a_advance(&st, 0), 0);
+    expect_ticks("nothing went by", bios1a_advance(&st, 0), 0);
 
     /* And it has accumulated nothing, so the next tick still needs a
      * whole tick's worth of milliseconds. */
-    vm86_expect_u16("and the accumulator did not move",
-                    bios1a_advance(&st, 54), 0);
+    expect_ticks("and the accumulator did not move",
+                 bios1a_advance(&st, 54), 0);
 }
 
 /* ------------------------------------------------------------------ */
