@@ -66,41 +66,6 @@
 #include <vm86/host.h>
 
 /* ------------------------------------------------------------------ */
-/* Which interrupt is waiting                                          */
-/* ------------------------------------------------------------------ */
-
-/*
- * The lowest-numbered vector that is pending, or -1 when none is.
- *
- * Lowest and not any, because vector numbers are a priority order on this
- * hardware and not an arbitrary label: the 8259 presents its lines to the
- * processor in a fixed sequence, and the firmware's handlers are numbered
- * to match. Taking whichever bit a scan happens to reach first would
- * deliver the timer behind the keyboard whenever both were pending, and
- * the symptom -- a clock that runs slow under load -- would be blamed on
- * the clock.
- *
- * Scanned a byte at a time rather than a bit at a time so that the common
- * case, most of the bitmap empty, costs one comparison per eight vectors.
- */
-static int pending_lowest(const struct vm86_cpu *cpu)
-{
-    for (int byte = 0; byte < 32; byte++) {
-        uint8_t bits = cpu->intr_pending[byte];
-
-        if (bits == 0)
-            continue;
-
-        for (int bit = 0; bit < 8; bit++) {
-            if (bits & (1u << bit))
-                return (byte * 8) + bit;
-        }
-    }
-
-    return -1;
-}
-
-/* ------------------------------------------------------------------ */
 /* The loop                                                            */
 /* ------------------------------------------------------------------ */
 
@@ -128,9 +93,18 @@ enum vm86_stop vm86_run(struct vm86_cpu *cpu, uint64_t steps)
          * only when that says yes, so a disagreement between the
          * predicate and the bitmap costs a missed interrupt rather than a
          * delivery of vector 0xFF.
+         *
+         * vm86_next_pending() answers with the *lowest* vector, and that
+         * is a priority order rather than a convention: the 8259 presents
+         * its lines to the processor in a fixed sequence and the
+         * firmware's handlers are numbered to match. Delivering whichever
+         * bit a scan happened to reach first would put the timer behind
+         * the keyboard whenever both were pending, and the symptom -- a
+         * clock that runs slow under load -- would be blamed on the
+         * clock.
          */
         if (cpu->intr_shadow == 0) {
-            int vector = vm86_interruptible(cpu) ? pending_lowest(cpu) : -1;
+            int vector = vm86_interruptible(cpu) ? vm86_next_pending(cpu) : -1;
 
             if (vector >= 0) {
                 vm86_clear_pending(cpu, (uint8_t)vector);
