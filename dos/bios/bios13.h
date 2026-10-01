@@ -82,6 +82,10 @@
 #define BIOS13_DRIVE_C          0x80u
 #define BIOS13_FLOPPY_DRIVES    1u      /* how many DL=0..7Fh drives exist */
 
+/* The drive type 08h reports in BL: 04h is a 1.44 MB 3.5-inch diskette,
+ * in the numbering of the era. docs/dos-refs.md section 4. */
+#define BIOS13_DRIVE_TYPE_1_44M 0x04u
+
 /* ------------------------------------------------------------------ */
 /* Function numbers                                                    */
 /* ------------------------------------------------------------------ */

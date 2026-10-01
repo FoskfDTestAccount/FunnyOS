@@ -883,6 +883,20 @@ static void test_the_drive_parameters_are_maxima(struct vm86_cpu *cpu)
                     (uint16_t)(cpu->cl & 0x3F), 18);
     vm86_expect_u16("DL, how many drives there are",
                     cpu->dl, BIOS13_FLOPPY_DRIVES);
+    vm86_expect_u16("BL, what kind of drive it is",
+                    cpu->bl, BIOS13_DRIVE_TYPE_1_44M);
+
+    /* ES:DI is the parameter table, and is deliberately not set -- see
+     * the note in bios13.c. Asserted so that "left alone" is a fact
+     * rather than an assumption: the segment is whatever the caller
+     * had. */
+    vm86_set_seg(cpu, VM86_ES, 0x1234);
+    cpu->di = 0x5678;
+    cpu->ah = BIOS13_FN_PARAMS;
+    cpu->dl = BIOS13_DRIVE_A;
+    bios13_service(cpu, &disk);
+    vm86_expect_u16("ES is not repointed", cpu->es, 0x1234);
+    vm86_expect_u16("DI is not repointed", cpu->di, 0x5678);
 
     /* The capacity a program computes from those four fields is the size
      * of the image attached here, which is the only check that says the
