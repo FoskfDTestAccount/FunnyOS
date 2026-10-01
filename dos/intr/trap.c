@@ -50,22 +50,28 @@ enum vm86_result vm86_host_trap(struct vm86_cpu *cpu, uint8_t opcode)
      * Where this instruction began, for a service that decides it has to
      * run again.
      *
-     * The dispatcher records this for every instruction, and this looks
-     * redundant until you notice what is being defended against: a
-     * service that retries rewinds to this address, and if it were zero
-     * the guest would jump to address zero and run whatever is there.
-     * Setting it here costs one store on a path that is already doing a
-     * memory read and a call, and it makes the trap correct on its own
-     * rather than correct only in combination with a line in another
-     * file.
+     * The dispatcher records this for every instruction, so this looks
+     * redundant -- and it is, for a stub reached with no prefix in front
+     * of it, which is every stub this firmware installs. It is here
+     * because a service that retries rewinds to this address, and if the
+     * dispatcher's line were ever missing the guest would jump to address
+     * zero and run whatever is there. One store against a memory read and
+     * a call is not worth the alternative.
      *
-     * The two bytes of FE 38 are behind us by the time this runs: the ModRM
-     * was fetched before the group handler looked at it. So the trap began
-     * two bytes back. That only holds for the register-form ModRM the stub
-     * uses; a guest that emitted FE /7 with a displacement would get a
-     * rewind into the middle of its own instruction, which is a thing no
-     * assembler can produce and therefore not a thing worth carrying
-     * offsets around for.
+     * The two bytes of FE 38 are behind us by the time this runs: the
+     * ModRM was fetched before the group handler looked at it. So the
+     * trap began two bytes back -- and that arithmetic is wrong in two
+     * cases worth naming rather than discovering, because both need a
+     * guest to hand-write bytes no assembler emits:
+     *
+     *   - a prefix in front of the trap (F3 FE 38, or a segment override),
+     *     where the instruction really began one or two bytes earlier;
+     *   - a register-form ModRM other than 38, where a displacement would
+     *     sit between the opcode and the service byte.
+     *
+     * Neither is reachable from the stub. If the dispatcher's own
+     * recording is ever removed, this becomes the only answer and those
+     * two cases become the whole of the difference.
      */
     cpu->insn_ip = (uint16_t)(cpu->ip - 2u);
 
@@ -92,4 +98,27 @@ void vm86_service_retry(struct vm86_cpu *cpu)
      * far call rather than by an INT.
      */
     cpu->ip = cpu->insn_ip;
+
+    /*
+     * And interrupts go back on.
+     *
+     * This line is the difference between a working blocking call and a
+     * deadlock, and it is not obvious. The INT that got us here cleared
+     * IF -- correctly, that is what entering a handler does -- and the
+     * run loop refuses to deliver anything while IF is clear. So a
+     * service that retries without turning them back on is waiting for a
+     * keyboard interrupt the machine is now forbidden to deliver: the
+     * buffer stays empty, the guest spins, and nothing ever reports an
+     * error. It took a probe that ran the run loop's boundary logic by
+     * hand to see it, because reading the two files separately shows
+     * nothing wrong with either.
+     *
+     * Turning them on is what the handler would have done. A real BIOS
+     * keyboard routine runs `sti` before it waits, for this exact reason.
+     * So this is deliberately not "restore the guest's IF" -- it is a
+     * handler deciding to wait with interrupts live, which is a thing a
+     * handler may decide, and it overrides a guest that called a blocking
+     * read with interrupts disabled.
+     */
+    vm86_flag_set(cpu, VM86_IF, true);
 }
