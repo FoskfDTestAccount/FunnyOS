@@ -28,10 +28,12 @@
 ;      firmware on every one of them. Step 5 writes to page 0 while page 1
 ;      is the active page, and page 0's cell 564 is where it must land.
 ;
-; The row and the column are chosen so that page 0 and page 1 would collide
-; if the page were ignored: both writes are at the same cell index. Page 0
-; gets 'A' at cell 410, page 1 gets 'B' at cell 163, and cell 163 of page 0
-; is asserted untouched -- so a write that ignored BH shows up twice over.
+; The rows and the columns are chosen so that ignoring the page shows up
+; immediately. Page 0 gets 'A' at cell 410 and page 1 gets 'B' at cell 163,
+; and cell 163 of page 0 is asserted untouched -- so a write aimed at page 1
+; that landed on page 0 would put 'B' on the blank. Step 5 is the same test
+; from the other side. What the two share is an index used on two pages, not
+; one cell: 410 and 163 are different cells of their own pages.
 ;
 ; The suite finds page 1 by reading the page stride out of 0040:004C
 ; instead of assuming it. That word is 0x1000 on this machine -- a page

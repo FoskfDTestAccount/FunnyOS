@@ -31,6 +31,15 @@
 
 ## 二、发现
 
+> **【已跟进】** 这份审查写在一棵**后来动过的树**上,而 F1 与 F2 在它落笔的同时就被人**独立地**修掉了 —— 两边的结论一致,合并时逐条核过。原文一字未动,结果记在这里:
+>
+> - **F1** —— 三处(头部 NOTE、套件文件头、`case_disk` 的失败文本)在 `bafe11d` 已改。合并时发现**同一节的小标题**还写着 "On the one case expected to fail today",是漏网的第四处,已一并改掉。你点出的那条最重的性质 —— 它**会说话**,会把一次真的磁盘回归诊断成"这不是磁盘的问题" —— 在新失败文本里已经反过来("neither is the interface's any more: the trap writes a service's flags back into the frame now, so this is a real result")。
+> - **F2** —— 已修,做法就是你建议的那一条:`cursor.asm` 加了第 5 步,在页 1 活动时用 `BH=0` 写页 0 的 cell 564。**并且注入验证过**:把 `09h`/`0Ah` 改成用活动页,语料套件报红两条 —— 新断言 `page 0 cell 564 is (20, 07), expected (43, 4B)`,以及错位那一次。
+> - **F3** —— 已改。你的读法是对的:410 和 163 不是同一个格号,撞的是**同一个格号用在两个页上**。新句子写明这一点,并且不再漏掉第 5 步带来的另一个方向。
+> - **F4** —— 已加注:`disk.asm` 现在写明它只查 CF,`AH=04h` 那一半归 `bios13` 套件覆盖。
+> - **F5** —— 保留不动。你的定性(设计说明、当前是死代码)是对的,而"一个什么都不跑却报成功的套件"这个形状值得留在纸上。
+
+
 ### F1(过期文档,**会主动误导**)三处注释说 `disk.asm` 会打印 FAIL,而它今天过了
 
 **事实:** `disk.asm` 里那条"NOTE ON THE FROZEN INTERFACE"、套件文件头那节"On the one case expected to fail today"、以及 `case_disk` 的失败文本,**三处**都写着"宿主服务回不去 CF,所以本用例会一直 FAIL,直到那件事被解决",并且**点了名**说 `M4-E-report.md` 有记录、`trap.c` 没有把它补回去。

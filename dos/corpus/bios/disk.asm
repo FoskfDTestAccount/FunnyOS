@@ -16,11 +16,18 @@
 ; -- must contain 4D 34 0D 0A: "M4", carriage return, line feed.
 ;
 ; The second read asks for cylinder 80 of an eighty-cylinder disk. Every
-; byte of it is out of range, so it must come back with CF set, AH=04h, and
-; must leave the buffer at 1000:0900 alone. Two words are planted there
-; first and the suite asserts them afterwards: a failed read that
-; half-filled the buffer is worse than one that failed loudly, because the
-; caller cannot tell stale data from real data.
+; byte of it is out of range, so it must come back with CF set and must
+; leave the buffer at 1000:0900 alone. Two words are planted there first
+; and the suite asserts them afterwards: a failed read that half-filled the
+; buffer is worse than one that failed loudly, because the caller cannot
+; tell stale data from real data.
+;
+; The reply also carries AH=04h, and this program does not look at it: what
+; a caller branches on is the carry flag, and that is what is asserted here.
+; The AH half is covered by the bios13 suite, which has a case for a request
+; outside the geometry. This is written down because the header used to
+; state both without saying which one was checked, and a reader could take
+; the sentence for coverage of the pair.
 ;
 ; A note on the carry flag, kept because it explains why this program is
 ; written the way it is: for a while a host service could not return CF at

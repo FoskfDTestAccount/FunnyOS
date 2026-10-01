@@ -30,7 +30,7 @@
  * lost by somebody reordering a table.
  *
  * ---------------------------------------------------------------------
- * On the one case expected to fail today
+ * On the one case that was written to fail, and why it does not
  *
  * disk.asm reads a sector that is there and a sector that is not, and
  * tells them apart by the CARRY FLAG, which is how INT 13h reports
