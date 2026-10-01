@@ -106,10 +106,48 @@
 #define VM86_BDA_CURSOR_END     0x0060u  /* one past the last            */
 #define VM86_BDA_CURSOR_SHAPE   0x0060u  /* word: start scan, end scan   */
 #define VM86_BDA_ACTIVE_PAGE    0x0062u  /* byte */
+
+/*
+ * Two more the video service owns, and they are here for a reason that is
+ * about this file rather than about them: they were missing, so a service
+ * that needed them defined them locally and the map stopped being the map.
+ *
+ * Rows is stored as one less than the count -- twenty-five rows is 24 --
+ * which is the same off-by-one shape as the cursor and the disk geometry,
+ * and the same place to get it wrong.
+ *
+ * The control byte's bit 7 is "do not clear memory when a mode is set".
+ * Bit 6 selects 200 or 400 scan lines on later adapters; this machine has
+ * neither, so it is written as zero at power-on and read back faithfully.
+ */
+#define VM86_BDA_ROWS           0x0084u  /* byte: rows on screen minus one */
+#define VM86_BDA_VIDEO_CONTROL  0x0087u  /* byte: bit 7 = don't clear RAM  */
 #define VM86_BDA_TICK_COUNT     0x006Cu  /* dword: at 18.2 Hz            */
 #define VM86_BDA_TICK_ROLLOVER  0x0070u  /* byte: set when the dword wraps;
                                           * a program that reads the tick
                                           * count clears it itself */
+
+/*
+ * The Ctrl-Break flag. Bit 7 is set by the keyboard handler when
+ * Ctrl-Break has been pressed, and a program polls it -- FreeDOS's
+ * break.c reads this address directly -- so what is here matters even
+ * though almost nothing calls a service to find out.
+ *
+ * It is *not* the keyboard buffer's overflow flag. That distinction cost
+ * a round: an early task book said an overflowing buffer sets bit 7 here,
+ * the note was the only document that mentioned the offset at all, and
+ * the module wrote it on every dropped keystroke. Every dropped key then
+ * looked to a polling program like the user pressing Break.
+ *
+ * The lesson is written here rather than only in the report because this
+ * header is the map, and the failure was a service believing a note over
+ * the map. A field that is not in here and is needed anyway gets added
+ * here first.
+ *
+ * This machine does not maintain it -- Ctrl-Break is not decoded -- and
+ * that is a stated gap rather than an overflow flag wearing its name.
+ */
+#define VM86_BDA_CTRL_BREAK     0x0071u
 
 /*
  * The keyboard buffer is a ring. Both offsets are *relative to the start

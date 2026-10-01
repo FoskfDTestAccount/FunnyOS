@@ -123,6 +123,31 @@ static void put_cell(struct vm86_cpu *cpu, const struct bios10_state *st,
 /* ------------------------------------------------------------------ */
 
 /*
+ * Two more video words, which firmware.h does not name.
+ *
+ *   0040:0084  rows on screen minus one
+ *   0040:0087  the video control byte, whose bit 7 means "do not clear
+ *              the screen on a mode set" -- the copy of AL bit 7 that
+ *              AH=00h is given and that AH=0Fh is expected to hand back
+ *              with the mode number.
+ *
+ * They are spelled out here rather than in the frozen header because the
+ * header is frozen, and recorded rather than dropped for the same reason
+ * bios16.c records 0040:0071. Unlike that one these really are the video
+ * service's: nothing else writes them, nothing else has a claim, and both
+ * describe the display the rest of this state describes.
+ *
+ * Ralf Brown's memory list names them ("ROWS ON SCREEN MINUS ONE", and
+ * "VIDEO ... CONTROL" whose bit 7 is "do not clear RAM on mode set"), and
+ * vgabios is the second source: its scroll reads the row count from
+ * 0040:0084, and its AH=0Fh handler ORs bit 7 of 0040:0087 into the mode
+ * byte it returns.
+ */
+#define BIOS10_BDA_ROWS_MINUS_1  0x0084u
+#define BIOS10_BDA_VIDEO_CTL     0x0087u
+#define BIOS10_CTL_NO_CLEAR      0x80u
+
+/*
  * Publish the state into 0040:xxxx.
  *
  * Every service ends here, whether or not it changed anything, because
@@ -152,6 +177,9 @@ static void sync_bda(struct vm86_cpu *cpu, const struct bios10_state *st)
                      (uint16_t)((st->cursor_start << 8) | st->cursor_end));
 
     vm86_mem_write8 (mem, bda + VM86_BDA_ACTIVE_PAGE, st->active_page);
+    vm86_mem_write8 (mem, bda + BIOS10_BDA_ROWS_MINUS_1,
+                     (uint8_t)(BIOS10_ROWS - 1u));
+    vm86_mem_write8 (mem, bda + BIOS10_BDA_VIDEO_CTL, st->video_ctl);
 }
 
 /* ------------------------------------------------------------------ */
@@ -219,11 +247,23 @@ static uint8_t page_index(uint8_t asked)
  * so that the source is always read before the destination overwrites it:
  * scrolling up walks rows upward, scrolling down walks them downward.
  *
- * An out-of-range rectangle does nothing. The alternative would be to
- * clamp it, and a program that asks to scroll rows 10..40 is not asking
- * for rows 10..24 -- it has a bug, and silently scrolling the visible half
- * of a rectangle hides it. Doing nothing at least leaves the screen
- * consistent with what the program asked for.
+ * A rectangle that runs off the screen is clamped to the screen, and
+ * only a crossed one -- top below bottom, or left right of right -- does
+ * nothing at all.
+ *
+ * That split is vgabios's and SeaBIOS's, and the reason to follow it
+ * rather than refuse both is a reachable input rather than a principle:
+ * the ordinary way to clear the screen is a window of rows 0..24 and
+ * columns 0..79, which is what a program written for eighty columns
+ * passes. On a forty-column screen 79 is past the end, and a version that
+ * refused out-of-range rectangles would do nothing at all -- so the
+ * standard clear-screen call would leave the screen alone on exactly the
+ * machine that most needs it.
+ *
+ * The clamp is the far corner only. vgabios leaves the near one alone,
+ * which is invisible here: a window starting below the last row ends up
+ * with crossed corners and falls out at the check below, and a window
+ * starting off the right edge does the same.
  */
 static void scroll_window(struct vm86_cpu *cpu, const struct bios10_state *st,
                           uint8_t page, uint16_t lines, uint8_t attr,
@@ -232,7 +272,15 @@ static void scroll_window(struct vm86_cpu *cpu, const struct bios10_state *st,
 {
     if (top > bottom || left > right)
         return;
-    if (bottom >= BIOS10_ROWS || right >= st->columns)
+
+    if (bottom >= BIOS10_ROWS)
+        bottom = (uint16_t)(BIOS10_ROWS - 1u);
+    if (right >= st->columns)
+        right = (uint16_t)(st->columns - 1u);
+
+    /* Clamping the far corner can leave the two crossed, and a crossed
+     * pair is the same nothing the check above returned for. */
+    if (top > bottom || left > right)
         return;
 
     uint16_t height = (uint16_t)(bottom - top + 1u);
@@ -498,6 +546,7 @@ static void set_mode(struct vm86_cpu *cpu, struct bios10_state *st, uint8_t al)
     }
 
     st->mode         = mode;
+    st->video_ctl    = (uint8_t)(al & BIOS10_CTL_NO_CLEAR);
     st->columns      = columns;
     st->page_bytes   = page_bytes;
     st->active_page  = 0;
@@ -585,10 +634,19 @@ static void read_char_attr(struct vm86_cpu *cpu, const struct bios10_state *st,
  * columns in AH so that a program does not have to know the width by mode
  * number, and the page being displayed in BH. There is no way to call this
  * and keep AH, which is why it is called out here.
+ *
+ * AL is not the bare mode number. Its top bit is bit 7 of the video
+ * control byte, which is the same bit AH=00h was given: vgabios's handler
+ * ORs it in, and a program that tests AL against 0x80 is asking "is there
+ * still something on the screen that a mode set would not erase". Reading
+ * it from the state rather than from the data area is deliberate -- the
+ * state is what this module believes, and a guest that scribbled on
+ * 0040:0087 should not be able to make the service answer differently
+ * from what it will do.
  */
 static void get_mode(struct vm86_cpu *cpu, const struct bios10_state *st)
 {
-    cpu->al = st->mode;
+    cpu->al = (uint8_t)(st->mode | (st->video_ctl & BIOS10_CTL_NO_CLEAR));
     cpu->ah = st->columns;
     cpu->bh = st->active_page;
 }
@@ -622,6 +680,7 @@ static void set_active_page(struct bios10_state *st, uint8_t page)
 void bios10_reset(struct bios10_state *st)
 {
     st->mode         = 0x03u;
+    st->video_ctl    = 0;
     st->columns      = 80;
     st->page_bytes   = 4096;
     st->active_page  = 0;
