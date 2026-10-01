@@ -230,10 +230,31 @@ static enum vm86_result op_alu_block(struct vm86_cpu *cpu, uint8_t opcode)
             return VM86_FAULT;
         }
 
-        if (form == 6)
+        if (form == 6) {
             vm86_push16(cpu, vm86_get_seg(cpu, (enum vm86_seg)segment));
-        else
+        } else {
             vm86_set_seg(cpu, (enum vm86_seg)segment, vm86_pop16(cpu));
+
+            /*
+             * A load of SS holds off interrupt recognition for one
+             * instruction.
+             *
+             * The encoding that reaches this line is 17, POP SS. It is
+             * worth naming because the segment push and pop forms live
+             * in the arithmetic block rather than with the stack
+             * instructions, and the next reader looking for "where does
+             * POP SS happen" will not guess that.
+             *
+             * What waits is recognition, not the write: the register
+             * holds the new value as soon as this returns. The reason
+             * the hardware gives a program the window -- `mov ss, ax`
+             * followed by `mov sp, ...` must not be split by an
+             * interrupt running on half a stack -- and the rest of the
+             * mechanism are in op_set_flag() in ops_ctl.c.
+             */
+            if (segment == VM86_SS)
+                cpu->intr_shadow = 1;
+        }
 
         return VM86_CONTINUE;
     }
@@ -952,6 +973,12 @@ static enum vm86_result op_incdec_rm8(struct vm86_cpu *cpu, uint8_t opcode)
      * only. A byte register has no short form, so every `inc bl` and
      * `dec dh` a program contains arrives here -- there is no other
      * encoding an assembler could have emitted.
+     *
+     * /7 is the host trap, and it is checked first. The order is the
+     * whole of it: written the other way round, the catch-all below
+     * would claim it and the machine would answer a service call with
+     * an invalid-opcode exception. `/2` through `/6` are still refused,
+     * because a hole in the map is only worth filling once.
      */
     /*
      * FE /7 is the host trap, and it is the only reason this group has a
