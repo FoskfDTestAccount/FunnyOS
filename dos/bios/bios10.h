@@ -75,6 +75,7 @@
  */
 struct bios10_state {
     uint8_t  mode;                  /* 0040:0049 */
+    uint8_t  video_ctl;             /* 0040:0087, bit 7 only; see bios10.c */
     uint8_t  columns;               /* 0040:004A, the low byte of it */
     uint16_t page_bytes;            /* 0040:004C */
     uint8_t  active_page;           /* 0040:0062 */
