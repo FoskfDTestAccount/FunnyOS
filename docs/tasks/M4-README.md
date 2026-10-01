@@ -214,6 +214,7 @@ make test-vm     # 把解释器跑进 Ring 3,断言屏幕输出
 | **C** | `M4-C-kbd-time.md` | INT 16h 键盘 + INT 1Ah 时间 + 两个中断源 | 中 |
 | **D** | `M4-D-disk.md` | INT 13h 磁盘 + 镜像工具 | 中 |
 | **E** | `M4-E-integrate.md` | 验收语料 + FunnyOS 集成 + `make test-vm` | 中高 |
+| **F** | `M4-F-verify.md` | **独立验证,在 A–E 全部合并之后** | 高 |
 
 ### 文件归属(硬性)
 
