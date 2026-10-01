@@ -183,6 +183,65 @@ struct vm86_cpu {
     /* Set by HLT, cleared by anything that resumes the processor. */
     bool halted;
 
+    /* --- Interrupts, added for M4 --- */
+
+    /*
+     * Interrupts the host has raised and not yet delivered: one bit per
+     * vector, so bit `v` is byte `v / 8`, bit `v % 8`.
+     *
+     * A bitmap rather than a single pending vector, because two devices
+     * can raise at once and taking one must not lose the other. A vector
+     * that is raised while it is already pending stays raised once -- a
+     * line that is asserted again before its interrupt has been taken is
+     * one interrupt, not two, which is how the 8259 behaves and what
+     * keeps a flooded device from building a backlog the guest can never
+     * work off.
+     *
+     * Nothing outside host.c reads or writes this; see vm86_raise() and
+     * vm86_clear_pending().
+     */
+    uint8_t intr_pending[32];
+
+    /*
+     * Instruction boundaries during which a pending interrupt is not yet
+     * recognized.
+     *
+     * The 8086 does not take an interrupt on the instruction after STI,
+     * nor on the one after any load of SS. The hardware gives a program
+     * that window on purpose -- `mov ss, ax` followed by `mov sp, bx` has
+     * to be atomic or an interrupt arriving between them runs on half a
+     * stack -- and a program that relies on it exists in every DOS
+     * program that sets up its own stack.
+     *
+     * Note that what is delayed is *recognition*, not the effect on the
+     * flag. STI sets IF immediately; the interrupt simply is not taken
+     * until an instruction has retired. That distinction was written down
+     * wrongly once already in this project and cost two task books a
+     * rewrite.
+     *
+     * Set to 1 by STI and by a load of SS; the run loop decrements it at
+     * each boundary and skips delivery while it is nonzero. Zero means no
+     * shadow, which is the state almost every instruction leaves behind.
+     */
+    uint8_t intr_shadow;
+
+    /*
+     * Where the instruction being executed began, before any of its
+     * prefixes.
+     *
+     * A repeated string instruction is interruptible between iterations.
+     * When one is abandoned partway, the interrupt frame has to record
+     * the address the hardware would record -- the *start* of the
+     * instruction, prefixes included -- because that is where execution
+     * resumes and the REP has to be re-decoded there. Rewinding to just
+     * past the opcode would silently drop the repeat and turn `rep movsb`
+     * into `movsb`: one byte copied instead of a buffer, on a machine
+     * that looks like it is working.
+     *
+     * Set by the run loop before the prefix bytes are consumed.
+     */
+    uint16_t insn_ip;
+
     /* Prefixes for the instruction being executed. Cleared per
      * instruction by the run loop. */
     struct vm86_prefix prefix;

@@ -179,8 +179,15 @@ USER_OBJ_DIR := $(BUILD_DIR)/userobj
 # runs: a Ring 3 process, per DESIGN.md's decision D4. Only the core comes
 # in -- dos/tests is the host-side test driver and has no business in a
 # program that is supposed to execute guest code.
+#
+# intr/ and bios/ are globbed rather than listed, the same way dos/Makefile
+# globs its suites. Several people add files there at once, and a list is
+# the thing each of them would have to edit -- which is exactly the
+# shared-file edit the split exists to avoid. An empty glob is empty, so
+# this costs nothing before those directories exist.
 USER_C_SOURCES   := $(shell find user -name '*.c' | sort) libk/printf.c libk/string.c \
-                    $(wildcard dos/cpu/*.c) $(wildcard dos/mem/*.c)
+                    $(wildcard dos/cpu/*.c) $(wildcard dos/mem/*.c) \
+                    $(wildcard dos/intr/*.c) $(wildcard dos/bios/*.c)
 USER_ASM_SOURCES := $(shell find user -name '*.asm' | sort)
 
 USER_C_OBJS   := $(patsubst %.c,  $(USER_OBJ_DIR)/%.c.o,$(USER_C_SOURCES))

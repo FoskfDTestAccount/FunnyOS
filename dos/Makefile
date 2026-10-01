@@ -71,7 +71,9 @@ CORE_C := \
     cpu/ops_ctl.c  \
     cpu/ops_186.c  \
     dbg/trace.c    \
-    mem/mem.c
+    mem/mem.c      \
+    $(wildcard intr/*.c) \
+    $(wildcard bios/*.c)
 
 # libk provides memset and memcpy. Linking it here rather than the host's
 # means the tests exercise the same implementation the kernel does.
@@ -147,6 +149,35 @@ $(BUILD)/corpus/%.c: $(BUILD)/corpus/%.bin ../tools/bin2c.py
 # suite without being handed to the compiler: everything in $^ ends up on
 # the command line, and a .h file there is not a thing to compile.
 $(BUILD)/test_corpus: $(CORPUS_EMBED) corpus/replay.c | corpus/replay.h
+
+# --- A second corpus: whole programs that talk to the firmware --------
+#
+# Same machinery, a different directory, and both halves of that matter.
+# corpus/bios/ is separate so that the plain corpus suite does not pick
+# these up: those samples run on a bare processor, and these need services
+# registered and a display behind them, so a suite that ran one without
+# the other would fail for a reason having nothing to do with the sample.
+#
+# The pattern rules above already reach into subdirectories -- make's `%`
+# matches across a slash -- so the only new thing here is which suite gets
+# the result. Declared once, here, rather than added by whoever writes the
+# samples: the same reasoning as the globs in CORE_C, which is that a rule
+# five people have to edit is a file five people are editing at once.
+BIOS_CORPUS_SRC   := $(wildcard corpus/bios/*.asm)
+BIOS_CORPUS_BIN   := $(patsubst corpus/%.asm,$(BUILD)/corpus/%.bin,$(BIOS_CORPUS_SRC))
+BIOS_CORPUS_EMBED := $(patsubst corpus/%.asm,$(BUILD)/corpus/%.c,$(BIOS_CORPUS_SRC))
+
+.SECONDARY: $(BIOS_CORPUS_BIN)
+
+# Guarded, because the rule is written before the samples are. An
+# unguarded prerequisite that neither exists nor has a rule makes make
+# stop parsing the whole file, which would break every other suite for the
+# sake of a directory that is still empty.
+ifneq ($(strip $(BIOS_CORPUS_SRC)),)
+$(BUILD)/test_bios_programs: $(BIOS_CORPUS_EMBED) \
+                            $(wildcard corpus/bios/replay.c) \
+                            | $(wildcard corpus/bios/replay.h)
+endif
 
 .PHONY: all test list clean $(addprefix test-,$(SUITES))
 
