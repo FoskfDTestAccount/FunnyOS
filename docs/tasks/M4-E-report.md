@@ -534,3 +534,94 @@ B 独立补了后果:**挂钩 `0x60` 以上向量的程序会被自己的代码�
 
 `cd dos && make test` 全绿(7 条用例 + 16 个套件);`make test-vm` 连跑 6 次全过,
 每次 1–2 秒。
+
+---
+
+## 十六、C 的复核:验收测试没有读它声称读的那个屏幕
+
+C 审 `make test-vm`,找到**一个不读 guest 显存的显示后端,20 条断言全绿**。
+两条都真,两条都修了。
+
+### 一、同一根指针,只有一半被验
+
+`screen_present()` 拿到 guest 的活动页之后做了两件事:
+
+- 拷进 `g_screen.frame` —— **所有断言看的是这个**;
+- 交给 `draw_frame()` 去画 —— **没有任何断言看这个**。
+
+于是 `the guest's line reached the screen` 只证明了"**有什么东西**打出了那个字符串":把
+`draw_frame` 换成"不管 `cells` 是什么都打那行字",四条 M4 断言全过。
+
+**修法**:后端**记下它真正画出来的行**,`check_drawn()` 拿这些行和 guest 的页比对——
+而那页是**从内存里独立读出来的**,不是后端自己那份拷贝。一个"是 guest 显存的一张画"的屏幕,
+必须能从 guest 的显存重算出来;没有读它的后端重算不出来。
+
+### 二、整屏的声明,一行都不到
+
+让"设置模式"只填第一行(`row < 1`)—— **也全绿**。2000 格里只查了 22 格,而
+`hello.asm`/`direct.asm` 的**头注释里写的是整屏**。
+
+**修法**:`check_page()` 查**整屏 2000 格**,按每个语料自己的头注释。顺带修了
+`direct.asm` 头注释里那句现在已经不成立的话("the 4000-byte page identical to the one
+hello.asm leaves")—— 模式设置落地之后两页在消息之外本来就不同,而头注释是最后还那么说的地方。
+
+### 三、两条断言各自挡得住,而且只挡自己那一种
+
+重新注入(在 `/var/tmp`,仓库没动):
+
+```
+===== baseline (unmutated) =====
+====> 8086 interpreter test PASSED (bios)
+===== injection 1: a backend that never reads video memory =====
+  FAIL  hello: row 1 column 0 was drawn as 4D and the guest's memory holds 20
+  FAIL  direct (M4-8): row 1 column 0 was drawn as 4D and the guest's memory holds 00
+  FAIL  timer: row 0 column 0 was drawn as 4D and the guest's memory holds 35
+===== injection 2: the mode set clears one row =====
+  FAIL  hello: cell 80 is (00, 00), expected (20, 07)
+  FAIL  timer: cell 80 is (00, 00), expected (20, 07)
+```
+
+**每一个注入只让为它写的那条断言报红**,另一个注入的那条完全不响。这比"都抓到了"更有用:
+它说明两条断言各自在测不同的东西。
+
+### 四、第一次注入验证是**假的**,原因值得记
+
+我第一次跑这两条注入时,"两个都抓到了"。**那是跑在同一个旧二进制上的。**
+
+验证脚本每次用 `tar` 从源树重新解出一份 —— 而 **tar 恢复的是文件的原始 mtime**,比上一份
+构建出来的 `.o` 还**旧**,于是 `make` 判定无事可做,**两次跑的是同一个二进制**。
+把两次的输出并排看才发现:injection 1 里出现了只有 injection 2 才会有的 `cell 80` 失败。
+
+这条正是项目里已经记着的"变异实验一律用 `make -B`" —— 我记着它,但**换了个外壳的同一件事**
+(不是"改完立刻 make",而是"重新解包了一份更旧的源")又踩了一次。现在脚本每次一个独立的
+构建目录,并且 `make -B`。
+
+**它也是"跑在旧二进制上的一次验证,看起来和一次有效验证一模一样"的具体例子** ——
+结果值是两个 PASS/FAIL,而它们其实什么都没测。
+
+### 五、顺带查出来的一个真的悬空指针
+
+新断言**独立去读 guest 显存**,于是踩出了一个原来看不见的错:
+`run_corpus()` 里的 `struct vm86_mem mem` 和 `struct vm86_cpu cpu` 是**局部变量**,
+而它把 `cpu` 拷贝给调用方用 —— `cpu.mem` 指向一个已经失效的栈帧。
+表现是 **Ring 3 的 #PF**,读在 guest RAM 下面 35 KiB 的地方。
+
+旧断言读的是 `g_screen.frame`(一份拷贝),从不碰 `cpu->mem`,所以它一直没露出来。
+**"把断言改成独立读内存"这件事本身,把这个 bug 挖了出来** —— 那是它该有的副作用。
+机器现在放在文件作用域(`g_mem`/`g_cpu`),注释里写了它为什么不能待在栈上。
+
+### 六、时钟下界的算术,写在断言旁边
+
+C 另外指出:下界 274 是"**贴着可达读数**"的,不是留有设计余量。
+`timer_millis()` 是 `g_ticks * 1000 / TIMER_HZ`,而 `TIMER_HZ = 100` → **读数只能是 10 的倍数**;
+五个滴答要 274.627 ms,第一个可达的 ≥ 它的值是 **280**;而四个滴答读 **270**。
+**274 夹在 270 和 280 之间** —— 它成立,但成立的原因是 274.627 不是 10 的倍数。
+
+**这段算术现在写在 `VM_TICKS_MIN_MS` 旁边**(不是这里),因为**改 `TIMER_HZ` 的人只会读那里**。
+注释里还写了它在什么情况下会失效:`TIMER_HZ` 降到 10 时读数是 100 的倍数,四个滴答就读 300,
+这条下界就再也分不出四和五 —— 那时这些数得重算,而**这个文件不会告诉任何人**。
+
+### 改完之后
+
+`cd dos && make test` 全绿;`make test-vm` 连跑 3 次全过(每次 1–2 秒),
+`clock : the firmware counted 5, the guest counted 5`。
