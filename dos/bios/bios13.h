@@ -109,11 +109,22 @@
 
 #define BIOS13_STATUS_OK            0x00u
 #define BIOS13_STATUS_BAD_COMMAND   0x01u   /* no such function, or a
-                                             * request this device cannot
-                                             * carry out                 */
+                                             * parameter it cannot take --
+                                             * which includes a drive that
+                                             * is not there                 */
 #define BIOS13_STATUS_NOT_FOUND     0x04u   /* no such sector             */
 #define BIOS13_STATUS_DMA_BOUNDARY  0x09u   /* the buffer spans two pages */
-#define BIOS13_STATUS_NO_DRIVE      0x0Cu   /* no such drive              */
+
+/*
+ * 0Ch is not here. It means "the media type was not found", which is a
+ * statement about a *medium* -- and this machine has no medium to be
+ * wrong about, only drives that are and are not there. A drive number is
+ * a parameter, and docs/dos-refs.md section 4 gives 01h for a function
+ * number or a parameter it cannot take, so a request for a drive that
+ * does not exist is answered with 01h. The task book said 0Ch for this
+ * once; that was a guess, and section 4 is where the correction came
+ * from.
+ */
 
 /*
  * 02h ("address mark not found") and 10h ("uncorrectable CRC error") are
@@ -185,7 +196,7 @@ void bios13_init(struct bios13_disk *disk, uint8_t *image, uint32_t size);
  *     vm86_register_service(VM86_INT_DISK, bios13_service, &disk);
  *
  * A NULL context is a machine with no disk: every function except the
- * reset reports 0Ch, which is what a caller should see.
+ * reset reports 01h, which is what a caller should see.
  *
  * On AL = 0: refused, with CF set and 01h in AH.
  *

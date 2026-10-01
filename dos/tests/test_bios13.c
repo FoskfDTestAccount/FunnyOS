@@ -779,6 +779,16 @@ static void test_an_unimplemented_function_says_so(struct vm86_cpu *cpu)
     expect_result(cpu, false, BIOS13_STATUS_OK);
 }
 
+/*
+ * A drive that is not there, and a function that is not there, are the
+ * same kind of answer: a parameter this device cannot take, and a
+ * function it does not have, are both 01h (docs/dos-refs.md section 4).
+ *
+ * That they are the *same* code is asserted rather than assumed, because
+ * this is where the machine used to answer 0Ch -- which section 4 gives
+ * to "the media type was not found", a statement about a medium, and this
+ * machine has no medium to be wrong about.
+ */
 static void test_a_drive_that_is_not_the_floppy(struct vm86_cpu *cpu)
 {
     static const uint8_t others[] = { 0x01, 0x02, 0x7F, 0x80, 0x81, 0xFF };
@@ -792,13 +802,27 @@ static void test_a_drive_that_is_not_the_floppy(struct vm86_cpu *cpu)
         cpu->dl = others[i];
         bios13_service(cpu, &disk);
 
-        expect_result(cpu, true, BIOS13_STATUS_NO_DRIVE);
+        expect_result(cpu, true, BIOS13_STATUS_BAD_COMMAND);
 
         /* 08h is the same answer about the same drive. */
         cpu->ah = BIOS13_FN_PARAMS;
         bios13_service(cpu, &disk);
-        expect_result(cpu, true, BIOS13_STATUS_NO_DRIVE);
+        expect_result(cpu, true, BIOS13_STATUS_BAD_COMMAND);
     }
+
+    /* Which is the code an unknown function gets, and not 0Ch. */
+    cpu->dl = BIOS13_DRIVE_C;
+    ask(cpu, BIOS13_FN_READ, 0, 0, 1, 1);
+    bios13_service(cpu, &disk);
+
+    uint8_t from_the_drive = cpu->ah;
+
+    ask(cpu, 0xFE, 0, 0, 1, 1);
+    bios13_service(cpu, &disk);
+
+    vm86_expect_u16("a missing drive and a missing function agree",
+                    cpu->ah, from_the_drive);
+    vm86_expect_u16("and neither of them is 0Ch", from_the_drive, 0x01);
 
     /* Drive A still answers, so the loop above is not passing because
      * the service refuses everything. */
@@ -812,11 +836,11 @@ static void test_a_machine_with_no_disk(struct vm86_cpu *cpu)
 {
     ask(cpu, BIOS13_FN_READ, 0, 0, 1, 1);
     bios13_service(cpu, NULL);
-    expect_result(cpu, true, BIOS13_STATUS_NO_DRIVE);
+    expect_result(cpu, true, BIOS13_STATUS_BAD_COMMAND);
 
     cpu->ah = BIOS13_FN_PARAMS;
     bios13_service(cpu, NULL);
-    expect_result(cpu, true, BIOS13_STATUS_NO_DRIVE);
+    expect_result(cpu, true, BIOS13_STATUS_BAD_COMMAND);
 
     /* Reset is the exception, and deliberately: there is no controller to
      * reset, so there is nothing that can fail. */

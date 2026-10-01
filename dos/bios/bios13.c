@@ -7,8 +7,10 @@
  * judged, which is a decision rather than a fact, and is written down so
  * that the next person does not have to recover it from the tests.
  *
- *   1. Which drive. A drive that is not A: is 0Ch, before anything else
- *      is even looked at.
+ *   1. Which drive. A drive that is not A: is 01h, before anything else
+ *      is even looked at -- a drive number is a parameter, and 01h is
+ *      the code for a function or parameter this device cannot take. See
+ *      the note in bios13.h for why it is not 0Ch.
  *   2. How many sectors. Zero is not a count, and is 01h.
  *   3. Which sector. A cylinder, head or sector the geometry does not
  *      have is 04h, and so is a run that starts inside the image and ends
@@ -131,7 +133,7 @@ static uint8_t bios13_check(const struct bios13_disk *disk,
     uint8_t  count    = cpu->al;
 
     if (drive != BIOS13_DRIVE_A)
-        return BIOS13_STATUS_NO_DRIVE;
+        return BIOS13_STATUS_BAD_COMMAND;
 
     /*
      * A call that asks for no sectors is refused rather than answered.
@@ -232,7 +234,7 @@ void bios13_service(struct vm86_cpu *cpu, void *ctx)
     }
 
     if (disk == NULL) {
-        cpu->ah = BIOS13_STATUS_NO_DRIVE;
+        cpu->ah = BIOS13_STATUS_BAD_COMMAND;
         cpu->al = 0;
         vm86_flag_set(cpu, VM86_CF, true);
         return;
@@ -281,7 +283,7 @@ void bios13_service(struct vm86_cpu *cpu, void *ctx)
 
     case BIOS13_FN_PARAMS: {
         if (cpu->dl != BIOS13_DRIVE_A) {
-            bios13_fail(cpu, disk, BIOS13_STATUS_NO_DRIVE);
+            bios13_fail(cpu, disk, BIOS13_STATUS_BAD_COMMAND);
             return;
         }
 
