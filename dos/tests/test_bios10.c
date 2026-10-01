@@ -672,6 +672,123 @@ static void test_06_uses_all_four_corner_registers(struct vm86_cpu *cpu)
                 0, 4, 2, 'D', VM86_ATTR_DEFAULT);
 }
 
+/*
+ * A window that runs off the screen is clamped to it, not refused.
+ *
+ * This is the reachable one, and it is why refusing was wrong: the
+ * ordinary way to clear the screen is a window of rows 0..24 by columns
+ * 0..79, which is what a program written for eighty columns passes. On a
+ * forty-column screen 79 is past the last column, and a version that
+ * refused out-of-range rectangles would leave the screen entirely alone
+ * -- so the standard clear-screen call would stop working on exactly the
+ * machine that most needs it.
+ *
+ * vgabios and SeaBIOS both clamp the far corner, and they both refuse
+ * only when the near corner is past the far one. This case is the sixty
+ * columns that the clamp is for.
+ */
+static void test_06_clamps_a_window_wider_than_the_screen(struct vm86_cpu *cpu)
+{
+    struct bios10_state st;
+
+    start_text_screen(cpu, &st);
+
+    cpu->al = 0x00;                 /* forty columns */
+    call(cpu, &st, 0x00);
+
+    poke(cpu, &st, 0, 0,  0,  'A', 0x1E);
+    poke(cpu, &st, 0, 24, 39, 'B', 0x1E);
+
+    cpu->al = 0;                    /* clear the window */
+    cpu->bh = 0x07;
+    cpu->ch = 0;
+    cpu->cl = 0;
+    cpu->dh = 24;
+    cpu->dl = 79;                   /* as written for eighty columns */
+    call(cpu, &st, 0x06);
+
+    expect_cell(cpu, &st, "the screen was cleared anyway", 0, 0, 0, ' ', 0x07);
+    expect_cell(cpu, &st, "out to the last column there is",
+                0, 24, 39, ' ', 0x07);
+}
+
+/*
+ * And the same for a window taller than the screen -- while a window
+ * whose near corner is past its far one still does nothing at all.
+ *
+ * The two are different inputs and the implementations treat them
+ * differently, so a case that only ever feeds one of them cannot tell a
+ * clamp from a refusal.
+ */
+static void test_06_clamps_the_far_corner_but_not_a_crossed_one(
+        struct vm86_cpu *cpu)
+{
+    struct bios10_state st;
+
+    start_text_screen(cpu, &st);
+
+    poke(cpu, &st, 0, 0, 0, 'A', 0x1E);
+
+    /* Rows 0..30, columns 0..79: everything past the screen. */
+    cpu->al = 0;
+    cpu->bh = 0x07;
+    cpu->ch = 0;
+    cpu->cl = 0;
+    cpu->dh = 30;
+    cpu->dl = 79;
+    call(cpu, &st, 0x06);
+
+    expect_cell(cpu, &st, "clamped to the screen and cleared",
+                0, 0, 0, ' ', 0x07);
+
+    /* Now a crossed one: left past right. */
+    poke(cpu, &st, 0, 1, 1, 'B', 0x1E);
+
+    cpu->al = 0;
+    cpu->bh = 0x07;
+    cpu->ch = 0;
+    cpu->cl = 9;                    /* left  */
+    cpu->dh = 2;
+    cpu->dl = 2;                    /* right -- crossed */
+    call(cpu, &st, 0x06);
+
+    expect_cell(cpu, &st, "a crossed rectangle is left alone",
+                0, 1, 1, 'B', 0x1E);
+
+    /* And one crossed in rows, which is the other axis. */
+    cpu->al = 0;
+    cpu->bh = 0x07;
+    cpu->ch = 9;                    /* top    */
+    cpu->cl = 0;
+    cpu->dh = 2;                    /* bottom -- crossed */
+    cpu->dl = 79;
+    call(cpu, &st, 0x06);
+
+    expect_cell(cpu, &st, "and so is one crossed the other way",
+                0, 1, 1, 'B', 0x1E);
+
+    /*
+     * And a rectangle that starts *below* the screen: legal when it
+     * arrives (top below bottom) and crossed once the far corner has been
+     * clamped onto the last row. It has to end up as nothing at all -- a
+     * version that clamps without looking again subtracts the two and
+     * gets an enormous height, and the row it then blanks is a row of the
+     * screen that the window never covered.
+     */
+    poke(cpu, &st, 0, 24, 0, 'C', 0x1E);
+
+    cpu->al = 1;                    /* one line, not a clear */
+    cpu->bh = 0x07;
+    cpu->ch = 30;
+    cpu->cl = 0;
+    cpu->dh = 40;
+    cpu->dl = 79;
+    call(cpu, &st, 0x06);
+
+    expect_cell(cpu, &st, "a window entirely below the screen touches nothing",
+                0, 24, 0, 'C', 0x1E);
+}
+
 /* ------------------------------------------------------------------ */
 /* AH=08h, reading a cell                                              */
 /* ------------------------------------------------------------------ */
@@ -730,6 +847,62 @@ static void test_0f_reports_the_mode(struct vm86_cpu *cpu)
 
     vm86_expect_u16("the mode changed", cpu->al, 0x00);
     vm86_expect_u16("and so did the column count", cpu->ah, 40);
+}
+
+/*
+ * AH=0Fh hand-backs the mode with the video control bit ORed in.
+ *
+ * AL's top bit is not part of the mode number. It is bit 7 of the video
+ * control byte at 0040:0087 -- the same bit AH=00h is given as
+ * `noclearmem` -- and vgabios's handler ORs it into the mode it returns,
+ * so a program that tests AL against 0x80 is asking "is there something
+ * on the screen that a mode set would not erase". Answering with the bare
+ * mode number means that program can never learn the answer.
+ *
+ * The two halves are one byte read two ways, so they are asserted
+ * together: bit 7 of AL and bit 7 of 0040:0087.
+ */
+static void test_0f_hands_back_the_control_bit_with_the_mode(
+        struct vm86_cpu *cpu)
+{
+    struct bios10_state st;
+
+    start_text_screen(cpu, &st);
+
+    cpu->ax = 0xFFFF;
+    cpu->bh = 0xFF;
+    call(cpu, &st, 0x0F);
+
+    vm86_expect_u16("an ordinary mode set leaves the bit clear",
+                    cpu->al, 0x03u);
+
+    /* The same mode number, asked for with the bit that says do not
+     * clear. */
+    cpu->al = (uint8_t)(0x03 | 0x80);
+    call(cpu, &st, 0x00);
+
+    cpu->ax = 0xFFFF;
+    cpu->bh = 0xFF;
+    call(cpu, &st, 0x0F);
+
+    vm86_expect_u16("and now the mode comes back with the bit set",
+                    cpu->al, 0x83u);
+    vm86_expect_u16("AH is still the column count", cpu->ah, 80u);
+    vm86_expect_u16("and BH the active page", cpu->bh, 0u);
+
+    vm86_expect_mem8("0040:0087 bit 7 says the same thing",
+                     cpu, (VM86_BDA_SEGMENT << 4) + 0x0087u, 0x80u);
+
+    /* A mode set without the bit puts it back down. */
+    cpu->al = 0x03;
+    call(cpu, &st, 0x00);
+
+    cpu->ax = 0xFFFF;
+    call(cpu, &st, 0x0F);
+
+    vm86_expect_u16("and clearing it clears the bit", cpu->al, 0x03u);
+    vm86_expect_mem8("in the data area too",
+                     cpu, (VM86_BDA_SEGMENT << 4) + 0x0087u, 0x00u);
 }
 
 /*
@@ -902,6 +1075,10 @@ static void test_the_data_area_is_synced(struct vm86_cpu *cpu)
                       (uint16_t)((0x06u << 8) | 0x07u));
     vm86_expect_mem8 ("0040:0062 is the active page",
                       cpu, bda + VM86_BDA_ACTIVE_PAGE, 1);
+    vm86_expect_mem8 ("0040:0084 is the last row number",
+                      cpu, bda + 0x0084u, 24u);
+    vm86_expect_mem8 ("0040:0087 carries the video control byte",
+                      cpu, bda + 0x0087u, 0x00u);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1016,12 +1193,18 @@ static const struct vm86_test tests[] = {
       test_06_scrolls_one_line_and_07_the_other_way },
     { "06h uses all four corner registers",
       test_06_uses_all_four_corner_registers },
+    { "06h clamps a window wider than the screen",
+      test_06_clamps_a_window_wider_than_the_screen },
+    { "06h clamps the far corner but not a crossed one",
+      test_06_clamps_the_far_corner_but_not_a_crossed_one },
 
     { "08h reads the character and the attribute",
       test_08_reads_the_character_and_the_attribute },
 
     { "0Fh reports the mode, the columns and the page",
       test_0f_reports_the_mode },
+    { "0Fh hands back the control bit with the mode",
+      test_0f_hands_back_the_control_bit_with_the_mode },
     { "00h refuses a graphics mode by doing nothing",
       test_00_refuses_a_graphics_mode },
     { "00h with bit 7 set keeps the screen",
