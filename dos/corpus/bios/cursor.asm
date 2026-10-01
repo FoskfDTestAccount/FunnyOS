@@ -22,6 +22,12 @@
 ;      page 0 alone, and the page a write lands on is the one named in BH
 ;      rather than the one that happens to be active.
 ;
+;      That second half is the one that needed a step of its own. Every
+;      write in the first two claims names the page that was already
+;      active, so a service that ignored BH entirely would agree with the
+;      firmware on every one of them. Step 5 writes to page 0 while page 1
+;      is the active page, and page 0's cell 564 is where it must land.
+;
 ; The row and the column are chosen so that page 0 and page 1 would collide
 ; if the page were ignored: both writes are at the same cell index. Page 0
 ; gets 'A' at cell 410, page 1 gets 'B' at cell 163, and cell 163 of page 0
@@ -52,6 +58,11 @@
 ;   0040:004C = 0x1000    the page stride the mode set established
 ;   1000:0800 = 0x05      the row AH=03h returned
 ;   1000:0801 = 0x0A      the column AH=03h returned
+;   page 0, cell 564 (row 7, col 4) = 'C', attribute 0x4B -- written with
+;     BH=0 while page 1 was the active page. A service that used the active
+;     page instead would put it on page 1 and leave this cell as the mode
+;     set left it, which is (space, 0x07).
+;   0040:0050 = 0x0704    page 0 cursor after step 5: row 7 col 4
 
         bits 16
         org 0x100
@@ -101,6 +112,26 @@
         mov     al, 'B'
         mov     bh, 0x01
         mov     bl, 0x2F
+        mov     cx, 0x0001
+        int     0x10
+
+        ; 5. the page a write lands on is the one named in BH, not the one
+        ;    that happens to be active. Active is 1 at this point, and this
+        ;    writes to page 0 -- which is the only way the rule in claim 3
+        ;    gets exercised at all. Every call above names the page that was
+        ;    already active, so "uses BH" and "uses the active page" give the
+        ;    same answer for all of them, and a service that ignored BH would
+        ;    pass every assertion before this one.
+        mov     ah, 0x02                ; cursor on page 0, row 7, column 4
+        mov     bh, 0x00
+        mov     dh, 0x07
+        mov     dl, 0x04
+        int     0x10
+
+        mov     ah, 0x09                ; write 'C' there, attribute 0x4B
+        mov     al, 'C'
+        mov     bh, 0x00
+        mov     bl, 0x4B
         mov     cx, 0x0001
         int     0x10
 

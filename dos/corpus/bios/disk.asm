@@ -22,17 +22,16 @@
 ; half-filled the buffer is worse than one that failed loudly, because the
 ; caller cannot tell stale data from real data.
 ;
-; NOTE ON THE FROZEN INTERFACE: as host.h stands, a host service cannot
-; return CF at all. The stub ends in a real IRET, which pops FLAGS from the
-; frame the guest's own INT pushed, so a service that sets cpu->flags has
-; that setting thrown away by the IRET that follows. This is measured, not
-; reasoned about -- see M4-E-report.md -- and A's trap.c does not put it
-; back. Until that is settled, a correct INT 13h implementation still makes
-; this program print FAIL, and the suite reports the FAIL, which is the
-; right outcome for a machine whose firmware cannot report a disk error.
-; The program is written to the interface the task book specifies, not to
-; the one that exists. (The same gap covers INT 16h AH=01h's ZF; nothing in
-; this corpus uses 01h.)
+; A note on the carry flag, kept because it explains why this program is
+; written the way it is: for a while a host service could not return CF at
+; all. The stub ends in a real IRET, which pops FLAGS from the frame the
+; guest's own INT pushed, so a service that set cpu->flags had the setting
+; thrown away by the IRET that followed. That is fixed in the trap now --
+; see M4-E-report.md for how it was measured, and docs/dos-refs.md section
+; 4 for the interface -- and this program did not change: it reads the
+; carry because that is how INT 13h reports, and it gets a real answer.
+; (The same gap covered INT 16h AH=01h's ZF; nothing in this corpus uses
+; 01h.)
 ;
 ; The output loop keeps its pointer in memory rather than in SI: INT 10h
 ; AH=0Eh returns BX, CX, DX and the segment registers unchanged but MAY

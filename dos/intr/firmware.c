@@ -21,9 +21,9 @@
  * device is behind them; they are written once and read for the rest of
  * the machine's life. INT 11h and INT 12h below are readers.
  *
- * The second is the video half of the area -- mode, columns, page stride,
- * active page, cursor. Those are the video service's, and its reset()
- * cannot publish them because it has no CPU to write with. So for a while
+ * The second is the video half of the area. Those fields are the video
+ * service's, and its reset() cannot publish them because it has no CPU to
+ * write with. So for a while
  * nothing wrote them, and a machine that had been reset but not yet asked
  * a question reported a video mode of 0 and a page stride of 0 -- and a
  * program that reads the stride out of 0040:004C to work out where a page
@@ -38,14 +38,21 @@
  * owning services whose resets can fill them, and a copy would be a second
  * writer of the same bytes for no benefit.
  *
- * This paragraph exists because it once said the opposite. It listed the
- * video fields among the ones this file leaves alone, and when the code
- * below was changed to write them the header was not, so for a while the
- * file argued both ways and a reader who trusted the top of it concluded
- * that a just-reset machine reported nothing about its display. It did
- * not; the comment was what was wrong. A header that describes a
- * different program from the one underneath it is worse than no header,
- * because it is read instead of the code.
+ * Neither of the paragraphs above lists which fields, and that is on
+ * purpose. This header has been wrong about it twice, the same way both
+ * times. First it listed the video fields among the ones this file leaves
+ * alone, and when the code below started writing them the header was not
+ * revisited -- so the file argued both ways, and a reader who trusted the
+ * top of it concluded that a just-reset machine reported nothing about its
+ * display. Then two more fields were added and the enumeration was not
+ * extended, which is the same failure with the sign flipped.
+ *
+ * A list that has to be re-counted every time a field is added is a list
+ * that will be wrong. A header that describes a different program from the
+ * one underneath it is worse than no header, because it is read instead of
+ * the code -- and this one is read by people asking what a machine looks
+ * like before any service has been called, which is exactly the question
+ * the list was getting wrong.
  *
  * ---------------------------------------------------------------------
  * Where these values come from

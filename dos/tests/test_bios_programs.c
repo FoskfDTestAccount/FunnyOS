@@ -34,15 +34,20 @@
  *
  * disk.asm reads a sector that is there and a sector that is not, and
  * tells them apart by the CARRY FLAG, which is how INT 13h reports
- * (docs/dos-refs.md section 4). As host.h and trap.c stand, a host service
- * cannot return CF: the stub ends in a real IRET, which pops FLAGS from
- * the frame the guest's own INT pushed. The gap is measured rather than
- * argued, and it is written up in M4-E-report.md.
+ * (docs/dos-refs.md section 4).
  *
- * The case below is written to the specification and will report FAIL
- * until that is settled. It says so in its own failure text, because a
- * reader who finds a disk sample printing FAIL will otherwise go looking
- * for a disk bug, and there is not one.
+ * For a while that could not work: a host service could not return CF at
+ * all, because the stub ends in a real IRET, which pops FLAGS from the
+ * frame the guest's own INT pushed, over the top of anything the service
+ * had set. This case was written to the specification while that was
+ * true, and it printed FAIL for the right reason -- which is how the gap
+ * was found. The trap writes the flags back now, the case passes, and it
+ * has not changed: it still reads the carry, because that is the
+ * interface.
+ *
+ * The history is here rather than deleted because the sample and this case
+ * are both shaped by it, and the next person to move them should know why
+ * the failure text below says what it does.
  */
 #include <stdarg.h>
 #include <stdio.h>
@@ -426,6 +431,18 @@ static void case_cursor(struct vm86_bios_machine *m)
     expect_page_cell("cursor: the page 1 write", m, 1, 163, 'B', 0x2F);
 
     /*
+     * The half of the third claim that needed a step of its own.
+     *
+     * Every call before this one names the page that was already active, so
+     * "the write used BH" and "the write used the active page" give the
+     * same answer for all of them -- a service that ignored BH would pass
+     * everything above. This cell is written with BH=0 while page 1 is the
+     * active page, so the two rules part company here and only here.
+     */
+    expect_page_cell("cursor: written to page 0 while page 1 was active",
+                     m, 0, 564, 'C', 0x4B);
+
+    /*
      * The BIOS data area's video half, which this program established by
      * setting the mode and which a program reads directly rather than
      * through a service. 0x1000 and not 4000: it is the stride between
@@ -441,7 +458,7 @@ static void case_cursor(struct vm86_bios_machine *m)
                  0x1000u);
 
     expect_mem16("cursor: page 0 cursor", m,
-                 ((uint32_t)VM86_BDA_SEGMENT << 4) + VM86_BDA_CURSOR, 0x050A);
+                 ((uint32_t)VM86_BDA_SEGMENT << 4) + VM86_BDA_CURSOR, 0x0704);
     expect_mem16("cursor: page 1 cursor", m,
                  ((uint32_t)VM86_BDA_SEGMENT << 4) + VM86_BDA_CURSOR + 2u,
                  0x0203);
@@ -633,12 +650,13 @@ static void case_disk(struct vm86_bios_machine *m)
     run_to_a_halt("disk", m, corpus_disk, corpus_disk_size);
 
     if (vm86_bios_cell_at(vm86_bios_screen(m), 0).character == 'F') {
-        fail("disk: the sample printed FAIL, which is what it does when a "
-             "disk read does not report the way INT 13h reports. As "
-             "host.h and trap.c stand, a host service cannot return CF at "
-             "all -- the stub's IRET pops FLAGS from the frame the "
-             "guest's INT pushed -- so this failure is the interface's "
-             "and not the disk's. See M4-E-report.md.");
+        fail("disk: the sample printed FAIL, which it does when a disk "
+             "read does not report the way INT 13h reports -- the carry "
+             "flag of a read that should have succeeded, or of one that "
+             "should have failed. Both are the disk's answer and neither "
+             "is the interface's any more: the trap writes a service's "
+             "flags back into the frame now, so this is a real result. "
+             "Look at bios13 and at the sample.");
         return;
     }
 
