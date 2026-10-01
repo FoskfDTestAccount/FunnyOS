@@ -60,8 +60,13 @@
  *   it has executed. That is what makes the `sti / hlt` idle loop work: if
  *   the interrupt were taken between the two, the HLT would follow an
  *   interrupt that has already been consumed and would wait forever.
- *   This emulator sets IF immediately and does NOT model the delay, which
- *   is a deliberate M4 debt rather than an oversight. See op_set_flag().
+ *   What waits is *recognition*, not the flag: STI sets IF at once, and
+ *   only the taking of an interrupt is held off. Modelling it the other
+ *   way -- deferring the write to IF -- would break the `pushf` straight
+ *   after an STI, and that mistake has been made once in this project
+ *   already. The delay is a count in cpu->intr_shadow, which the run loop
+ *   decrements at each instruction boundary and honours by not
+ *   delivering while it is nonzero. See op_set_flag().
  *
  * IN and OUT are here rather than in their own file because there is
  * nothing for them to talk to yet. A real implementation needs a port
@@ -80,6 +85,8 @@
  * implementations will not stay identical.
  */
 #include <vm86/ops.h>
+
+#include <vm86/host.h>
 
 /* ------------------------------------------------------------------ */
 /* Relative branches                                                   */
@@ -409,47 +416,20 @@ static enum vm86_result op_ret_far_imm(struct vm86_cpu *cpu, uint8_t opcode)
 #define VECTOR_OVERFLOW 4
 
 /*
- * Transfer control to an interrupt handler: push the return frame, then
- * load CS:IP from the vector table.
+ * Transfer control to an interrupt handler.
  *
- * The frame goes on the stack as FLAGS, CS, IP in that order. The stack
- * grows down, so pushing first puts a word at the higher address: FLAGS
- * ends up furthest from SP and IP at the address SP finally points to.
- * That is what lets an IRET find the return offset by popping first, CS
- * second and FLAGS last -- the pop order is the reverse of the push
- * order, as it has to be, and mixing them up is not a subtle failure: IP
- * gets the value of FLAGS and the machine jumps to an address built out
- * of flag bits.
+ * This used to be a static function here, and it is not one any more. The
+ * host layer has it as vm86_interrupt(), in dos/intr/, because three
+ * things have to agree on it: this instruction, the run loop delivering
+ * a hardware interrupt, and the run loop delivering an exception. They
+ * differ in when they happen and not in what they do, and the moment
+ * they are written twice they stop matching -- so there is one copy, and
+ * this file calls it.
  *
- * The vector table lives in the first kilobyte of memory, four bytes per
- * vector, offset at the low address and segment two bytes up -- the same
- * layout as a far pointer anywhere else. It is addressed LINEARLY,
- * because the table belongs to the machine rather than to whichever
- * segment the interrupting program happened to be running in; a handler
- * reached through CS would be installed by every program at a different
- * place, which is the opposite of what an interrupt vector is for.
- *
- * An interrupt clears IF and TF on entry, as it does on the hardware.
- * The pushed copy of FLAGS has the caller's values, so an IRET restores
- * them and the round trip is exact.
+ * The frame layout, why the vector table is addressed linearly, and the
+ * clearing of IF and TF on entry are documented there, next to the
+ * implementation they describe.
  */
-static void do_interrupt(struct vm86_cpu *cpu, uint8_t vector)
-{
-    vm86_push16(cpu, cpu->flags);
-    vm86_push16(cpu, cpu->cs);
-    vm86_push16(cpu, cpu->ip);
-
-    uint32_t entry = (uint32_t)vector * 4u;
-
-    uint16_t offset  = vm86_mem_read16(cpu->mem, entry);
-    uint16_t segment = vm86_mem_read16(cpu->mem, entry + 2u);
-
-    vm86_set_seg(cpu, VM86_CS, segment);
-    cpu->ip = offset;
-
-    vm86_flag_set(cpu, VM86_IF, false);
-    vm86_flag_set(cpu, VM86_TF, false);
-}
 
 static enum vm86_result op_int3(struct vm86_cpu *cpu, uint8_t opcode)
 {
@@ -461,7 +441,7 @@ static enum vm86_result op_int3(struct vm86_cpu *cpu, uint8_t opcode)
      * byte instead of two. There is no immediate byte to fetch -- reading
      * one would eat the first byte of whatever follows.
      */
-    do_interrupt(cpu, 3);
+    vm86_interrupt(cpu, 3);
 
     return VM86_CONTINUE;
 }
@@ -472,7 +452,7 @@ static enum vm86_result op_int_imm(struct vm86_cpu *cpu, uint8_t opcode)
 
     uint8_t vector = vm86_fetch8(cpu);
 
-    do_interrupt(cpu, vector);
+    vm86_interrupt(cpu, vector);
 
     return VM86_CONTINUE;
 }
@@ -493,7 +473,7 @@ static enum vm86_result op_into(struct vm86_cpu *cpu, uint8_t opcode)
     if (!vm86_flag_test(cpu, VM86_OF))
         return VM86_CONTINUE;
 
-    do_interrupt(cpu, VECTOR_OVERFLOW);
+    vm86_interrupt(cpu, VECTOR_OVERFLOW);
 
     return VM86_CONTINUE;
 }
@@ -582,23 +562,26 @@ static enum vm86_result op_set_flag(struct vm86_cpu *cpu, uint8_t opcode)
          * not delivered until that instruction has run. The classic use
          * is `sti / hlt`, and the delay is the whole reason it works --
          * an interrupt taken between them would be consumed, and the HLT
-         * would then wait for an interrupt that has already been handled.
+         * would then wait for an interrupt that has already been handled,
+         * which is a machine that hangs at idle rather than one that
+         * computes a wrong answer.
          *
-         * What is done here is not that: IF is set now. M4 OWES THE
-         * DELAY. Nothing in M3 delivers an interrupt, so the difference
-         * cannot be observed yet -- but an interrupt model that does not
-         * honour it will lose the wake-up in every `sti / hlt` idle loop,
-         * and the symptom is a machine that hangs at idle rather than one
-         * that computes the wrong answer.
+         * IF is set here, immediately, and what waits is the recognition
+         * of an interrupt. That distinction is the whole of this
+         * instruction and it was written down the other way once already
+         * in this project, at the cost of two task books: deferring the
+         * flag write is wrong, because a PUSHF straight after an STI
+         * shows IF set on the hardware, and test_verify.c pins it.
          *
-         * No field was added to struct vm86_cpu for it, on purpose. The
-         * flag would be written by this line and read by nobody until the
-         * interrupt model exists, and a piece of state that cannot be
-         * exercised is worse than no state at all: whoever builds M4
-         * would find a field with guessed semantics and believe the
-         * problem was already handled.
+         * The shadow is a count of instruction boundaries rather than a
+         * flag because that is what it is -- one instruction of grace.
+         * The run loop decrements it and skips delivery while it is
+         * nonzero, and nothing else decrements it. A second writer would
+         * turn the one instruction into two or into none, and the only
+         * place that shows up is a dense stream of interrupts.
          */
         vm86_flag_set(cpu, VM86_IF, true);
+        cpu->intr_shadow = 1;
         break;
 
     case 0xFC: vm86_flag_set(cpu, VM86_DF, false); break;
