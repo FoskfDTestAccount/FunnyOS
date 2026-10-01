@@ -173,6 +173,14 @@ void vm86_install_firmware(struct vm86_cpu *cpu)
     vm86_mem_write8 (cpu->mem, bda(VM86_BDA_ACTIVE_PAGE), 0u);
     vm86_mem_write16(cpu->mem, bda(VM86_BDA_CURSOR_SHAPE), 0x0607u);
 
+    /* Rows is stored as one less than the count, and a machine that
+     * leaves it at zero is a machine with one row. */
+    vm86_mem_write8 (cpu->mem, bda(VM86_BDA_ROWS),
+                     (uint8_t)(VM86_TEXT_ROWS - 1u));
+
+    /* Modes do clear memory here, which is what bit 7 clear means. */
+    vm86_mem_write8 (cpu->mem, bda(VM86_BDA_VIDEO_CONTROL), 0u);
+
     for (uint16_t page = 0; page < 8u; page++)
         vm86_mem_write16(cpu->mem, bda(VM86_BDA_CURSOR) + page * 2u, 0u);
 

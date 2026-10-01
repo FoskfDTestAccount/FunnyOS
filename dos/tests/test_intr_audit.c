@@ -1350,7 +1350,7 @@ static void test_install_firmware_writes_the_table_and_the_machine_description(
 
     unsigned stray = 0;
     unsigned in_display = 0;
-
+    unsigned in_extra_display = 0;
     for (uint32_t a = 0; a < cpu->mem->size; a++) {
         if (cpu->mem->ram[a] == 0xA5)
             continue;
@@ -1364,10 +1364,31 @@ static void test_install_firmware_writes_the_table_and_the_machine_description(
         bool in_the_two_words = a >= bda + 0x10u && a <= bda + 0x14u;
         bool in_the_display   = a >= bda + 0x49u && a <= bda + 0x62u;
 
+        /* *** WIDENED AGAIN ON MAIN@fcc1d40 ***
+         *
+         * The video module's audit found that the row count at 0040:0084
+         * and the control byte at 0040:0087 had no home in firmware.h, so
+         * the service defined them locally -- the same shape as the
+         * keyboard service inventing a meaning for 0040:0071 because no
+         * map mentioned it. Both are now in the map and both are seeded,
+         * because a machine that leaves the row count at zero is a
+         * machine with one row and the window before the first INT 10h is
+         * exactly where a program reads it.
+         *
+         * They are allowed as their own two addresses rather than as the
+         * range they sit in: "these bytes and no others" is the question,
+         * and a range would also permit 0085 and 0086. */
+        bool is_extra_display = a == bda + VM86_BDA_ROWS
+                             || a == bda + VM86_BDA_VIDEO_CONTROL;
+
         if (in_the_display)
             in_display++;
 
-        if (!in_ivt && !in_stubs && !in_the_two_words && !in_the_display)
+        if (is_extra_display)
+            in_extra_display++;
+
+        if (!in_ivt && !in_stubs && !in_the_two_words && !in_the_display
+            && !is_extra_display)
             stray++;
     }
 
@@ -1381,6 +1402,9 @@ static void test_install_firmware_writes_the_table_and_the_machine_description(
      */
     vm86_expect_u16("bytes written into the display half of the data area",
                     in_display, 24u);
+
+    vm86_expect_u16("and the two fields the map was missing",
+                    in_extra_display, 2u);
 }
 
 /*
