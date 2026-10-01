@@ -114,6 +114,8 @@ u16 attr = ((ca.use_attr ? ca.attr : 0x07) << 8) | ca.car;
 
 **注四(新):`06h`/`07h` 越界矩形,B 与两份源码都不同。** 两份都**夹取**(`rlr >= nbrows → nbrows-1`),而 B 是**拒绝**(`bottom >= BIOS10_ROWS || right >= st->columns → return`)。B 的注释给了理由("一个要求滚 rows 10..40 的程序有 bug,悄悄滚一半会掩盖它"),那是一个理由,但**现在有两条独立实现夹取**。可达的情形是具体的:**40 列模式 + `DL = 79`**(一个按 80 列写的清屏),硬件夹到 39 并清屏,B **什么都不做**。这一条应转给 B。
 
+> **已处置(2026-10-01 当天):** B 已改成夹取,并同时补上了 `0Fh` 的视频控制位(`2bb4e8f`),窗口矩形四个寄存器的用例也补齐了(`ef85927`)。**下面这段保留原样,因为要留的是"当时看到了什么"**——B 原来的注释给过理由("一个要求滚 rows 10..40 的程序有 bug,悄悄滚一半会掩盖它"),那个理由本身没错;**改变结论的是"两条独立实现都夹取"这件事,而不是谁的理由更响。**
+
 **来源:** `qemu/vgabios` 的 `vgabios.c`(3923 行)与 `vgatables.h`、`coreboot/seabios` 的 `vgasrc/vgabios.c`(1133 行)、`vgasrc/vgafb.c`、`vgasrc/vgabios.h` —— **2026-10-01 由任务 D `curl` 到本地后逐条 grep 读取**。两者都是 LGPL 源码。仍未查证的见第九节。
 
 **来源:** [BIOS-interrupts (课程手册 PDF)](https://jyywiki.cn/pages/OS/manuals/BIOS-interrupts.pdf)、[Text Mode — UMBC CMSC 211](https://courses.cs.umbc.edu/undergraduate/CMSC211/Spring01/burt/lectures/Chap19/textmode.html)、[BIOS 中断功能调用大全(中文)](http://staff.ustc.edu.cn/~hufy/Microcomputer/%B8%BD%C2%BC/BIOS_DOS%D6%D0%B6%CF%B9%A6%C4%DC%B5%F7%D3%C3%B4%F3%C8%AB.pdf)。
