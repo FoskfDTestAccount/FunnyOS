@@ -11,6 +11,7 @@
 #include <funnyos/kprintf.h>
 #include <funnyos/process.h>
 #include <funnyos/ramfs.h>
+#include <funnyos/screen.h>
 #include <funnyos/vmm.h>
 
 #include <libk/string.h>
@@ -285,6 +286,63 @@ static int64_t sys_spawn(uint64_t name_ptr, uint64_t arg)
     return code;
 }
 
+/* --- The screen ----------------------------------------------------- */
+
+/*
+ * The three screen calls, and the one thing they have in common: none of
+ * them checks whether the caller is entitled to be there, because the
+ * kernel decides that rather than the caller. What a program gets back is
+ * the truth about whether it has the screen, and a program that did not
+ * ask cannot paint on one it does not hold.
+ */
+
+static int64_t sys_screen_acquire(void)
+{
+    if (!screen_ready())
+        return SYSCALL_ENODEV;
+
+    /* The identity that matters is the process, not a flag: see
+     * screen_release_if_held_by. `process_open_files` is the existing way
+     * the syscall layer names the running process. */
+    if (!screen_acquire(process_current()))
+        return SYSCALL_EPERM;
+
+    return 0;
+}
+
+static int64_t sys_screen_present(uint64_t cells, uint64_t columns,
+                                  uint64_t cursor)
+{
+    if (columns == 0 || columns > SCREEN_MAX_COLUMNS)
+        return SYSCALL_EINVAL;
+
+    uint64_t bytes = columns * SCREEN_ROWS * 2u;
+
+    if (!user_pointer_ok(cells, bytes))
+        return SYSCALL_EFAULT;
+
+    if (!screen_ready())
+        return SYSCALL_ENODEV;
+
+    /*
+     * The page is read straight out of the caller's memory -- no copy into
+     * a kernel buffer first. The check above proved every byte is mapped
+     * and the page tables cannot change underneath a system call, which is
+     * the same argument sys_write makes for reading its buffer in place.
+     */
+    if (!screen_present((const uint8_t *)cells, (unsigned)columns,
+                        (uint16_t)cursor))
+        return SYSCALL_EPERM;
+
+    return 0;
+}
+
+static int64_t sys_screen_release(void)
+{
+    screen_release();
+    return 0;
+}
+
 /* --- Dispatch ------------------------------------------------------ */
 
 static int64_t syscall_dispatch(uint64_t number, uint64_t a0, uint64_t a1,
@@ -326,6 +384,15 @@ static int64_t syscall_dispatch(uint64_t number, uint64_t a0, uint64_t a1,
 
     case SYS_SPAWN:
         return sys_spawn(a0, a1);
+
+    case SYS_SCREEN_ACQUIRE:
+        return sys_screen_acquire();
+
+    case SYS_SCREEN_PRESENT:
+        return sys_screen_present(a0, a1, a2);
+
+    case SYS_SCREEN_RELEASE:
+        return sys_screen_release();
 
     case SYS_EXIT:
         /*

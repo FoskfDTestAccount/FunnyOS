@@ -67,6 +67,25 @@ long u_spawn(const char *image, unsigned long arg)
     return u_syscall(SYS_SPAWN, (uint64_t)(uintptr_t)image, (uint64_t)arg, 0);
 }
 
+/* --- The screen ---------------------------------------------------- */
+
+int u_screen_acquire(void)
+{
+    return (int)u_syscall(SYS_SCREEN_ACQUIRE, 0, 0, 0);
+}
+
+int u_screen_present(const unsigned char *cells, unsigned columns,
+                     unsigned cursor)
+{
+    return (int)u_syscall(SYS_SCREEN_PRESENT, (uint64_t)(uintptr_t)cells,
+                          (uint64_t)columns, (uint64_t)cursor);
+}
+
+int u_screen_release(void)
+{
+    return (int)u_syscall(SYS_SCREEN_RELEASE, 0, 0, 0);
+}
+
 /* --- Buffered console output --------------------------------------- */
 
 /*

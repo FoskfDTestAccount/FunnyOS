@@ -25,6 +25,21 @@
  * writes and therefore the fast path for WC memory.
  *
  * Anything added to this file must respect that: never read from g_addr.
+ *
+ * ---------------------------------------------------------------------
+ * Two kinds of drawing
+ *
+ * The console's own log is one character grid with one colour, and it is
+ * what almost everything in the kernel prints into. A program that needs
+ * a screen of its own -- the DOS emulator, which puts a guest's text page
+ * where a person can see it -- gets the other path: fb_draw_page, which
+ * paints a rectangle of the framebuffer from cells the caller owns, with
+ * the caller's colours.
+ *
+ * Nothing coordinates the two here. A program holding the screen turns the
+ * log's *drawing* off with fb_set_output, and the grid keeps being
+ * maintained while it is off, so the log is intact when it comes back.
+ * Which one is on is decided in screen.c.
  */
 #include <funnyos/fb.h>
 #include <funnyos/bootinfo.h>
@@ -37,6 +52,11 @@
  * grid comment below; larger displays still fit comfortably. */
 #define CONSOLE_MAX_COLS 256
 #define CONSOLE_MAX_ROWS 128
+
+/* How thick the underline under a guest's cursor cell is, in scan lines.
+ * Two of the sixteen is enough to read as a cursor and thin enough not to
+ * eat the descenders of the character above it. */
+#define FB_CURSOR_HEIGHT 2
 
 /* ------------------------------------------------------------------ */
 /* State                                                               */
@@ -57,6 +77,10 @@ static uint64_t g_cursor_x;
 static uint64_t g_cursor_y;
 
 static bool     g_ready;
+
+/* Whether the console's own output is reaching the screen. See fb_set_output
+ * in the header: the grid is maintained either way. */
+static bool     g_output = true;
 
 static uint32_t g_fg = 0xE8E8E8;   /* near-white */
 static uint32_t g_bg = 0x101014;   /* near-black, faintly blue */
@@ -128,6 +152,44 @@ static void draw_glyph(uint64_t cell_x, uint64_t cell_y, char c,
     }
 }
 
+/*
+ * The console's own glyphs, drawn only while the console has the screen.
+ *
+ * The grid is updated whether or not this draws -- that is the whole point
+ * of g_output, and the reason this is a separate function rather than a
+ * check inside draw_glyph: the calls that update the grid and the calls
+ * that paint it are the same calls, and only the painting is conditional.
+ */
+static void paint_cell(uint64_t cell_x, uint64_t cell_y, char c,
+                       uint32_t fg, uint32_t bg)
+{
+    if (g_output)
+        draw_glyph(cell_x, cell_y, c, fg, bg);
+}
+
+/*
+ * The sixteen colours of an IBM PC text attribute, as the values a VGA
+ * digital-to-analogue converter is loaded with.
+ *
+ * These are the standard table -- the first eight are the CGA palette
+ * doubled to 0xAA, the second eight the same with 0x55 added -- and the
+ * repository has no document that states them: docs/dos-refs.md is about
+ * services and interrupts. So they are from general knowledge rather than
+ * checked against a source in the tree, and the one corroboration
+ * available locally is boot/limine.conf's own defaults, which name 0x00aa00
+ * and 0x00aaaa as green and cyan.
+ *
+ * A wrong value here is visible rather than subtle -- the text comes out
+ * the wrong colour -- which is the redeeming feature of a table nobody can
+ * check inside this repository.
+ */
+static const uint32_t g_text_palette[16] = {
+    0x000000, 0x0000AA, 0x00AA00, 0x00AAAA,
+    0xAA0000, 0xAA00AA, 0xAA5500, 0xAAAAAA,
+    0x555555, 0x5555FF, 0x55FF55, 0x55FFFF,
+    0xFF5555, 0xFF55FF, 0xFFFF55, 0xFFFFFF,
+};
+
 /* ------------------------------------------------------------------ */
 /* Grid operations                                                     */
 /* ------------------------------------------------------------------ */
@@ -169,7 +231,8 @@ static void scroll_up(void)
             (size_t)((g_rows - 1) * g_cols));
     memset(g_cells + (g_rows - 1) * g_cols, ' ', (size_t)g_cols);
 
-    repaint();
+    if (g_output)
+        repaint();
 }
 
 /* ------------------------------------------------------------------ */
@@ -230,7 +293,9 @@ void fb_clear(void)
 
     memset(g_cells, ' ', (size_t)(g_rows * g_cols));
 
-    fill_rect(0, 0, g_width, g_height, pack_color(g_bg));
+    if (g_output)
+        fill_rect(0, 0, g_width, g_height, pack_color(g_bg));
+
     g_cursor_x = 0;
     g_cursor_y = 0;
 }
@@ -238,6 +303,91 @@ void fb_clear(void)
 void fb_set_fg(uint32_t rgb) { g_fg = rgb; }
 void fb_set_bg(uint32_t rgb) { g_bg = rgb; }
 void fb_reset_color(void)    { g_fg = 0xE8E8E8; g_bg = 0x101014; }
+
+void fb_set_output(bool enabled)
+{
+    g_output = enabled;
+}
+
+void fb_repaint(void)
+{
+    if (g_ready)
+        repaint();
+}
+
+void fb_fill_screen(void)
+{
+    if (!g_ready)
+        return;
+
+    fill_rect(0, 0, g_width, g_height, pack_color(g_bg));
+}
+
+bool fb_grid_size(uint64_t *cols, uint64_t *rows)
+{
+    if (!g_ready)
+        return false;
+
+    if (cols)
+        *cols = g_cols;
+    if (rows)
+        *rows = g_rows;
+
+    return true;
+}
+
+void fb_draw_page(uint64_t col, uint64_t row, uint64_t columns,
+                  uint64_t rows, const uint8_t *cells, uint16_t cursor)
+{
+    if (!g_ready || !cells || columns == 0)
+        return;
+
+    for (uint64_t r = 0; r < rows; r++) {
+        if (row + r >= g_rows)
+            break;
+
+        for (uint64_t c = 0; c < columns; c++) {
+            if (col + c >= g_cols)
+                break;
+
+            uint64_t at  = (r * columns + c) * 2u;
+            uint8_t  ch  = cells[at];
+            uint8_t  att = cells[at + 1u];
+
+            draw_glyph(col + c, row + r, (char)ch,
+                       pack_color(g_text_palette[att & 0x0Fu]),
+                       pack_color(g_text_palette[(att >> 4) & 0x07u]));
+        }
+    }
+
+    if (cursor == FB_NO_CURSOR)
+        return;
+
+    uint64_t cell_col = cursor % columns;
+    uint64_t cell_row = cursor / columns;
+
+    if (cell_row >= rows || col + cell_col >= g_cols || row + cell_row >= g_rows)
+        return;
+
+    /*
+     * An underline, in the foreground colour the cell itself is using.
+     *
+     * A cursor on a cell whose character is a space is the case that makes
+     * this worth doing properly: a block cursor would be visible there too,
+     * but it would hide the character under it, and the guest's cursor is
+     * usually sitting one past the last character it wrote.
+     */
+    uint8_t  att = cells[(cell_row * columns + cell_col) * 2u + 1u];
+    uint32_t fg  = pack_color(g_text_palette[att & 0x0Fu]);
+
+    uint64_t x0 = (col + cell_col) * FONT8X16_WIDTH;
+    uint64_t y0 = (row + cell_row) * FONT8X16_HEIGHT +
+                  FONT8X16_HEIGHT - FB_CURSOR_HEIGHT;
+
+    for (uint64_t dy = 0; dy < FB_CURSOR_HEIGHT; dy++)
+        for (uint64_t dx = 0; dx < FONT8X16_WIDTH; dx++)
+            put_pixel(x0 + dx, y0 + dy, fg);
+}
 
 void fb_putc(char c)
 {
@@ -261,21 +411,21 @@ void fb_putc(char c)
         if (g_cursor_x > 0)
             g_cursor_x--;
         cell_set(g_cursor_x, g_cursor_y, ' ');
-        draw_glyph(g_cursor_x, g_cursor_y, ' ', fg, bg);
+        paint_cell(g_cursor_x, g_cursor_y, ' ', fg, bg);
         return;
 
     case '\t':
         /* Advance to the next 8-column stop, blanking what is crossed. */
         do {
             cell_set(g_cursor_x, g_cursor_y, ' ');
-            draw_glyph(g_cursor_x, g_cursor_y, ' ', fg, bg);
+            paint_cell(g_cursor_x, g_cursor_y, ' ', fg, bg);
             g_cursor_x++;
         } while ((g_cursor_x & 7) && g_cursor_x < g_cols);
         break;
 
     default:
         cell_set(g_cursor_x, g_cursor_y, c);
-        draw_glyph(g_cursor_x, g_cursor_y, c, fg, bg);
+        paint_cell(g_cursor_x, g_cursor_y, c, fg, bg);
         g_cursor_x++;
         break;
     }

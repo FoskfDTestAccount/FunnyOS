@@ -6,13 +6,22 @@
 # instead of the shell. What runs then is user/vm/: a Ring 3 program that
 # builds the opcode dispatch table, runs two hand-assembled guest programs
 # through the interpreter, and compares each terminal state against what
-# the Intel manual says those instructions produce.
+# the Intel manual says those instructions produce. Then it takes the
+# console's screen and runs three programs on the machine it has built --
+# a .COM through the BIOS, the same text with no interrupt at all, and one
+# waiting on the real clock -- handing each page to the kernel as it goes.
 #
 # Asserting is the point of this file. The terminal states are printed in
 # full -- eight general registers, four segment registers, IP, and every
 # flag by name -- but somebody reading a register dump is not a test, and
 # something looked at once is not looked at again. So the verdict is also
 # a line a script can read, and this is the script that reads it.
+#
+# What this file cannot read is the screen. It asserts that the kernel was
+# handed each page and where it put it; the pixels are
+# tools/run-screen-test.sh's business, and the split is deliberate -- this
+# test must keep working on a machine with no framebuffer, and that one
+# cannot work without a display at all.
 #
 # `vm=1` rather than `selftest=`, because `selftest=` means "inject a
 # fault on purpose" and this is not one: it is M3's deliverable, running.
@@ -36,6 +45,7 @@ WORK="$BUILD_DIR/vm-test"
 TIMEOUT_SECS="${QEMU_TIMEOUT:-60}"
 
 FAILED=0
+CHECKS=0
 
 if [ ! -f "$ISO" ]; then
     echo "ERROR: ISO not found: $ISO" >&2
@@ -157,6 +167,7 @@ sed -n '/\[vm86 interpreter\]/,$p' "$LOG" 2>/dev/null | cat -s
 printf '=================================================\n\n'
 
 expect_present() {
+    CHECKS=$((CHECKS + 1))
     if grep -qF "$1" "$LOG" 2>/dev/null; then
         printf '  [ok]   %s\n' "$2"
     else
@@ -166,6 +177,7 @@ expect_present() {
 }
 
 expect_absent() {
+    CHECKS=$((CHECKS + 1))
     if grep -qF "$1" "$LOG" 2>/dev/null; then
         printf '  [FAIL] %s\n' "$2"
         FAILED=1
@@ -203,17 +215,26 @@ expect_present "flags  CF="                   "every flag was printed by name"  
 
 # ---- M4: a .COM, through the BIOS, on a screen -----------------------
 #
-# The milestone's sentence is about a program APPEARING, so the first
-# assertion below is the text itself, sitting in the serial log because
-# the display backend drew it out of the guest's video memory. An exit
-# code would be satisfied by an interpreter that ran the program and drew
-# nothing at all, which is exactly what a machine with a display of its own
-# would do.
+# The milestone's sentence is about a program APPEARING, and what has
+# changed since M4 is where the appearing happens. Until W2 of M5 this
+# process printed the guest's page into the console's log, twenty-five rows
+# at a time -- which put the characters on a screen in the way a printout
+# is on a screen, and left "the text appeared" as an assertion about a
+# string this process printed rather than about anything a machine drew.
 #
-# The second and third are the state behind the picture: hello.asm went
-# through INT 10h and left the expected page, and direct.asm left the same
-# cells with no interrupt in the program at all.
-expect_present "M4 hello from the BIOS"       "the guest's line reached the screen"         "$LOG"
+# Now the page is handed to the kernel, which reports where it put it. Two
+# assertions follow from that and they are different claims: the text is in
+# the page that was handed over, and the kernel took it and refused
+# nothing. Neither says a pixel was written -- that is
+# tools/run-screen-test.sh, which reads the screen back.
+#
+# The page's own contents are asserted below that, cell by cell against the
+# manual: hello.asm went through INT 10h and left the expected page, and
+# direct.asm left the same cells with no interrupt in the program at all.
+expect_present "M4 hello from the BIOS"       "the guest's line is in the page that went to the console" "$LOG"
+expect_present "Screen         : a program has the screen, 80 columns at" "the kernel took the page and said where it went" "$LOG"
+expect_absent  "NOTHING WAS PRESENTED"        "no display case ran without handing over a page" "$LOG"
+expect_absent  "the kernel refused"           "and the kernel refused none of them"         "$LOG"
 expect_present "VM: case hello: PASS"         "the page hello.asm left is the one expected" "$LOG"
 expect_present "VM: case direct: PASS"        "the same text with no interrupt at all"      "$LOG"
 expect_present "VM: case timer: PASS"         "five ticks of a real clock, counted by the guest" "$LOG"
@@ -227,9 +248,11 @@ expect_absent  "program fault"                "the process did not fault"       
 
 echo
 if [ "$FAILED" -eq 0 ]; then
+    echo "  $CHECKS assertions run"
     echo "====> 8086 interpreter test PASSED ($MODE)"
     exit 0
 else
+    echo "  $CHECKS assertions run"
     echo "====> 8086 interpreter test FAILED ($MODE)"
     exit 1
 fi

@@ -105,7 +105,9 @@ echo
 # ---------------------------------------------------------------- assert
 
 FAILED=0
+CHECKS=0
 expect_present() {
+    CHECKS=$((CHECKS + 1))
     if grep -q "$1" "$LOG" 2>/dev/null; then
         printf '  [ok]   %s\n' "$2"
     else
@@ -133,9 +135,11 @@ fi
 
 echo
 if [ "$FAILED" -eq 0 ]; then
+    echo "  $CHECKS assertions run"
     echo "====> fault-injection test PASSED ($MODE)"
     exit 0
 else
+    echo "  $CHECKS assertions run"
     echo "====> fault-injection test FAILED ($MODE)"
     exit 1
 fi

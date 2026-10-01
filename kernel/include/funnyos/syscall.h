@@ -50,6 +50,7 @@
 #define SYSCALL_EINVAL  (-6)   /* bad argument */
 #define SYSCALL_ENOSYS  (-7)   /* no such call */
 #define SYSCALL_EMFILE  (-8)   /* too many open files */
+#define SYSCALL_ENODEV  (-9)   /* the device is not there -- no screen */
 
 /* Call numbers. */
 #define SYS_EXIT       0   /* (int code)                        never returns */
@@ -62,7 +63,10 @@
 #define SYS_UPTIME_MS  7   /* ()                                -> ms  */
 #define SYS_CLEAR      8   /* ()                                -> 0   */
 #define SYS_SPAWN      9   /* (const char *image, uint64_t arg) -> code */
-#define SYS_COUNT      10
+#define SYS_SCREEN_ACQUIRE 10  /* ()                                 -> 0 */
+#define SYS_SCREEN_PRESENT 11  /* (const void *cells, columns, cursor) -> 0 */
+#define SYS_SCREEN_RELEASE 12  /* ()                                 -> 0 */
+#define SYS_COUNT      13
 
 /* File descriptors 0, 1 and 2 are the console, so that a program can be
  * written without opening anything. Ramfs file descriptors start above
@@ -70,6 +74,25 @@
 #define STDIN_FILENO  0
 #define STDOUT_FILENO 1
 #define STDERR_FILENO 2
+
+/*
+ * The screen, and who is on it.
+ *
+ * A program that has a screen of its own to show -- the DOS emulator, with
+ * a guest's text page -- takes the console's screen, paints pages onto it,
+ * and gives it back. Until it does, everything the program prints goes to
+ * the console's log and not to the part of the screen it has taken.
+ *
+ * `cells` is the page in guest video memory's layout: one byte of
+ * character, one byte of attribute, left to right and top to bottom,
+ * `columns` cells per row and twenty-five rows. That is the layout a DOS
+ * program's 0xB8000 already has, so the emulator passes its guest's memory
+ * straight through and nothing is repacked.
+ *
+ * `cursor` is a cell index into that page -- row * columns + column -- or
+ * SCREEN_NO_CURSOR.
+ */
+#define SCREEN_NO_CURSOR 0xFFFFu
 
 /* Open flags. */
 #define O_RDONLY 0

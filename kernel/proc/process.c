@@ -8,6 +8,7 @@
 #include <funnyos/kprintf.h>
 #include <funnyos/panic.h>
 #include <funnyos/pmm.h>
+#include <funnyos/screen.h>
 #include <funnyos/vmm.h>
 
 #include <libk/string.h>
@@ -81,6 +82,11 @@ void process_init(void)
 uint64_t process_current_pml4(void)
 {
     return g_current ? g_current->pml4 : g_kernel_pml4;
+}
+
+struct process *process_current(void)
+{
+    return g_current;
 }
 
 struct open_file *process_open_files(void)
@@ -311,6 +317,22 @@ void process_destroy(struct process *p)
 {
     if (!p)
         return;
+
+    /*
+     * Give the screen back if this process took it.
+     *
+     * Here rather than in the exit path because this is where a process's
+     * resources are returned, and the screen is one: a program that ends
+     * without releasing it is the ordinary case, and a program that
+     * *forgot* to is indistinguishable from one that meant to keep it
+     * until the last instruction. Either way the next thing to print has
+     * to be able to.
+     *
+     * Before the frames are freed, though nothing about the repaint
+     * depends on them: it is here so that the ordering is not something a
+     * later reader has to work out.
+     */
+    screen_release_if_held_by(p);
 
     /* The program's memory starts at a fixed base and runs for as long as
      * the process was given -- which is not the length of its image, and

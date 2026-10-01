@@ -92,4 +92,39 @@ void uprintf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
  * program only needs it before doing something slow. */
 void uflush(void);
 
+/* --- The screen ---------------------------------------------------- */
+
+/*
+ * Take the console's screen for this program, or give it back.
+ *
+ * While a program holds it, what the kernel prints goes to the console's
+ * log and not to the display, and what this program presents is what is
+ * seen. The hold does not need to be given back: it ends when the program
+ * does, either way. Releasing early is for a program that has stretches
+ * with nothing of its own to show.
+ *
+ * Returns 0, or a negative error -- SYSCALL_ENODEV when the machine has no
+ * usable framebuffer, and SYSCALL_EPERM when another program holds it.
+ */
+int u_screen_acquire(void);
+
+/*
+ * Put a page on the screen, in guest video memory's layout: one byte of
+ * character and one of attribute per cell, `columns` per row and
+ * twenty-five rows. The kernel reads it straight out of this program's
+ * memory, so the buffer must stay put for the length of the call and does
+ * not need to be copied first.
+ *
+ * `cursor` is a cell index -- row * columns + column -- or
+ * SCREEN_NO_CURSOR, which comes in with the system call header above.
+ * There is deliberately no second spelling of it here: a program that
+ * needs the constant has it already, and two names for one value is a
+ * thing to keep in step rather than a convenience.
+ */
+int u_screen_present(const unsigned char *cells, unsigned columns,
+                     unsigned cursor);
+
+/* Give the screen back to the kernel. */
+int u_screen_release(void);
+
 #endif /* LIBU_H */

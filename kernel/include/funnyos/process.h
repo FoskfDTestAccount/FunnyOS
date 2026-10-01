@@ -218,6 +218,19 @@ void process_abort_on_fault(uint64_t vector) __attribute__((noreturn));
 uint64_t process_current_pml4(void);
 
 /*
+ * The process that is running, or NULL when the kernel is on its own.
+ *
+ * The system call layer needs this to name the caller where the caller's
+ * *identity* is the thing being recorded rather than its memory or its
+ * files -- the screen is the case that exists: it is held by a process and
+ * given back when that process ends, so "which process is asking" is the
+ * whole question. Nothing should reach for this to find out something
+ * about the caller that process_current_pml4 or process_open_files already
+ * answers.
+ */
+struct process *process_current(void);
+
+/*
  * Does `sp` point into the running process's kernel stack?
  *
  * This exists so that one claim can be checked continuously rather than

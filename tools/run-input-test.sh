@@ -137,9 +137,11 @@ echo
 
 # ---------------------------------------------------------------- asserts
 FAILED=0
+CHECKS=0
 
 # Match a whole line. See the note at the top for why this matters.
 expect_line() {
+    CHECKS=$((CHECKS + 1))
     if grep -qxF "$1" "$CLEAN" 2>/dev/null; then
         printf '  [ok]   %s\n' "$2"
     else
@@ -149,6 +151,7 @@ expect_line() {
 }
 
 expect_present() {
+    CHECKS=$((CHECKS + 1))
     if grep -qF "$1" "$CLEAN" 2>/dev/null; then
         printf '  [ok]   %s\n' "$2"
     else
@@ -158,6 +161,7 @@ expect_present() {
 }
 
 expect_absent() {
+    CHECKS=$((CHECKS + 1))
     if grep -qF "$1" "$CLEAN" 2>/dev/null; then
         printf '  [FAIL] %s\n' "$2"
         FAILED=1
@@ -207,9 +211,11 @@ expect_absent  "CPU EXCEPTION"                      "no CPU exception"
 
 echo
 if [ "$FAILED" -eq 0 ]; then
+    echo "  $CHECKS assertions run"
     echo "====> input test PASSED ($MODE)"
     exit 0
 else
+    echo "  $CHECKS assertions run"
     echo "====> input test FAILED ($MODE)"
     exit 1
 fi

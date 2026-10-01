@@ -70,6 +70,7 @@ WORK="$BUILD_DIR/user-test"
 TIMEOUT_SECS="${QEMU_TIMEOUT:-20}"
 
 FAILED=0
+CHECKS=0
 
 if [ ! -f "$ISO" ]; then
     echo "ERROR: ISO not found: $ISO" >&2
@@ -161,6 +162,7 @@ boot() {
 }
 
 expect_present() {
+    CHECKS=$((CHECKS + 1))
     if grep -qF "$1" "$3" 2>/dev/null; then
         printf '  [ok]   %s\n' "$2"
     else
@@ -170,6 +172,7 @@ expect_present() {
 }
 
 expect_absent() {
+    CHECKS=$((CHECKS + 1))
     if grep -qF "$1" "$3" 2>/dev/null; then
         printf '  [FAIL] %s\n' "$2"
         FAILED=1
@@ -302,9 +305,11 @@ expect_absent  "CPU EXCEPTION"               "no CPU exception"                 
 
 echo
 if [ "$FAILED" -eq 0 ]; then
+    echo "  $CHECKS assertions run"
     echo "====> user program test PASSED ($MODE)"
     exit 0
 else
+    echo "  $CHECKS assertions run"
     echo "====> user program test FAILED ($MODE)"
     exit 1
 fi

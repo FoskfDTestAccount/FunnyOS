@@ -35,4 +35,64 @@ void fb_set_fg(uint32_t rgb);
 void fb_set_bg(uint32_t rgb);
 void fb_reset_color(void);
 
+/*
+ * ---------------------------------------------------------------------
+ * Cells that are not the console's
+ *
+ * The functions above draw the console's own grid: the scrolling log the
+ * kernel prints into, one colour, one cursor. A program that has to show a
+ * screen of its own -- a DOS program's text page, which is what the
+ * emulator exists to put on a display -- needs something the console
+ * cannot give it: a rectangle of the screen it owns, its own colours, and
+ * a cursor that is the guest's rather than the console's.
+ *
+ * So this is a second way to put characters on the same framebuffer. The
+ * two do not interleave: a program on the screen and the kernel's log on
+ * the screen at the same time would each be drawing over the other. Which
+ * one is drawing is decided a level up, in screen.c.
+ * ---------------------------------------------------------------------
+ */
+
+/* The console's grid, in cells. False when there is no console at all, in
+ * which case neither output is set. */
+bool fb_grid_size(uint64_t *cols, uint64_t *rows);
+
+/*
+ * Whether the console's own output reaches the screen.
+ *
+ * Off means the grid keeps being maintained -- kprintf still scrolls, the
+ * cursor still advances, a later repaint still shows everything that was
+ * printed -- and none of it is drawn. That is the difference between
+ * "the log is not on the screen right now" and "the log was thrown away",
+ * and the first is what a program holding the screen needs.
+ */
+void fb_set_output(bool enabled);
+
+/* Paint the console grid onto the screen from scratch. */
+void fb_repaint(void);
+
+/* Fill the screen with the console's background colour and leave the
+ * character grid alone -- the screen is somebody else's now. */
+void fb_fill_screen(void);
+
+/*
+ * Draw a block of text cells in the layout guest video memory uses: one
+ * byte of character, one byte of attribute, left to right and top to
+ * bottom, `columns` cells per row.
+ *
+ * The attribute is an IBM PC text attribute -- foreground in the low
+ * nibble, background in bits 4 to 6, bit 7 the blink this machine does
+ * not model -- and it is rendered, because a program that sets a colour
+ * and does not see it is a program running on a machine that is lying
+ * about its video hardware.
+ *
+ * A cell index into `cells`, or FB_NO_CURSOR. The cursor is drawn as an
+ * underline rather than as a block: an underline needs no inverse video
+ * and so is visible whatever colours the cell is using.
+ */
+#define FB_NO_CURSOR 0xFFFFu
+
+void fb_draw_page(uint64_t col, uint64_t row, uint64_t columns,
+                  uint64_t rows, const uint8_t *cells, uint16_t cursor);
+
 #endif /* FUNNYOS_FB_H */

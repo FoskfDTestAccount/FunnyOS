@@ -14,6 +14,8 @@ DOS 在这里扮演两重角色：**设计参照系**（继承小内核、直白
 
 **M0 到 M4 已完成并通过验证**——引导闭环、内核基础设施、控制台与 Shell、纯软件 8086 解释器、以及 IBM PC 兼容机的固件。最新一版作为 **Pre-release** 发布在 [Releases](../../releases) 页，ISO 可以直接下载运行。
 
+**M5 正在进行，还没有发布**：进程模型已经可重入、一个程序能启动另一个程序（W1），以及**一个 guest 程序的文本页现在由解释器进程自己画到真实屏幕上**（W2，见下面第四节）。`make check` 现在跑七条路径。
+
 开机进入一个**交互式命令行**。Shell（FunnyCOM）是一个 **Ring 3 用户态进程**，跑在自己的地址空间里，所有能力都通过系统调用取得——它自己没有任何特权。
 
 已经能跑的东西：
@@ -22,7 +24,8 @@ DOS 在这里扮演两重角色：**设计参照系**（继承小内核、直白
 - **内存**——物理页帧分配器、页表管理（含 1 GiB / 2 MiB 大页拆分）、内核堆，每次启动跑一遍自检。
 - **中断与时间**——解析 ACPI MADT 找出中断控制器（而非硬编码地址），初始化本地 APIC 与 I/O APIC，把 8259 PIC 重映射出异常向量区间后屏蔽；时间基准是 100 Hz 的 LAPIC 定时器，频率以 8254 PIT 晶振为参考**实测标定**，每次启动用 TSC 复核。
 - **输入**——PS/2 键盘驱动，以及带回显与退格的行编辑。
-- **进程**——Ring 3 执行、私有地址空间、`int 0x80` 系统调用、故障隔离、**浮点（x87 与 SSE）**。
+- **进程**——Ring 3 执行、私有地址空间、`int 0x80` 系统调用、故障隔离、**浮点（x87 与 SSE）**；可重入的运行（一个程序能启动另一个并拿回它的退出码）。
+- **屏幕**——内核的日志和一个程序自己的文本页**共用同一块屏幕**，一次只有一个持有者；拿走它的程序可以画一整页 80×25 的字符与属性，还回来时日志自动重画。**panic 任何时候都能把屏幕抢回来**。
 - **文件**——一个只读的内存文件系统，文件内容就是编译进内核的字符串。
 - **Shell**——`dir` / `type` / `echo` / `help` / `ver` / `uptime` / `cls` / `exit`。
 
@@ -30,7 +33,7 @@ DOS 在这里扮演两重角色：**设计参照系**（继承小内核、直白
 
 **一个程序崩溃只杀死它自己。** 这是 FunnyOS 明确背离 DOS 的地方，也是整套设计存在的理由。测试套件里有一个专门的用例：让 Shell 去写一块没有映射的地址，然后断言内核报告这次错误、结束那个进程、并继续运行。
 
-测试规模：正常启动 25 项断言 × 两条固件路径，故障注入 9 项，键盘与 Shell 交互 17 项，用户程序 30 项（四种模式：正常启动、崩溃、主动退出、浮点自检）。此外构建本身会反汇编内核、校验它一个向量寄存器都没碰。全部由 `make check` 驱动。
+测试规模：`make check` 跑七条路径——两条固件路径的正常启动、故障注入、键盘与 Shell 交互、用户程序、8086 解释器，以及**把 framebuffer 读回来比对像素**的那一条。**每一条都在末尾报出自己跑了多少条断言**，因为写在这里的数字曾经和脚本对不上：一个只在散文里维护的数字，是没人会去跑的那一份。此外构建本身会反汇编内核、校验它一个向量寄存器都没碰。
 
 | | 交互式 Shell | 程序崩溃 |
 |---|---|---|
@@ -45,6 +48,10 @@ DOS 在这里扮演两重角色：**设计参照系**（继承小内核、直白
 **M3 已完成**：一个纯软件的 8086 解释器，全部 256 个操作码槽位，加 80186 扩展，加一个单步调试器。**它作为 Ring 3 进程运行在 FunnyOS 里**——以 `vm=1` 启动时，内核会跑起解释器，接上 16 MB 的 guest 内存，执行一段手工汇编的 guest 程序并把终态交给自动化断言（`make test-vm`）。验收标准「能执行手工汇编的二进制，寄存器与标志位状态正确」因此是可复现的，不是靠看屏幕。
 
 **M4 已完成**：IBM PC 兼容机的**固件**——中断向量表、宿主陷阱、中断投递，六个 BIOS 服务（10h/11h/12h/13h/16h/1Ah），以及那块程序可以直接读写的文本显存。验收标准「能跑一个自己写的、通过 BIOS 输出的 `.COM` 程序」达成了，而 `make test-vm` 断言的是**屏幕上那行字本身**——退出码对一台"跑了程序但什么都没画"的机器同样成立。**这一层是靠交叉审查验的**：五个模块各由一个没有写它的人独立审过，十七条发现里有四条是**作者自己的套件完全看不见**的——服务回不了 CF（`INT 13h` 的每次失败都长得像成功，而 24 个用例里 23 个看不见）、验收的断言只验了一半、语料声称的行为从没被走到、文档在代码改过之后还说反话。**交叉审查也不是终点**：审查之后又发现，其中一个服务在键盘缓冲区满时去写 `0040:0071`——那个字节是 **Ctrl-Break 标志**，不是它以为的溢出标志，写进去会让每个被丢掉的按键看起来像用户在按 Break。更值得记的是它怎么活下来的：树里当时**已经有一份裁定说这个写入是错的**，而那次裁定只改了文档、头文件和一个测试，**没碰实现**——于是缺陷留在代码里，还有测试钉着它。**它诚实地说没有证明什么，写在 DESIGN 的 M4 一节里。**
+
+**M5 进行中。** W1 是进程模型可重入（DESIGN §7.2 点名它是 M4 之后的第一件事，也是**唯一一件越晚做越贵的事**）：进出一个进程要保存还原的不是计划里写的两样而是**四样**——当前进程、当前 PML4、TSS 的内核栈指针、向量寄存器。验收是一条**可观测的不变量**而不是一句声明：内核在每次从 Ring 3 进来的定时器中断上检查那个帧落在**当前进程**的栈上，并报告三种结果（全对／有落错／**一个都没观测到**），因为"没有中断"会满足"没有落错"却什么都没检查；注入验证过它真的会红。W2 是**程序看得见**：屏幕成了可以被持有的东西，VM 进程自己把 guest 的文本页画到真实屏幕上，"并且看得见"这半句验收才第一次成立。
+
+**W2 长出了这一版唯一能看见屏幕的工具。** 串口日志能说的每一句话——guest 的页对、内核收到了、内核说它画在哪——**都和一个从没被写过的 framebuffer 相容**。所以 `make test-screen` 走了一条别的测试走不了的路：让程序把页留在屏幕上等一个按键，用 QEMU monitor 截屏，再由一个脚本**逐扫描线**比对每一个格子是不是内核那张字体里该有的形状、区块外有没有被动过、光标在不在 guest 的光标格上。它刻意**不假设调色板**——颜色是从屏幕上读出来的——代价是这个脚本的文件头写明了它**不检查调色板本身**。它的五种失败方式是**注入验证**的，各自报出不同的诊断，其中"每个字左移一个像素"那一条单独测过，因为其余四种都被别的检查先拦住了。
 
 操作码与内存模型的那四百多个用例**在宿主上跑**，不在 QEMU 里：解释器是纯逻辑，给它一块内存和几个字节它就能执行，所以 `cd dos && make test` 是毫秒级的。但**绿灯不算证据，除非证明它会红**——所以每一层都做过**变异测试**：往实现里种一个缺陷，看对应用例变不变红。三处独立活动共种了一百二十多处，每一条用例都被至少一个变异体弄红过。M4 之后这套做法有了工具：[`tools/verify-mutations.py`](tools/verify-mutations.py) 现在覆盖整个 8086 子系统，表里 **186 个变异体**。它防在三处关键的地方——基线不全绿就拒绝报告；**跑了却解析不到的套件也拒绝报告**（一个从报告里消失的套件和一个无话可说的套件长得一模一样）；以及一个**"变异体根本没改变二进制"的探针**，同一份源码编译两次必须字节一致，否则"二进制变了"什么都证明不了。**整场战役还没有跑完**，所以这里不声称任何覆盖结论。
 
@@ -84,7 +91,9 @@ make test-uefi  # 无头启动并断言（UEFI 路径）
 make test-all   # 两条固件路径都测
 make test-fault # 注入一次内核异常，检查诊断输出
 make test-input # 用 QEMU 的 sendkey 敲键盘，跑一遍 Shell 会话
-make test-user  # 三种方式结束一个用户进程：正常、崩溃、主动退出
+make test-user  # 五种方式结束一个用户进程：正常、崩溃、主动退出、浮点自检、派生
+make test-vm    # 在 Ring 3 跑 8086 解释器并断言；退出码与终态
+make test-screen # 截屏，把 framebuffer 的像素读回来逐格比对
 make user       # 只构建用户态程序，不构建内核
 ```
 
@@ -119,6 +128,7 @@ FunnyOS/
 │   ├── console/
 │   │   ├── serial.c             16550 UART 驱动（含回环自检）
 │   │   ├── fb.c                 帧缓冲文本控制台（光标、滚屏）
+│   │   ├── screen.c             屏幕的持有者：日志与一个程序的页共用一个显示
 │   │   ├── font8x16.c           内建点阵字库（由脚本生成，勿手改）
 │   │   ├── kbd.c                PS/2 键盘驱动与键码解码
 │   │   ├── console.c            行编辑：回显、退格、长度限制
@@ -145,7 +155,10 @@ FunnyOS/
 │   ├── run-qemu-test.sh         启动测试与断言
 │   ├── run-fault-test.sh        内核异常注入测试
 │   ├── run-input-test.sh        键盘与 Shell 交互测试
-│   ├── run-user-test.sh         用户进程三种结束方式的测试
+│   ├── run-user-test.sh         用户进程五种结束方式的测试
+│   ├── run-vm-test.sh           Ring 3 解释器：终态、屏幕交接、时钟
+│   ├── run-screen-test.sh       截屏并逐格比对 framebuffer
+│   ├── check-screen-pixels.py   判断截图里那一页是不是 guest 的内存
 │   ├── screenshot.sh            无头截图（启动画面）
 │   ├── screenshot-shell.sh      无头截图（Shell 会话中）
 │   ├── bin2c.py                 把用户态程序转成内核里的字节数组
@@ -252,6 +265,8 @@ See [docs/DESIGN.md](docs/DESIGN.md) for the full architecture (written in Chine
 
 **M0 through M4 are complete and verified** -- the boot chain, the kernel infrastructure, the console and shell, the software 8086 interpreter, and the firmware of an IBM PC compatible. The latest one is published as a **pre-release** on the [Releases](../../releases) page, with an ISO you can boot.
 
+**M5 is under way and not yet released.** Two pieces are done: the process model is re-entrant and a program can start another one (W1), and **a guest program's text page is now drawn onto the real screen by the interpreter process itself** (W2; section 4 below). `make check` runs seven paths.
+
 The machine boots into an **interactive command line**. The shell, FunnyCOM, is a **Ring 3 user-space process** with its own address space and no privileges of its own -- everything it does goes through a system call.
 
 What works:
@@ -260,7 +275,8 @@ What works:
 - **Memory** -- a physical frame allocator, page table management including 1 GiB and 2 MiB page splitting, and a kernel heap, all self-tested on every boot.
 - **Interrupts and time** -- the ACPI MADT is parsed to find the interrupt controllers rather than hardcoding their addresses, the local and I/O APICs are brought up, and the 8259 pair is remapped out of the exception vector range and masked. The time base is the LAPIC timer at 100 Hz, *measured* against the 8254 PIT's crystal and re-checked against the TSC on every boot.
 - **Input** -- a PS/2 keyboard driver, and a line discipline with echo and backspace.
-- **Processes** -- Ring 3 execution, private address spaces, `int 0x80` system calls, fault isolation, and **floating point** (x87 and SSE).
+- **Processes** -- Ring 3 execution, private address spaces, `int 0x80` system calls, fault isolation, **floating point** (x87 and SSE), and a re-entrant run loop that lets one program start another and get its exit code back.
+- **The screen** -- the kernel's log and a program's own text page **share one screen**, held by one of them at a time: a program that takes it can draw a whole 80x25 page of characters and attributes, and giving it back repaints the log. **A panic can take the screen back at any moment.**
 - **Files** -- a read-only in-memory filesystem whose contents are string literals compiled into the kernel.
 - **Shell** -- `dir`, `type`, `echo`, `help`, `ver`, `uptime`, `cls`, `exit`.
 
@@ -268,7 +284,7 @@ What works:
 
 **A crashing program kills only itself.** This is where FunnyOS deliberately departs from DOS, and it is the reason for the whole design. There is a test that makes the shell write to an address it has no mapping for, and asserts that the kernel reports the fault, ends that process, and carries on.
 
-Test coverage: 25 assertions per boot path across both firmware types, 9 more for fault injection, 17 for keyboard and shell interaction, and 30 for user programs across four modes (normal startup, fault, deliberate exit, and a floating point check). The build itself additionally disassembles the kernel and verifies it touches no vector register. All driven by `make check`.
+Test coverage: `make check` runs seven paths -- both firmware types booting normally, fault injection, keyboard and shell interaction, user programs, the 8086 interpreter, and one that **reads the framebuffer back and judges the pixels**. **Each path reports how many assertions it ran**, because the numbers that used to be written here had drifted away from the scripts: a number maintained only in prose is the copy nobody runs. The build additionally disassembles the kernel and verifies it touches no vector register.
 
 | | Interactive shell | Program crash |
 |---|---|---|
@@ -283,6 +299,10 @@ The same ISO in **VMware Workstation** (BIOS path, not QEMU):
 **M3 is done.** A software 8086 interpreter, all 256 opcode slots, the 80186 additions, and a single-step debugger. **It runs inside FunnyOS as a Ring 3 process** -- boot with `vm=1` and the kernel starts the interpreter, gives it 16 MB of guest memory, runs a hand-assembled guest and hands the terminal state to automated assertions (`make test-vm`). The acceptance criterion -- execute a hand-assembled binary with the registers and flags correct -- is therefore reproducible, not something somebody looked at.
 
 **M4 is done.** The firmware of an IBM PC compatible: the interrupt vector table, the host trap, interrupt delivery, six BIOS services (10h/11h/12h/13h/16h/1Ah), and the text memory a program can read and write directly. The acceptance criterion -- run a self-written `.COM` that outputs through the BIOS -- is met, and `make test-vm` asserts **the line on the screen itself**; an exit code would be satisfied by a machine that ran the program and drew nothing. **This layer was verified by cross-review**: every module was audited by someone who did not write it, and four of the seventeen findings were invisible to the author's own suite -- a service that could not return CF (so every `INT 13h` failure looked like success to 23 of 24 cases), an acceptance assertion that checked only half of what it claimed, a sample whose stated behaviour was never exercised, and documents still describing code that had moved on. **And cross-review was not the end of it either.** A later audit found one of the services writing `0040:0071` when the keyboard buffer filled. That byte is the **Ctrl-Break flag**, not the overflow flag the service took it for, and writing it makes every dropped keystroke look to a polling program like the user pressing Break. How it survived is the more useful part: the tree already contained a **ruling that the write was wrong**, and that ruling had changed the documentation, the header and one test -- but not the implementation, so the defect stayed in the code with a test pinned to it. What M4 honestly does not establish is in DESIGN's M4 section.
+
+**M5 is under way.** W1 made the process model re-entrant -- DESIGN 7.2 named it as the first job after M4 and as **the one thing that only gets more expensive to put off** -- and it turned out to be four pieces of machine state to save and restore rather than the two the plan named: the current process, the current PML4, the TSS kernel stack pointer, and the vector registers. Its acceptance is an **observable invariant** rather than a declaration: on every timer interrupt that arrives from Ring 3 the kernel asks whether the frame landed on the *running* process's kernel stack, and reports one of three things -- all of them did, some did not, or **none were seen**. The third is its own outcome because "no interrupt arrived" satisfies "none landed in the wrong place" without anything having been checked, and the assertion was verified by injection to actually go red. W2 is **a program becoming visible**: the screen is now a thing that can be held, and the interpreter process draws a guest's text page onto the real display itself -- which is the first time the "and appears" half of the acceptance sentence is true.
+
+**W2 grew the only instrument in this project that can see the screen.** Every sentence a serial log can say -- the guest's page is right, the kernel was handed it, the kernel says where it put it -- **is consistent with a framebuffer nobody ever wrote to.** So `make test-screen` takes a road no other test here can: it has the program leave its page up and wait for a key, captures a screendump through the QEMU monitor, and compares **scan line by scan line** whether each cell holds the shape the kernel's font has for it, whether anything outside the block was disturbed, and whether the cursor is on the guest's cursor cell. It deliberately **does not assume a palette** -- the colours are read off the screen -- and the price, stated in that script's own header, is that it **does not check the palette itself**. Its five failure modes were established by injection, each reporting a different diagnosis; the one where every glyph moves a single pixel was tested on its own, because the other four were all caught by a different check first.
 
 The four hundred-odd cases covering the opcodes and the memory model **run on the host**, not in QEMU: the interpreter is pure logic, and given a block of memory and some bytes it executes, so `cd dos && make test` answers in milliseconds. But **a green light is not evidence unless it can be shown to go red** -- so every layer was put through **mutation testing**: inject one defect, watch which case turns red. Three independent campaigns injected well over a hundred, and every case was turned red by at least one of them. Since M4 that practice has a tool: [`tools/verify-mutations.py`](tools/verify-mutations.py) now covers the whole 8086 subsystem, with **186 mutants** in its table. It guards three places that matter -- it refuses to report unless the pristine tree is green; it refuses if a suite ran whose output it could not parse, because a suite missing from the report looks exactly like a suite with nothing to say; and it probes whether the mutant changed the compiled code at all, since the same source built twice has to come out byte-identical and "the binary changed" otherwise says nothing. **The campaign has not been run to completion**, so no coverage claim is made here.
 
@@ -322,7 +342,9 @@ make test-uefi  # Boot headless and assert (UEFI path)
 make test-all   # Run both boot paths
 make test-fault # Inject a kernel fault and check the diagnostic
 make test-input # Type a shell session through QEMU's sendkey
-make test-user  # End a user process three ways: normally, by fault, by exit
+make test-user  # End a user process five ways: normally, fault, exit, floating point, spawning
+make test-vm    # Run the 8086 interpreter in Ring 3 and assert on what it leaves behind
+make test-screen # Take a screendump and judge the framebuffer, cell by cell
 make user       # Build just the user program, without the kernel
 ```
 
@@ -357,6 +379,7 @@ FunnyOS/
 │   ├── console/
 │   │   ├── serial.c             16550 UART driver with loopback self-test
 │   │   ├── fb.c                 Framebuffer text console (cursor, scrolling)
+│   │   ├── screen.c             Who is on the screen: the log and a program's page
 │   │   ├── font8x16.c           Built-in bitmap font (generated; do not edit)
 │   │   ├── kbd.c                PS/2 keyboard driver and scancode decoding
 │   │   ├── console.c            Line discipline: echo, backspace, length limit
@@ -383,7 +406,10 @@ FunnyOS/
 │   ├── run-qemu-test.sh         Boot test and assertions
 │   ├── run-fault-test.sh        Kernel fault-injection test
 │   ├── run-input-test.sh        Keyboard and shell interaction test
-│   ├── run-user-test.sh         The three ways a user process can end
+│   ├── run-user-test.sh         The five ways a user process can end
+│   ├── run-vm-test.sh           The Ring 3 interpreter: state, screen handover, clock
+│   ├── run-screen-test.sh       Screendump the machine and judge it cell by cell
+│   ├── check-screen-pixels.py   Decide whether that page is the guest's memory
 │   ├── screenshot.sh            Headless screendump of the boot
 │   ├── screenshot-shell.sh      Headless screendump mid-shell-session
 │   ├── bin2c.py                 Turn a user program into a byte array

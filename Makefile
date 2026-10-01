@@ -59,6 +59,7 @@ RUN_TEST  := $(TOOLS_DIR)/run-qemu-test.sh
 RUN_FAULT_TEST := $(TOOLS_DIR)/run-fault-test.sh
 RUN_INPUT_TEST := $(TOOLS_DIR)/run-input-test.sh
 RUN_USER_TEST  := $(TOOLS_DIR)/run-user-test.sh
+RUN_SCREEN_TEST := $(TOOLS_DIR)/run-screen-test.sh
 CHECK_VECTOR_REGS := $(TOOLS_DIR)/check-no-vector-regs.sh
 
 # ---------------------------------------------------------------------
@@ -235,7 +236,7 @@ OBJS := $(C_OBJS) $(ASM_OBJS) $(INIT_BLOB_OBJ)
 # ---------------------------------------------------------------------
 # Targets
 # ---------------------------------------------------------------------
-.PHONY: all user run test test-uefi test-all test-fault test-input test-user test-vm check export clean distclean help
+.PHONY: all user run test test-uefi test-all test-fault test-input test-user test-vm test-screen check export clean distclean help
 
 all: $(ISO)
 
@@ -455,6 +456,15 @@ test-vm: $(ISO)
 	@FUNYOS_BUILD_DIR=$(BUILD_DIR) \
 	    bash $(TOOLS_DIR)/run-vm-test.sh $(ISO) bios
 
+# Boot the machine with a display, leave a DOS program's page on the
+# screen, and read the pixels back out of a screendump. This is the only
+# test that can see the framebuffer: everything else reads serial, and
+# every claim a serial log can make about a screen is consistent with a
+# framebuffer nobody wrote to.
+test-screen: $(ISO)
+	@FUNYOS_BUILD_DIR=$(BUILD_DIR) \
+	    bash $(RUN_SCREEN_TEST) $(ISO)
+
 # Everything. Use this before committing.
 check: $(ISO)
 	@bash $(RUN_TEST) $(ISO) bios
@@ -464,6 +474,8 @@ check: $(ISO)
 	@bash $(RUN_USER_TEST) $(ISO) bios
 	@FUNYOS_BUILD_DIR=$(BUILD_DIR) \
 	    bash $(TOOLS_DIR)/run-vm-test.sh $(ISO) bios
+	@FUNYOS_BUILD_DIR=$(BUILD_DIR) \
+	    bash $(RUN_SCREEN_TEST) $(ISO)
 
 # Copy the ISO into the project directory so other emulators on Windows
 # can open it. Output goes to dist/ rather than the project root because
@@ -495,6 +507,7 @@ help:
 	@echo "  make test-input Type on the emulated keyboard and check the echo"
 	@echo "  make test-user  Load and run the user program in its modes"
 	@echo "  make test-vm    Run the 8086 interpreter in Ring 3 and assert"
+	@echo "  make test-screen Read the framebuffer back and judge the pixels"
 	@echo "  make check      Run every test above"
 	@echo "  make export     Copy the ISO into the project directory"
 	@echo "  make clean      Remove build artifacts"

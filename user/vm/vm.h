@@ -1,10 +1,9 @@
 /*
  * The 8086 interpreter running inside FunnyOS.
  *
- * One entry point. The kernel starts the shell with `vm=1` on its command
- * line, which reaches this as the process's startup argument -- the same
- * one-value mode mechanism the M2 self-tests use. There is no argument
- * vector yet and this does not need one.
+ * Two entry points, both of which the kernel reaches through the shell's
+ * startup argument: the self-test, and the acceptance case with the screen
+ * left standing for a photograph.
  */
 #ifndef FUNNYOS_USER_VM_H
 #define FUNNYOS_USER_VM_H
@@ -18,5 +17,16 @@
  * the QEMU test reads it there as well as in this function's output.
  */
 int vm_selftest(void);
+
+/*
+ * Run the acceptance case and leave the guest's page on the screen until a
+ * key arrives.
+ *
+ * The self-test gives the screen back when it is done, so there is no
+ * moment at which a screendump could be taken of it. This is that moment:
+ * one program, one page, up and unchanging until somebody types. See
+ * tools/run-screen-test.sh.
+ */
+int vm_screen_hold(void);
 
 #endif /* FUNNYOS_USER_VM_H */

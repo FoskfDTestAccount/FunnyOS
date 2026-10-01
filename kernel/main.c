@@ -643,6 +643,8 @@ void kmain(void)
             arg = 3;
         else if (strstr(cmdline, "vm=1"))
             arg = 4;
+        else if (strstr(cmdline, "vm=screen"))
+            arg = 7;
         else if (strstr(cmdline, "selftest=spawn"))
             arg = 5;
 

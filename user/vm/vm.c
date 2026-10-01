@@ -15,17 +15,42 @@
  * ---------------------------------------------------------------------
  * What is deliberately missing
  *
- * No second program, and no shell command. `g_current` is a single global
- * and `process_run()` is not reentrant, so a shell cannot start a process
- * from inside a process -- the shell already *is* the process. That is a
- * limitation of the M2 process model rather than of the emulator, and
- * lifting it is M4's work. M3 has to show that the operating system can
- * execute guest instructions; it does not have to show that the shell can
- * launch one.
+ * No shell command, and no file loading.
  *
- * No file loading either. The guest programs are the byte arrays below.
+ * The first used to be a limitation of the process model -- `g_current`
+ * was a single global and process_run() was not reentrant, so a shell
+ * could not start a process from inside a process. That was lifted in W1
+ * of M5 and this paragraph outlived it, still explaining a wall that is
+ * no longer there. What is still missing is the command in funnycom's
+ * table that would call into here.
+ *
+ * The second is unchanged: the guest programs are the byte arrays below.
  * SYS_OPEN and SYS_READ exist, but turning a file into a loaded .COM is
- * M5.
+ * W3 of M5.
+ *
+ * ---------------------------------------------------------------------
+ * Where the guest's screen goes
+ *
+ * This process takes the console's screen and paints the guest's text page
+ * onto it, through the kernel -- see screen.h on the kernel side and
+ * SYS_SCREEN_* in the system call header. The alternative was printing the
+ * page out as eighty characters and a newline, twenty-five times, into the
+ * console's scrolling log, which is what this file did until W2. It put
+ * the text on the screen in the sense that a printout is on a screen.
+ *
+ * The page is handed over in guest video memory's own layout, straight out
+ * of the guest's RAM at 0xB8000. Nothing is repacked on the way, which is
+ * what makes "what the screen shows is what the guest's memory holds" a
+ * property of two lines of code rather than of a drawing routine that
+ * could read memory and then draw something else.
+ *
+ * That is true while the pointer is only ever drawn from, and it is worth
+ * saying what it rests on: the kernel draws the page out of this process's
+ * memory during the call, and this process is alive and not running for
+ * the length of it. A screen that keeps pages around -- one with tabs, so
+ * that a page can be switched away from and back -- has to hold its own
+ * copy instead, and then the property is weaker and needs its own
+ * argument. See docs/tasks/M4-G-mouse-tabs.md, section two, G3.
  *
  * ---------------------------------------------------------------------
  * Where the guest bytes come from
@@ -142,6 +167,20 @@
  * the section that is mapped and not loaded. See the note above, and the
  * one on .guestram in user/link.ld.
  */
+/*
+ * The emulator's "no cursor" and the console's have to be one value.
+ *
+ * bios10_cursor_cell answers in the emulator's vocabulary and the answer
+ * is handed to the kernel, which reads it in its own -- so a disagreement
+ * here is a guest whose cursor is drawn at cell 65535 rather than not
+ * drawn at all, or the reverse. The emulator cannot see the kernel's
+ * headers and should not, so this is where the two are introduced, and the
+ * compiler is asked whether they still match.
+ */
+_Static_assert(VM86_DISPLAY_NO_CURSOR == SCREEN_NO_CURSOR,
+               "the emulator and the system call interface disagree about "
+               "what 'no cursor' is");
+
 static uint8_t g_guest_ram[GUEST_RAM_BYTES]
     __attribute__((section(".guestram")));
 
@@ -419,17 +458,29 @@ static const struct guest_case g_cases[] = {
 #define VM_PAGE_CELLS (VM86_TEXT_COLUMNS * VM86_TEXT_ROWS)
 
 /*
- * The display, which is this console.
+ * The display, which is the console's screen, borrowed.
  *
  * Not driven by the services. A program that writes 0xB8000 directly never
  * passes through one -- direct.asm does exactly that -- so the host reads
  * the page on its own schedule, which is what display.h's header argues
  * for and the only arrangement in which a direct write is visible at all.
+ *
+ * `frame` is the last page handed to the kernel, kept so that a page which
+ * has not changed is not presented again: each present is a system call
+ * and a rectangle of the framebuffer, and a guest that is waiting for the
+ * clock presents nothing for hundreds of turns. The cursor is part of what
+ * is compared, because the guest's cursor is not in the page -- it is a
+ * register the page cannot show -- and a run where only the cursor moved
+ * is a run where the screen still has to be told.
  */
 struct vm_screen {
     const struct bios10_state *video;
-    uint8_t                    frame[VM_PAGE_CELLS * 2u];
-    bool                       drawn;
+
+    uint8_t  frame[VM_PAGE_CELLS * 2u];
+    uint16_t cursor;
+    bool     drawn;      /* `frame` holds a page                             */
+
+    bool     holding;    /* this process has the console's screen            */
 };
 
 static struct bios10_state g_video;
@@ -437,6 +488,17 @@ static struct bios16_state g_keyboard;
 static struct bios1a_state g_clock;
 static struct vm_screen    g_screen;
 static struct vm86_display g_display;
+
+/*
+ * Pages handed to the kernel and pages it refused, over the whole run.
+ *
+ * Counted rather than only reported, because the interesting failure is
+ * the quiet one: a run in which nothing was ever presented passes every
+ * assertion about the page the guest left in its own memory. See
+ * check_screen.
+ */
+static unsigned g_presents;
+static unsigned g_refused;
 
 /*
  * The machine itself, at file scope and not on run_corpus's stack.
@@ -485,102 +547,58 @@ static bool frame_same(const uint8_t *a, const uint8_t *b, uint32_t count)
 }
 
 /*
- * What the display last drew, one row at a time, exactly as it was written
- * out.
+ * Hand the guest's page to the kernel, if anything changed.
  *
- * Kept because "the line reached the screen" is not a statement anybody
- * can check by looking at the frame the backend copied: a backend that
- * ignored the guest's memory and printed a string of its own would satisfy
- * it. What can be checked is that the rows drawn ARE the guest's screen,
- * and that needs the rows as they went out.
- */
-static char g_drawn[BIOS10_ROWS][VM86_TEXT_COLUMNS + 1u];
-
-/*
- * One row at a time: the characters, and the attributes dropped.
+ * The page pointer comes from bios10_active_page and points into the
+ * guest's own RAM, so what the kernel is given is literally the memory a
+ * DOS program wrote -- not a transcription of it. There is no repacking
+ * here and no attribute lookup: the kernel reads the same two bytes per
+ * cell that the guest does.
  *
- * A console has one colour and the guest's attributes select a palette
- * this machine does not have, so what can be shown is the text -- which is
- * what the acceptance sentence is about. Characters outside printable
- * ASCII become spaces rather than being written out: a real screen shows a
- * glyph for most of them, a terminal would interpret them, and a control
- * character in a text page turning into a cursor movement is a worse
- * answer than a blank.
+ * A backend that draws nothing is what this replaced. Until W2 this
+ * function formatted each of the twenty-five rows into a string and
+ * printed it into the console's log, and the thing that made that wrong is
+ * not that it was ugly: the log scrolls, so the guest's screen went past
+ * like a printout, and the second frame was appended under the first.
  */
-static void draw_frame(const struct bios10_state *video, const uint8_t *cells)
-{
-    char line[VM86_TEXT_COLUMNS + 1u];
-
-    if (video->columns == 0 || video->columns > VM86_TEXT_COLUMNS)
-        return;
-
-    /*
-     * Cleared before drawing, so that what this records is only what THIS
-     * frame put on the screen.
-     *
-     * Without it, a backend that drew some rows and skipped the rest would
-     * leave the skipped rows holding the previous frame's text, and a
-     * check of "what was drawn against what the guest's memory holds"
-     * would pass for every row whose contents had not changed since. That
-     * is exactly the shape of hole this whole arrangement exists to close:
-     * a screen nobody drew, agreeing with the guest by being out of date.
-     */
-    for (uint16_t row = 0; row < BIOS10_ROWS; row++)
-        for (uint16_t col = 0; col <= video->columns; col++)
-            g_drawn[row][col] = '\0';
-
-    for (uint16_t row = 0; row < BIOS10_ROWS; row++) {
-        for (uint16_t col = 0; col < video->columns; col++) {
-            uint8_t ch = cells[(row * video->columns + col) * 2u];
-
-            line[col] = (ch >= 0x20u && ch < 0x7Fu) ? (char)ch : ' ';
-        }
-
-        line[video->columns] = '\0';
-
-        for (uint16_t col = 0; col <= video->columns; col++)
-            g_drawn[row][col] = line[col];
-
-        uputsln(line);
-    }
-}
-
 static void screen_present(void *ctx, const uint8_t *cells, uint16_t cursor)
 {
     struct vm_screen *screen = ctx;
-
-    /*
-     * The cursor is not drawn.
-     *
-     * A guest cursor is a cell index and this console has no addressing, so
-     * the honest answer is that this backend shows the text and nothing
-     * else -- including when the guest has turned its cursor off, which is
-     * why VM86_DISPLAY_NO_CURSOR needs no branch here. display.h leaves
-     * what the cursor looks like to the host, and this host has nowhere to
-     * put one.
-     */
-    (void)cursor;
+    unsigned          columns;
+    size_t            bytes;
 
     if (!cells || !screen->video)
         return;
 
-    /*
-     * One redraw per change, not one per call. A program that prints
-     * character by character changes the page nearly every slice, and two
-     * slices that changed nothing produce the same 4000 bytes and leave
-     * the console alone. The comparison is of the whole page, so this is
-     * exactly the "redraw everything, unless nothing moved" the task book
-     * asks about -- not a per-cell diff with its own bugs.
-     */
-    if (screen->drawn &&
-        frame_same(screen->frame, cells, (uint32_t)sizeof screen->frame))
+    columns = screen->video->columns;
+    if (columns == 0 || columns > VM86_TEXT_COLUMNS)
         return;
 
-    for (uint32_t i = 0; i < sizeof screen->frame; i++)
+    bytes = (size_t)columns * BIOS10_ROWS * 2u;
+
+    if (screen->drawn && screen->cursor == cursor &&
+        frame_same(screen->frame, cells, (uint32_t)bytes))
+        return;
+
+    for (size_t i = 0; i < bytes; i++)
         screen->frame[i] = cells[i];
 
-    screen->drawn = true;
-    draw_frame(screen->video, cells);
+    screen->drawn  = true;
+    screen->cursor = cursor;
+
+    /*
+     * Nothing is counted when the screen is not this process's. A run with
+     * no console still has to work -- the guest's page is asserted out of
+     * guest memory whatever happens to the display -- and a count of
+     * presents that never happened would make that look like success.
+     */
+    if (!screen->holding)
+        return;
+
+    g_presents++;
+
+    if (u_screen_present(cells, columns, cursor) != 0)
+        g_refused++;
 }
 
 static void present(const struct vm86_cpu *cpu)
@@ -638,8 +656,15 @@ static void machine_build(struct vm86_mem *mem, struct vm86_cpu *cpu,
     bios16_reset(&g_keyboard);
     bios1a_reset(&g_clock);
 
+    /*
+     * `drawn` is cleared so that the first present of a case reaches the
+     * kernel whatever the previous case left in `frame`, and `holding` is
+     * deliberately not: the console, once taken, is this process's across
+     * every case in the run.
+     */
     g_screen.video   = &g_video;
     g_screen.drawn   = false;
+    g_screen.cursor  = VM86_DISPLAY_NO_CURSOR;
     g_display.present = screen_present;
     g_display.ctx     = &g_screen;
 
@@ -1090,55 +1115,128 @@ static void check_page(const char *what, const char *message, uint32_t length,
 }
 
 /*
- * What the display drew, against what the guest's memory holds.
+ * What the display was handed, at the point where it matters.
  *
- * This is the assertion a backend that does not read video memory cannot
- * pass. "The guest's line reached the screen" says only that something
- * emitted that string, and something can: a draw_frame() that ignored its
- * argument and printed a line of its own satisfied it with every other
- * assertion green, which is how this was found.
+ * This replaces an assertion that compared the rows the backend printed
+ * against the guest's memory. That check is gone, and not because it
+ * stopped being interesting: the question it asked is answered by a much
+ * shorter argument now. The backend is handed the address of the guest's
+ * page and passes that address to the kernel, which draws out of it during
+ * the call -- so there is no transcription step for a drawing routine to
+ * get wrong.
  *
- * A screen that is a picture of the guest's memory has to be reproducible
- * from the guest's memory, so this reads the page itself -- independently
- * of the copy the backend kept, and independently of anything the backend
- * recorded -- and compares it with the rows that actually went out.
+ * What that argument rests on is written down at the top of this file and
+ * is not unconditional: it holds while the page is drawn from the caller's
+ * memory, which is today, and stops holding the day the console keeps
+ * pages of its own.
  *
- * Characters only. This console has one colour, the attributes are dropped
- * on purpose, and what is being compared is what a screen could show.
+ * What can still go wrong is quieter, and this is what watches for it. A
+ * run in which nothing was ever presented passes every assertion about the
+ * page the guest left behind, because that page is in guest memory and
+ * this process can read it whether or not anybody was told about it. So
+ * the count is the assertion, and a zero is reported as its own outcome
+ * rather than as a pass -- the same shape as the kernel's stack check, for
+ * the same reason.
+ *
+ * The pixels are a different question and this cannot answer it. See
+ * tools/run-screen-test.sh, which reads them out of a screendump.
  */
-static void check_drawn(const char *what, const struct vm86_cpu *cpu,
-                        unsigned *checks, unsigned *failures)
+static void check_screen(const char *what, unsigned pages, unsigned refused,
+                         unsigned *checks, unsigned *failures)
 {
-    const uint8_t *page    = bios10_active_page(cpu, &g_video);
-    uint16_t       columns = g_video.columns;
-
     (*checks)++;
 
-    if (!page || columns == 0 || columns > VM86_TEXT_COLUMNS) {
-        uprintf("      FAIL  %s: there is no page to compare the drawn "
-                "rows with\n", what);
+    if (pages == 0) {
+        uprintf("      FAIL  %s: NOTHING WAS PRESENTED -- the guest ran and "
+                "the console was never handed a page, so there is nothing to "
+                "say about the screen at all\n", what);
         (*failures)++;
         return;
     }
 
-    for (uint16_t row = 0; row < BIOS10_ROWS; row++) {
-        for (uint16_t col = 0; col < columns; col++) {
-            uint8_t ch   = page[((uint32_t)row * columns + col) * 2u];
-            char    want = (ch >= 0x20u && ch < 0x7Fu) ? (char)ch : ' ';
-
-            if (g_drawn[row][col] == want)
-                continue;
-
-            uprintf("      FAIL  %s: row %u column %u was drawn as %02X and "
-                    "the screen should show %02X there (the page holds "
-                    "%02X) -- the screen is not a picture of the guest's "
-                    "memory\n", what, (unsigned)row, (unsigned)col,
-                    (unsigned char)g_drawn[row][col], (unsigned char)want,
-                    (unsigned)ch);
-            (*failures)++;
-            return;
-        }
+    if (refused) {
+        uprintf("      FAIL  %s: the kernel refused %u of the %u page(s) it "
+                "was handed\n", what, refused, pages);
+        (*failures)++;
+        return;
     }
+
+    uprintf("  screen : %s -- %u page(s) presented, none refused\n",
+            what, pages);
+}
+
+/*
+ * The first row of the page the guest left, read out of the guest's own
+ * memory.
+ *
+ * This is what puts the acceptance sentence's text into the serial log now
+ * that the page is no longer printed a row at a time. It is a report and
+ * not an assertion: it says what the guest's memory holds, which
+ * check_page above has already asserted cell by cell against what the
+ * manual and the sample's own header say. Whether any of it reached a
+ * framebuffer is the question the screendump answers.
+ */
+static void report_top_row(const char *what, const struct vm86_cpu *cpu)
+{
+    const uint8_t *page    = bios10_active_page(cpu, &g_video);
+    uint16_t       columns = g_video.columns;
+    char           line[VM86_TEXT_COLUMNS + 1u];
+
+    if (!page || columns == 0 || columns > VM86_TEXT_COLUMNS)
+        return;
+
+    for (uint16_t col = 0; col < columns; col++) {
+        uint8_t ch = page[col * 2u];
+
+        line[col] = (ch >= 0x20u && ch < 0x7Fu) ? (char)ch : ' ';
+    }
+
+    line[columns] = '\0';
+
+    uprintf("  screen : %s %ux%u, row 0 = \"%s\"\n", what,
+            (unsigned)columns, (unsigned)BIOS10_ROWS, line);
+}
+
+/*
+ * Take the console's screen, and give it back.
+ *
+ * A failure is reported and not treated as fatal: everything this file
+ * asserts about the guest's page is about the guest's memory, and a
+ * machine with no framebuffer still has to be able to check that. What is
+ * not allowed is a run that could not take the screen and then reporting
+ * the screen as fine -- which is what the flag is for, and why
+ * screen_present counts presents only while it is set.
+ */
+static bool screen_take(void)
+{
+    int problem = u_screen_acquire();
+
+    if (problem != 0) {
+        uprintf("  screen : the console is NOT AVAILABLE (%d) -- the guest's "
+                "screen cannot be shown, and nothing below tests a "
+                "display\n", problem);
+        return false;
+    }
+
+    g_screen.holding = true;
+
+    uprintf("  screen : the console screen is this program's until the end "
+            "of the run\n");
+
+    return true;
+}
+
+static void screen_give_back(void)
+{
+    if (!g_screen.holding)
+        return;
+
+    g_screen.holding = false;
+
+    if (u_screen_release() != 0)
+        uputs("  screen : the kernel would not take the screen back\n");
+    else
+        uputs("  screen : the console screen has been given back\n");
 }
 
 /*
@@ -1167,6 +1265,11 @@ static bool run_acceptance(void)
     unsigned        checks   = 0;
     unsigned        failures = 0;
     unsigned        before;
+    unsigned        pages;
+    unsigned        refused;
+
+    pages   = g_presents;
+    refused = g_refused;
 
     if (!run_corpus("hello", vm_corpus_hello,
                     (uint32_t)vm_corpus_hello_size)) {
@@ -1176,11 +1279,15 @@ static bool run_acceptance(void)
 
     check_page("hello", TEXT, text_length, VM86_ATTR_DEFAULT,
                ' ', VM86_ATTR_DEFAULT, &g_cpu, &checks, &failures);
-    check_drawn("hello", &g_cpu, &checks, &failures);
+    check_screen("hello", g_presents - pages, g_refused - refused,
+                 &checks, &failures);
+    report_top_row("hello", &g_cpu);
 
     uprintf("  VM: case hello: %s\n", failures ? "FAIL" : "PASS");
 
-    before = failures;
+    before  = failures;
+    pages   = g_presents;
+    refused = g_refused;
 
     if (!run_corpus("direct", vm_corpus_direct,
                     (uint32_t)vm_corpus_direct_size)) {
@@ -1200,15 +1307,22 @@ static bool run_acceptance(void)
                0x00, 0x00, &g_cpu, &checks, &failures);
 
     /*
-     * M4-8, and this is the assertion that can see it. hello.asm's
-     * characters reach the screen through a service and direct.asm's never
-     * pass through one: a display kept as a second copy of the screen
-     * would still show hello and would not show direct. What says the two
-     * paths end in the same place is the drawn rows being a picture of the
-     * guest's memory -- for the program that used the BIOS and, here, for
-     * the one that did not.
+     * M4-8, which was found by a display that kept a second copy of the
+     * screen: such a display would still show hello.asm, whose characters
+     * arrive through a service, and would not show direct.asm, whose never
+     * pass through one.
+     *
+     * The pair of checks below is what still catches that, and it catches
+     * it for a different reason than the old one did. The page is what the
+     * guest's memory holds -- asserted above, for both programs, cell by
+     * cell -- and the present count is what says the display was told about
+     * it. A display that only ever learned about pages that came through a
+     * service would present once here and not twice, and direct.asm's
+     * twenty-two cells are in a page nothing else would have shown.
      */
-    check_drawn("direct (M4-8)", &g_cpu, &checks, &failures);
+    check_screen("direct (M4-8)", g_presents - pages, g_refused - refused,
+                 &checks, &failures);
+    report_top_row("direct", &g_cpu);
 
     uprintf("  VM: case direct: %s\n", failures == before ? "PASS" : "FAIL");
     uprintf("  checks : %u ok, %u failed\n", checks - failures, failures);
@@ -1301,6 +1415,8 @@ static bool run_ticks_case(void)
 {
     unsigned        checks   = 0;
     unsigned        failures = 0;
+    unsigned        pages;
+    unsigned        refused;
     unsigned long   started;
     unsigned long   elapsed;
     uint32_t        bda;
@@ -1311,6 +1427,8 @@ static bool run_ticks_case(void)
 
     started = u_uptime_ms();
     g_ms_advanced = 0;
+    pages   = g_presents;
+    refused = g_refused;
 
     if (!run_corpus("timer", vm_corpus_timer,
                     (uint32_t)vm_corpus_timer_size)) {
@@ -1353,7 +1471,8 @@ static bool run_ticks_case(void)
 
     check_page("timer", shown, 1u, VM86_ATTR_DEFAULT, ' ', VM86_ATTR_DEFAULT,
                &g_cpu, &checks, &failures);
-    check_drawn("timer", &g_cpu, &checks, &failures);
+    check_screen("timer", g_presents - pages, g_refused - refused,
+                 &checks, &failures);
 
     /*
      * Two questions that used to share one message, and they point at
@@ -1469,11 +1588,107 @@ int vm_selftest(void)
      */
     uputs("\n[8086 machine]\n");
 
+    /*
+     * The console is taken here rather than at the top of the file: what
+     * runs above this line is arithmetic on a processor with no devices,
+     * and its output belongs in the log with the rest of the report.
+     *
+     * A machine that cannot give the screen over is a machine where the
+     * acceptance sentence above is not met, so it fails the run -- and it
+     * is said plainly rather than left to the per-case counts, because
+     * "the console was busy" and "the display was never reached" are
+     * different faults with different causes.
+     */
+    bool have_screen = screen_take();
+
     ok = run_acceptance() && ok;
     ok = run_ticks_case() && ok;
 
+    screen_give_back();
+
+    ok = have_screen && ok;
+
     uprintf("\n  VM: RESULT %s\n", ok ? "PASS" : "FAIL");
     uprintf("  VM: took %u ms\n", (unsigned)(u_uptime_ms() - started));
+    uprintf("  screen : %u page(s) presented in total, %u refused\n",
+            g_presents, g_refused);
 
     return ok ? 0 : 1;
+}
+
+/*
+ * The acceptance case, with the screen left up.
+ *
+ * This exists for one reason: a screendump has to be taken while the page
+ * is on the screen, and the run above gives the screen back as soon as it
+ * is done -- so there is no moment a photograph could be taken at.
+ *
+ * Waiting for a key is how that moment is made, and it is not a trick. A
+ * DOS program that finishes by waiting for a keypress is the most ordinary
+ * thing there is, and the alternative -- a program that spins for a while
+ * and hopes somebody looked -- is a test that would fail on a slow machine
+ * and pass on a fast one. A key that never comes is a screen that never
+ * changes, which is what makes tools/run-screen-test.sh able to look at it
+ * whenever it gets around to it.
+ *
+ * The counters below are the same ones the run above uses, reported for
+ * the same reason: a page that was never presented would leave the
+ * assertions about the guest's memory green and the screen empty.
+ */
+int vm_screen_hold(void)
+{
+    static const char TEXT[] = "M4 hello from the BIOS";
+    const uint32_t text_length = (uint32_t)(sizeof TEXT - 1u);
+
+    unsigned checks   = 0;
+    unsigned failures = 0;
+
+    uputs("\n[vm86 screen]\n");
+
+    if (!screen_take())
+        return 1;
+
+    if (!run_corpus("hello", vm_corpus_hello,
+                    (uint32_t)vm_corpus_hello_size)) {
+        uprintf("  VM: case hello: FAIL\n");
+        screen_give_back();
+        return 1;
+    }
+
+    check_page("hello", TEXT, text_length, VM86_ATTR_DEFAULT,
+               ' ', VM86_ATTR_DEFAULT, &g_cpu, &checks, &failures);
+    check_screen("hello", g_presents, g_refused, &checks, &failures);
+    report_top_row("hello", &g_cpu);
+
+    uprintf("  screen : the cursor is at cell %u\n",
+            (unsigned)bios10_cursor_cell(&g_cpu, &g_video));
+
+    uprintf("  VM: case hello: %s\n", failures ? "FAIL" : "PASS");
+    uprintf("  checks : %u ok, %u failed\n", checks - failures, failures);
+    uprintf("  VM: RESULT %s\n", failures ? "FAIL" : "PASS");
+
+    if (failures) {
+        screen_give_back();
+        return 1;
+    }
+
+    uprintf("  screen : the page stays up until a key arrives\n");
+    uflush();
+
+    /*
+     * The hold. A key that never arrives leaves this here for as long as
+     * the machine is up, which is the point; a key that does arrive is
+     * somebody at a keyboard, and then the console comes back.
+     *
+     * A zero from u_getkey means the kernel had no key to give, which it
+     * only says when interrupts are off -- so this can spin rather than
+     * block. Spinning is still a screen that does not change, and the
+     * alternative is returning and taking the page down.
+     */
+    while (u_getkey() == 0)
+        ;
+
+    screen_give_back();
+
+    return 0;
 }

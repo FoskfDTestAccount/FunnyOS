@@ -63,6 +63,17 @@
 #define ARG_SPAWN_TEST  5
 #define ARG_SPAWN_CHILD 6
 
+/*
+ * The 8086 interpreter again, but leaving its screen up instead of giving
+ * it back when the run is over. `vm=screen` on the kernel command line.
+ *
+ * The only reason this is a mode rather than a flag on the one above is
+ * that it never returns until a key arrives, so nothing that expects the
+ * run to finish can ask for it. tools/run-screen-test.sh photographs the
+ * screen while it waits.
+ */
+#define ARG_VM_SCREEN   7
+
 /* Deliberately not zero, for the same reason EXIT_TEST_CODE is not. */
 #define SPAWN_CHILD_CODE 42
 
@@ -583,6 +594,12 @@ int u_main(uint64_t arg)
         /* The exit code is the interpreter's verdict, so it travels back
          * to the kernel and shows up in the boot log as the result. */
         return vm_selftest();
+    }
+
+    if (arg == ARG_VM_SCREEN) {
+        /* Same interpreter, but this one holds the screen until somebody
+         * types. It is the moment a screendump can be taken at. */
+        return vm_screen_hold();
     }
 
     banner();
