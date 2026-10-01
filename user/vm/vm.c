@@ -46,12 +46,30 @@
  * that consists of somebody looking at a register dump is not a test.
  */
 #include <vm/vm.h>
+#include <vm/corpus.h>
 
 #include <libu/libu.h>
 
 #include <vm86/cpu.h>
+#include <vm86/display.h>
+#include <vm86/firmware.h>
+#include <vm86/host.h>
 #include <vm86/mem.h>
 #include <vm86/ops.h>
+
+/*
+ * The four services.
+ *
+ * Their implementations are already part of this image -- the top-level
+ * Makefile globs dos/bios and dos/intr into the user build the same way
+ * dos/Makefile globs them into the host one -- so all this file needs from
+ * them is their headers. Those are reached by relative path because the
+ * user build's include path reaches dos/include and not dos/ itself.
+ */
+#include "../../dos/bios/bios10.h"
+#include "../../dos/bios/bios13.h"
+#include "../../dos/bios/bios16.h"
+#include "../../dos/bios/bios1a.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -331,6 +349,214 @@ static const struct guest_case g_cases[] = {
 #define CASE_COUNT (sizeof(g_cases) / sizeof(g_cases[0]))
 
 /* ------------------------------------------------------------------ */
+/* The machine: firmware, four services, and a screen                  */
+/* ------------------------------------------------------------------ */
+
+/*
+ * M3 ran guest bytes on a bare processor: step until the machine stops,
+ * and the terminal state is the whole answer. M4's acceptance sentence is
+ * not about a processor, it is about a computer -- a .COM printing through
+ * the BIOS and appearing on a screen -- and that needs what a PC has above
+ * the chip: an interrupt vector table, four services with devices behind
+ * them, and something that draws.
+ *
+ * All of it is in dos/ and already compiled into this image. What is here
+ * is the part that belongs to this program. The four devices are static
+ * storage because Ring 3 has no heap, and the display is this console.
+ */
+
+/*
+ * How long a slice is, and how many of them before the guest is called a
+ * runaway.
+ *
+ * A slice is the host's unit of attention: the run loop returns when it is
+ * used up, and the host refreshes the screen, advances the clock and gets
+ * out of the way. Too long and the machine stops looking like a machine;
+ * too short and the interpreter spends its time in the loop rather than in
+ * the guest. A quarter of a thousand instructions is small enough that a
+ * program that prints is still drawn while it prints, and large enough
+ * that the per-slice work is not the run.
+ *
+ * The count is the backstop, for the same reason GUEST_INSN_LIMIT is: a
+ * guest that never finishes has to be reported as one that never finished.
+ */
+#define VM_SLICE_STEPS 250u
+#define VM_SLICE_COUNT 400u
+
+/* The largest page this machine has: eighty columns of twenty-five rows.
+ * How many cells the host must READ is not this -- it is `columns * 25`,
+ * and a 40-column mode is a legal mode whose page is half the width. */
+#define VM_PAGE_CELLS (VM86_TEXT_COLUMNS * VM86_TEXT_ROWS)
+
+/*
+ * The display, which is this console.
+ *
+ * Not driven by the services. A program that writes 0xB8000 directly never
+ * passes through one -- direct.asm does exactly that -- so the host reads
+ * the page on its own schedule, which is what display.h's header argues
+ * for and the only arrangement in which a direct write is visible at all.
+ */
+struct vm_screen {
+    const struct bios10_state *video;
+    uint8_t                    frame[VM_PAGE_CELLS * 2u];
+    bool                       drawn;
+};
+
+static struct bios10_state g_video;
+static struct bios16_state g_keyboard;
+static struct bios1a_state g_clock;
+static struct vm_screen    g_screen;
+static struct vm86_display g_display;
+
+/* How much time the host handed the clock over the whole run. Asserted
+ * rather than merely printed: it is the host's own account of the time
+ * that really passed, taken from the kernel's millisecond counter, and it
+ * is not derived from anything the clock said -- which is what makes "five
+ * ticks took 275 ms" a statement about the rate rather than a tautology. */
+static uint32_t g_ms_advanced;
+
+static bool frame_same(const uint8_t *a, const uint8_t *b, uint32_t count)
+{
+    for (uint32_t i = 0; i < count; i++)
+        if (a[i] != b[i])
+            return false;
+
+    return true;
+}
+
+/*
+ * One row at a time: the characters, and the attributes dropped.
+ *
+ * A console has one colour and the guest's attributes select a palette
+ * this machine does not have, so what can be shown is the text -- which is
+ * what the acceptance sentence is about. Characters outside printable
+ * ASCII become spaces rather than being written out: a real screen shows a
+ * glyph for most of them, a terminal would interpret them, and a control
+ * character in a text page turning into a cursor movement is a worse
+ * answer than a blank.
+ */
+static void draw_frame(const struct bios10_state *video, const uint8_t *cells)
+{
+    char line[VM86_TEXT_COLUMNS + 1u];
+
+    if (video->columns == 0 || video->columns > VM86_TEXT_COLUMNS)
+        return;
+
+    for (uint16_t row = 0; row < BIOS10_ROWS; row++) {
+        for (uint16_t col = 0; col < video->columns; col++) {
+            uint8_t ch = cells[(row * video->columns + col) * 2u];
+
+            line[col] = (ch >= 0x20u && ch < 0x7Fu) ? (char)ch : ' ';
+        }
+
+        line[video->columns] = '\0';
+        uputsln(line);
+    }
+}
+
+static void screen_present(void *ctx, const uint8_t *cells, uint16_t cursor)
+{
+    struct vm_screen *screen = ctx;
+
+    /*
+     * The cursor is not drawn.
+     *
+     * A guest cursor is a cell index and this console has no addressing, so
+     * the honest answer is that this backend shows the text and nothing
+     * else -- including when the guest has turned its cursor off, which is
+     * why VM86_DISPLAY_NO_CURSOR needs no branch here. display.h leaves
+     * what the cursor looks like to the host, and this host has nowhere to
+     * put one.
+     */
+    (void)cursor;
+
+    if (!cells || !screen->video)
+        return;
+
+    /*
+     * One redraw per change, not one per call. A program that prints
+     * character by character changes the page nearly every slice, and two
+     * slices that changed nothing produce the same 4000 bytes and leave
+     * the console alone. The comparison is of the whole page, so this is
+     * exactly the "redraw everything, unless nothing moved" the task book
+     * asks about -- not a per-cell diff with its own bugs.
+     */
+    if (screen->drawn &&
+        frame_same(screen->frame, cells, (uint32_t)sizeof screen->frame))
+        return;
+
+    for (uint32_t i = 0; i < sizeof screen->frame; i++)
+        screen->frame[i] = cells[i];
+
+    screen->drawn = true;
+    draw_frame(screen->video, cells);
+}
+
+static void present(const struct vm86_cpu *cpu)
+{
+    vm86_display_present(&g_display,
+                         bios10_active_page(cpu, &g_video),
+                         bios10_cursor_cell(cpu, &g_video));
+}
+
+/*
+ * Power the machine on and load one program into it.
+ *
+ * The firmware goes in BEFORE the program, and that is not cosmetic: it
+ * builds the interrupt vector table at 0x0000-0x03FF, and the corpus
+ * convention loads a program at linear 0x100 with CS = 0. Loading first
+ * buries the program's own first bytes under the table, and the symptom is
+ * a machine executing vector-table bytes.
+ *
+ * The disk is registered with a NULL context, which is what bios13.h calls
+ * a machine with no disk: every function answers with the status that says
+ * so rather than being silently omitted.
+ */
+static void machine_build(struct vm86_mem *mem, struct vm86_cpu *cpu,
+                          const uint8_t *image, uint32_t size)
+{
+    vm86_mem_attach(mem, g_guest_ram, (uint32_t)GUEST_RAM_BYTES);
+    vm86_mem_clear(mem);
+    vm86_reset(cpu, mem);
+
+    vm86_clear_services();
+    vm86_install_firmware(cpu);
+
+    for (uint32_t i = 0; i < size; i++)
+        vm86_mem_write8(mem, GUEST_LOAD_ADDRESS + i, image[i]);
+
+    vm86_set_seg(cpu, VM86_CS, 0);
+    vm86_set_seg(cpu, VM86_DS, 0);
+    vm86_set_seg(cpu, VM86_ES, 0);
+    vm86_set_seg(cpu, VM86_SS, 0);
+    vm86_flush_segments(cpu);
+
+    cpu->ip = GUEST_LOAD_ADDRESS;
+    cpu->sp = GUEST_STACK_TOP;
+
+    /*
+     * The services' own state has to be stood up here; the data area the
+     * firmware wrote is not the same thing. The mode, the cursor and the
+     * page are this struct's until a service changes them.
+     */
+    bios10_reset(&g_video);
+    bios16_reset(&g_keyboard);
+    bios1a_reset(&g_clock);
+
+    g_screen.video   = &g_video;
+    g_screen.drawn   = false;
+    g_display.present = screen_present;
+    g_display.ctx     = &g_screen;
+
+    vm86_register_service(VM86_INT_VIDEO,         bios10_service, &g_video);
+    vm86_register_service(VM86_INT_KEYBOARD_BIOS, bios16_service, &g_keyboard);
+    vm86_register_service(VM86_INT_KEYBOARD,      bios16_irq,     &g_keyboard);
+    vm86_register_service(VM86_INT_TIME,          bios1a_service, &g_clock);
+    vm86_register_service(VM86_INT_TIMER,         bios1a_irq,     &g_clock);
+    vm86_register_service(VM86_INT_DISK,          bios13_service, NULL);
+}
+
+/* ------------------------------------------------------------------ */
 /* The conflict report                                                 */
 /* ------------------------------------------------------------------ */
 
@@ -579,6 +805,318 @@ static bool run_case(const struct guest_case *c)
 }
 
 /* ------------------------------------------------------------------ */
+/* Running a corpus program                                            */
+/* ------------------------------------------------------------------ */
+
+/*
+ * One program from dos/corpus/bios, driven the way the machine will be
+ * driven: in slices, with the display refreshed between them, because the
+ * host has a screen to draw and a clock to advance and a guest never asks
+ * it to do either.
+ *
+ * What is deliberately NOT here is the keyboard. The kernel hands out
+ * decoded key codes rather than scan codes, and the only call that gets
+ * one blocks until a key arrives -- so a guest waiting on INT 16h would
+ * wait forever and the machine's clock would stop with it. key.asm is a
+ * host-suite case. M4-README.md section 8 records the gap in full; nothing
+ * here pretends to close it.
+ */
+static bool run_corpus(const char *name, const uint8_t *image, uint32_t size,
+                       unsigned max_slices, struct vm86_cpu *result)
+{
+    struct vm86_mem mem;
+    struct vm86_cpu cpu;
+    enum vm86_stop  stop = VM86_STOP_STEPS;
+    unsigned        slices;
+    unsigned long   last_ms;
+
+    uprintf("\n  --- guest case \"%s\" ---\n", name);
+
+    machine_build(&mem, &cpu, image, size);
+
+    uprintf("  image  : %u bytes at %04X:%04X, SP=%04X\n",
+            (unsigned)size, (unsigned)cpu.cs, (unsigned)cpu.ip,
+            (unsigned)cpu.sp);
+
+    last_ms = u_uptime_ms();
+
+    for (slices = 0; slices < max_slices; slices++) {
+        uint64_t retired = cpu.insn_count;
+
+        stop = vm86_run(&cpu, VM_SLICE_STEPS);
+
+        /*
+         * Draw only when the guest actually executed something.
+         *
+         * A halted machine cannot have written video memory, and a guest
+         * waiting for a tick is halted for nearly all of the run -- so
+         * comparing a 4000-byte frame on every one of those iterations is
+         * the difference between a machine that keeps time and one that
+         * spends its time looking at a screen that did not change. The
+         * count the core keeps is what makes this exact rather than a
+         * guess about which stop means "it ran".
+         */
+        if (cpu.insn_count != retired)
+            present(&cpu);
+
+        if (stop == VM86_STOP_FAULT || stop == VM86_STOP_BROKEN)
+            break;
+
+        /*
+         * A halt ends the program only with interrupts off -- `cli; hlt`.
+         * With IF set the processor is waiting, and the way out is to give
+         * it something to wake for, which is the clock below.
+         */
+        if (stop == VM86_STOP_HALT && !vm86_flag_test(&cpu, VM86_IF))
+            break;
+
+        unsigned long now = u_uptime_ms();
+        uint32_t delta = (uint32_t)(now - last_ms);
+        uint32_t ticks = bios1a_advance(&g_clock, delta);
+
+        last_ms = now;
+
+        g_ms_advanced += delta;
+
+        for (uint32_t t = 0; t < ticks; t++)
+            vm86_raise(&cpu, VM86_INT_TIMER);
+    }
+
+    present(&cpu);
+    *result = cpu;
+
+    if (stop == VM86_STOP_BROKEN) {
+        uprintf("  result : INTERNAL ERROR, the opcode table did not "
+                "merge\n");
+        uprintf("  VM: case %s: FAIL (broken emulator)\n", name);
+        return false;
+    }
+
+    if (stop == VM86_STOP_FAULT) {
+        uprintf("  result : fault, vector %u (%s)\n",
+                (unsigned)cpu.fault, vector_name(cpu.fault));
+        uprintf("  VM: case %s: FAIL (the guest faulted)\n", name);
+        return false;
+    }
+
+    if (stop == VM86_STOP_STEPS) {
+        uprintf("  result : RUN LIMIT reached, %u slices, the guest never "
+                "stopped\n", slices);
+        uprintf("  VM: case %s: FAIL (runaway guest)\n", name);
+        return false;
+    }
+
+    uprintf("  result : halted after %u slice(s)\n", slices + 1u);
+
+    return true;
+}
+
+/* Report at most one difference: a wrong screen of eighty cells should not
+ * produce eighty lines to scroll through. */
+static void check_text(const char *what, const char *want, uint32_t length,
+                       const uint8_t *frame, unsigned *checks,
+                       unsigned *failures)
+{
+    (*checks)++;
+
+    for (uint32_t i = 0; i < length; i++) {
+        uint8_t ch   = frame[i * 2u];
+        uint8_t attr = frame[i * 2u + 1u];
+
+        if (ch == (uint8_t)want[i] && attr == VM86_ATTR_DEFAULT)
+            continue;
+
+        uprintf("      FAIL  %s: cell %u is (%02X, %02X), expected "
+                "(%02X, %02X)\n", what, (unsigned)i, ch, attr,
+                (uint8_t)want[i], VM86_ATTR_DEFAULT);
+        (*failures)++;
+        return;
+    }
+}
+
+/*
+ * The acceptance case.
+ *
+ * hello.asm is the program M4's acceptance sentence is about: a .COM that
+ * prints one line through INT 10h and appears on a screen. direct.asm
+ * writes the same line straight into 0xB8000 without executing a single
+ * interrupt, and the cells the two leave must agree -- so a machine that
+ * ever keeps the display as a second copy of the screen keeps passing
+ * hello and stops showing direct, and the failure lands where it can be
+ * read.
+ *
+ * The attribute is checked as well as the character, and not for
+ * completeness. INT 10h AH=0Eh writes the character and keeps whatever
+ * attribute the cell already has, and what gives the page its 0x07 is the
+ * mode set -- so a machine that came up with a zeroed page would put
+ * black-on-black text in memory and pass every assertion that only looked
+ * at the characters.
+ */
+static bool run_acceptance(void)
+{
+    static const char TEXT[] = "M4 hello from the BIOS";
+    const uint32_t text_length = (uint32_t)(sizeof TEXT - 1u);
+
+    struct vm86_cpu cpu;
+    uint8_t         hello_frame[VM_PAGE_CELLS * 2u];
+    unsigned        checks   = 0;
+    unsigned        failures = 0;
+    unsigned        before;
+
+    if (!run_corpus("hello", vm_corpus_hello,
+                    (uint32_t)vm_corpus_hello_size, VM_SLICE_COUNT, &cpu)) {
+        uprintf("  VM: case hello: FAIL\n");
+        return false;
+    }
+
+    check_text("hello", TEXT, text_length, g_screen.frame, &checks,
+               &failures);
+
+    for (uint32_t i = 0; i < sizeof hello_frame; i++)
+        hello_frame[i] = g_screen.frame[i];
+
+    uprintf("  VM: case hello: %s\n", failures ? "FAIL" : "PASS");
+
+    before = failures;
+
+    if (!run_corpus("direct", vm_corpus_direct,
+                    (uint32_t)vm_corpus_direct_size, VM_SLICE_COUNT, &cpu)) {
+        uprintf("  VM: case direct: FAIL\n");
+        return false;
+    }
+
+    check_text("direct", TEXT, text_length, g_screen.frame, &checks,
+               &failures);
+
+    /* M4-8, on the real machine: the two cells below came from a service
+     * and from a store instruction, and they have to be the same bytes. */
+    checks++;
+
+    for (uint32_t i = 0; i < text_length * 2u; i++) {
+        if (hello_frame[i] == g_screen.frame[i])
+            continue;
+
+        uprintf("      FAIL  M4-8: cell %u %s is %02X after hello and "
+                "%02X after direct\n", (unsigned)(i / 2u),
+                (i & 1u) ? "attribute" : "character",
+                hello_frame[i], g_screen.frame[i]);
+        failures++;
+        break;
+    }
+
+    uprintf("  VM: case direct: %s\n", failures == before ? "PASS" : "FAIL");
+    uprintf("  checks : %u ok, %u failed\n", checks - failures, failures);
+
+    return failures == 0;
+}
+
+/*
+ * The clock, driven by the one device on this machine that is not a
+ * pretend one.
+ *
+ * timer.asm counts five interrupts and prints the digit. The digit is not
+ * the interesting part: what matters is that the host hands
+ * bios1a_advance() the milliseconds that REALLY passed -- the kernel's
+ * calibrated LAPIC timer, through SYS_UPTIME_MS -- so that five ticks is
+ * five times 54.925 ms of wall time rather than five times however fast
+ * the emulator happened to run. A host that raised one tick per slice
+ * would satisfy every assertion about the guest and be lying about the
+ * only thing the clock service is for.
+ *
+ * Which is why the budget is enormous and the assertion is on the wall
+ * clock. The guest is halted between ticks, so this takes about a quarter
+ * of a second of real time and a great many iterations of a loop that
+ * mostly does nothing -- and that is not a defect in the loop, it is what
+ * a machine keeping time looks like when the program is waiting for the
+ * clock to move.
+ */
+#define VM_CLOCK_SLICES 2000000u
+
+/* 18.2 Hz: 65536 / 1.193182 MHz, the divisor the PC's timer has used since
+ * 1981 and the one docs/dos-refs.md section 6 gives. Five of them is
+ * 274.6 ms, and the bound has to allow for the kernel's millisecond
+ * counter being quantised -- so the lower one is the tight, load-bearing
+ * number and the upper one allows one more turn of the loop. */
+#define VM_TICKS_WANTED       5u
+#define VM_TICKS_MIN_MS       274u
+#define VM_TICKS_MAX_MS       320u
+
+/* A bound on the whole run wide enough to only catch a hang. The kernel's
+ * millisecond counter is quantised and QEMU does not schedule this process
+ * on time, so a reading taken around the loop is noisier than the one
+ * taken inside it -- one run of this took 370 ms and another 450 ms for
+ * the same 275 ms of clock. A bound tight enough to be interesting here
+ * would be a bound that fails at random. */
+#define VM_TICKS_WALL_MAX_MS  2000u
+
+static bool run_ticks_case(void)
+{
+    struct vm86_cpu cpu;
+    unsigned        checks   = 0;
+    unsigned        failures = 0;
+    unsigned long   started;
+    unsigned long   elapsed;
+    uint32_t        bda;
+    uint32_t        ticks;
+
+    started = u_uptime_ms();
+    g_ms_advanced = 0;
+
+    if (!run_corpus("timer", vm_corpus_timer,
+                    (uint32_t)vm_corpus_timer_size, VM_CLOCK_SLICES, &cpu)) {
+        uprintf("  VM: case timer: FAIL\n");
+        return false;
+    }
+
+    elapsed = u_uptime_ms() - started;
+
+    check_text("timer", "5", 1u, g_screen.frame, &checks, &failures);
+
+    /* The firmware's own count, read out of the data area rather than
+     * through the service -- a program reads it directly and so does this,
+     * which is the only way the two can be caught disagreeing. */
+    bda = ((uint32_t)VM86_BDA_SEGMENT << 4) + VM86_BDA_TICK_COUNT;
+
+    ticks = (uint32_t)g_guest_ram[bda] |
+            ((uint32_t)g_guest_ram[bda + 1u] << 8) |
+            ((uint32_t)g_guest_ram[bda + 2u] << 16) |
+            ((uint32_t)g_guest_ram[bda + 3u] << 24);
+
+    checks++;
+
+    if (ticks != VM_TICKS_WANTED) {
+        uprintf("      FAIL  timer: the firmware counted %u ticks, "
+                "expected %u\n", (unsigned)ticks, VM_TICKS_WANTED);
+        failures++;
+    }
+
+    checks++;
+
+    if (g_ms_advanced < VM_TICKS_MIN_MS || g_ms_advanced > VM_TICKS_MAX_MS) {
+        uprintf("      FAIL  timer: %u ticks came out of %u ms handed to "
+                "the clock, expected between %u and %u\n", VM_TICKS_WANTED,
+                (unsigned)g_ms_advanced, VM_TICKS_MIN_MS, VM_TICKS_MAX_MS);
+        failures++;
+    } else {
+        uprintf("  clock  : %u ticks out of %u ms of real time\n",
+                VM_TICKS_WANTED, (unsigned)g_ms_advanced);
+    }
+
+    checks++;
+
+    if (elapsed > VM_TICKS_WALL_MAX_MS) {
+        uprintf("      FAIL  timer: the run took %lu ms of wall time\n",
+                elapsed);
+        failures++;
+    }
+
+    uprintf("  VM: case timer: %s\n", failures ? "FAIL" : "PASS");
+    uprintf("  checks : %u ok, %u failed\n", checks - failures, failures);
+
+    return failures == 0;
+}
+
+/* ------------------------------------------------------------------ */
 
 int vm_selftest(void)
 {
@@ -615,6 +1153,16 @@ int vm_selftest(void)
          * has failed, so that a single run reports all of them. */
         ok = run_case(&g_cases[i]) && ok;
     }
+
+    /*
+     * And then the milestone's own sentence: a .COM, through the BIOS, on
+     * a screen. The two cases above run bytes on a bare processor; these
+     * run programs on a machine.
+     */
+    uputs("\n[8086 machine]\n");
+
+    ok = run_acceptance() && ok;
+    ok = run_ticks_case() && ok;
 
     uprintf("\n  VM: RESULT %s\n", ok ? "PASS" : "FAIL");
 

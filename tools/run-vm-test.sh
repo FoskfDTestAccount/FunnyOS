@@ -160,6 +160,23 @@ expect_present "exited with code 0"           "the verdict came back through the
 # fails.
 expect_present "flags  CF="                   "every flag was printed by name"              "$LOG"
 
+# ---- M4: a .COM, through the BIOS, on a screen -----------------------
+#
+# The milestone's sentence is about a program APPEARING, so the first
+# assertion below is the text itself, sitting in the serial log because
+# the display backend drew it out of the guest's video memory. An exit
+# code would be satisfied by an interpreter that ran the program and drew
+# nothing at all, which is exactly what a machine with a display of its own
+# would do.
+#
+# The second and third are the state behind the picture: hello.asm went
+# through INT 10h and left the expected page, and direct.asm left the same
+# cells with no interrupt in the program at all.
+expect_present "M4 hello from the BIOS"       "the guest's line reached the screen"         "$LOG"
+expect_present "VM: case hello: PASS"         "the page hello.asm left is the one expected" "$LOG"
+expect_present "VM: case direct: PASS"        "the same text with no interrupt at all"      "$LOG"
+expect_present "VM: case timer: PASS"         "five ticks of a real clock, counted by the guest" "$LOG"
+
 # Things that must not have happened.
 expect_absent  "CONFLICT"                     "no opcode is claimed twice"                  "$LOG"
 expect_absent  "RUN LIMIT"                    "no guest ran away"                           "$LOG"
