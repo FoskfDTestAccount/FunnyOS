@@ -30,10 +30,13 @@
  */
 #include "harness.h"
 
-#include "../bios/bios13.h"
-
 #include <stdio.h>
 #include <string.h>
+
+#include <vm86/firmware.h>
+#include <vm86/host.h>
+
+#include "../bios/bios13.h"
 
 /* ------------------------------------------------------------------ */
 /* The machine these cases run against                                 */
@@ -736,6 +739,150 @@ static void test_reset_forgets_the_last_error(struct vm86_cpu *cpu)
 }
 
 /* ------------------------------------------------------------------ */
+/* Through the interrupt, not around it                                */
+/* ------------------------------------------------------------------ */
+
+/*
+ * The cases above call bios13_service() directly. That is what makes this
+ * suite independent of the interrupt core -- and it is also what made it
+ * blind to the one bug that mattered.
+ *
+ * The stub ends in a real IRET, and IRET reloads FLAGS from the frame the
+ * guest's INT pushed. So a status written with vm86_flag_set() lands in
+ * the register and is overwritten from memory on the way out: every
+ * INT 13h failure looked to a program like a success, with the error code
+ * sitting ignored in AH. All two hundred-odd assertions above passed
+ * while that was true, because not one of them went through the door a
+ * program uses.
+ *
+ * So these run a guest. It branches on the carry flag and records which
+ * branch it took, and *that byte* is the assertion: the observable a
+ * program acts on, not a field in the CPU struct. The distinction is not
+ * pedantry -- AH survives the frame and the carry does not, which is
+ * precisely why checking AH would have caught nothing.
+ */
+/*
+ * The guest runs in a segment of its own rather than at 0:0100, and that
+ * is not a detail of this test.
+ *
+ * The harness's vm86_test_load() puts a program at linear 0x100 with
+ * CS = 0, which is the .COM convention with the segment left at zero --
+ * fine while nothing else is in memory, and wrong the moment firmware
+ * installs a vector table, because the interrupt vector table *is*
+ * 0x0000 to 0x03FF. vm86_install_ivt() writes all 256 entries, and the
+ * guest's fourteen bytes at 0x100 are four of them: the first run of
+ * these cases executed vector entries as instructions, and the symptom
+ * was a program that never vectored and never halted.
+ *
+ * A real .COM program is loaded at the start of a 64 KiB chunk with its
+ * own PSP in front of it, which is what keeps it off the vectors. This
+ * guest is given the same thing: a segment, at offset 0x100, with its
+ * data in the same segment.
+ */
+#define GUEST_SEGMENT 0x1000u
+#define GUEST_ENTRY   ((uint32_t)GUEST_SEGMENT * 16u + 0x100u)
+
+static void guest_with_a_disk(struct vm86_cpu *cpu, struct bios13_disk *disk)
+{
+    /*
+     *   0100  CD 13           int 13h
+     *   0102  72 04           jb  it failed
+     *   0104  B0 22           mov al,22h        the read worked
+     *   0106  EB 02           jmp record
+     *   0108  B0 11           mov al,11h        it did not
+     *   010A  A2 00 03        mov [0300h],al
+     *   010D  F4              hlt
+     */
+    static const uint8_t code[] = {
+        0xCD, 0x13,
+        0x72, 0x04,
+        0xB0, 0x22,
+        0xEB, 0x02,
+        0xB0, 0x11,
+        0xA2, 0x00, 0x03,
+        0xF4,
+    };
+
+    /* The service registry is process-wide and outlives a case, so a case
+     * that registers one clears it first: the failure that leaves behind
+     * -- a vector answering in the next case that never registered it --
+     * is read as a bug in the other case. */
+    vm86_clear_services();
+
+    memcpy(cpu->mem->ram + GUEST_ENTRY, code, sizeof(code));
+
+    vm86_set_seg(cpu, VM86_CS, (uint16_t)GUEST_SEGMENT);
+    vm86_set_seg(cpu, VM86_DS, (uint16_t)GUEST_SEGMENT);
+    vm86_set_seg(cpu, VM86_SS, (uint16_t)GUEST_SEGMENT);
+    vm86_flush_segments(cpu);
+
+    cpu->ip = 0x100;
+    cpu->sp = 0xFFFE;
+
+    vm86_install_ivt(cpu);
+    vm86_register_service(VM86_INT_DISK, bios13_service, disk);
+}
+
+/* Where the guest records which way its own `jb` went, in its own
+ * segment -- DS is the guest's, so the address is a real one. */
+#define GUEST_MARKER    ((uint32_t)GUEST_SEGMENT * 16u + 0x0300u)
+#define GUEST_SUCCEEDED 0x22u
+#define GUEST_FAILED    0x11u
+
+static void test_a_read_through_the_interrupt(struct vm86_cpu *cpu)
+{
+    struct bios13_disk disk;
+
+    setup(cpu, &disk);
+
+    disk.image[0]            = 0x5A;
+    disk.image[BIOS13_SECTOR_BYTES - 1u] = 0xA5;
+
+    guest_with_a_disk(cpu, &disk);
+
+    /* The registers a program would set before its INT. */
+    ask(cpu, BIOS13_FN_READ, 0, 0, 1, 1);
+
+    enum vm86_result result = vm86_test_run(cpu, 24);
+
+    vm86_expect_bool("the guest halted", result == VM86_HALT, true);
+    vm86_expect_mem8("the guest took the success branch", cpu, GUEST_MARKER,
+                     GUEST_SUCCEEDED);
+
+    /* And the read really happened, into the buffer the program named. */
+    vm86_expect_mem8("the first byte of the sector", cpu, BUF_A, 0x5A);
+    vm86_expect_mem8("its last byte", cpu, BUF_A + BIOS13_SECTOR_BYTES - 1u,
+                     0xA5);
+
+    /* AH is the status and came back through the frame's neighbours
+     * untouched -- asserted because it is the half that *did* work, and a
+     * reader of the report should be able to see which half that was. */
+    vm86_expect_u16("AH is zero on success", cpu->ah, BIOS13_STATUS_OK);
+}
+
+static void test_a_failure_through_the_interrupt(struct vm86_cpu *cpu)
+{
+    struct bios13_disk disk;
+
+    setup(cpu, &disk);
+    guest_with_a_disk(cpu, &disk);
+
+    ask(cpu, BIOS13_FN_READ, 0, 0, 1, 1);
+    cpu->dl = BIOS13_DRIVE_C;       /* and a drive that is not there */
+
+    enum vm86_result result = vm86_test_run(cpu, 24);
+
+    vm86_expect_bool("the guest halted", result == VM86_HALT, true);
+
+    /* The assertion this whole group exists for: the program's carry flag
+     * was still set when its own `jb` read it. */
+    vm86_expect_mem8("the guest saw the carry and took the failure branch",
+                     cpu, GUEST_MARKER, GUEST_FAILED);
+    vm86_expect_u16("and the status is in AH", cpu->ah,
+                    BIOS13_STATUS_BAD_COMMAND);
+}
+
+/* ------------------------------------------------------------------ */
 /* Functions and drives this machine does not have                     */
 /* ------------------------------------------------------------------ */
 
@@ -883,6 +1030,20 @@ static void test_the_drive_parameters_are_maxima(struct vm86_cpu *cpu)
                     (uint16_t)(cpu->cl & 0x3F), 18);
     vm86_expect_u16("DL, how many drives there are",
                     cpu->dl, BIOS13_FLOPPY_DRIVES);
+    vm86_expect_u16("BL, what kind of drive it is",
+                    cpu->bl, BIOS13_DRIVE_TYPE_1_44M);
+
+    /* ES:DI is the parameter table, and is deliberately not set -- see
+     * the note in bios13.c. Asserted so that "left alone" is a fact
+     * rather than an assumption: the segment is whatever the caller
+     * had. */
+    vm86_set_seg(cpu, VM86_ES, 0x1234);
+    cpu->di = 0x5678;
+    cpu->ah = BIOS13_FN_PARAMS;
+    cpu->dl = BIOS13_DRIVE_A;
+    bios13_service(cpu, &disk);
+    vm86_expect_u16("ES is not repointed", cpu->es, 0x1234);
+    vm86_expect_u16("DI is not repointed", cpu->di, 0x5678);
 
     /* The capacity a program computes from those four fields is the size
      * of the image attached here, which is the only check that says the
@@ -1026,6 +1187,8 @@ static const struct vm86_test tests[] = {
       test_the_extended_drive_type_is_refused },
     { "verify checks the address and moves nothing",
       test_verify_checks_the_address_and_moves_nothing },
+    { "a read through the interrupt", test_a_read_through_the_interrupt },
+    { "a failure the guest can see", test_a_failure_through_the_interrupt },
 };
 
 VM86_TEST_MAIN("bios13", tests)

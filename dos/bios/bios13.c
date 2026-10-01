@@ -307,14 +307,17 @@ void bios13_service(struct vm86_cpu *cpu, void *ctx)
 
         /* DL becomes the number of drives, which is one. It was the drive
          * number on the way in and a program is not entitled to both.
+         * BL is the drive type, from dos-refs.md section 4.
          *
-         * BL is supposed to come back with the drive type, in the
-         * numbering of the era, and is left alone: that table is not in
-         * anything this repository has, and a made-up type is worse than
-         * an untouched register. ES:DI is the same case -- it should
-         * point at the drive's parameter table, and there is no such
-         * table here to point at. */
+         * ES:DI is supposed to point at the drive's eleven-byte parameter
+         * table and is left alone. That is a known gap rather than an
+         * oversight: pointing it at a table means deciding where in guest
+         * memory that table lives, which is an interface decision (on the
+         * hardware it is in ROM and IVT[1Eh] points at it), and nothing
+         * in M4 reads it. A made-up address would replace a stated gap
+         * with something that looks finished. */
         cpu->dl = BIOS13_FLOPPY_DRIVES;
+        cpu->bl = BIOS13_DRIVE_TYPE_1_44M;
 
         bios13_ok(cpu, disk);
         return;
