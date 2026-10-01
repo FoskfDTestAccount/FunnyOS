@@ -24,18 +24,25 @@
 /* ------------------------------------------------------------------ */
 
 /*
- * 0040:0071, bit 7: the keyboard buffer overflowed and a keystroke was
- * discarded.
+ * 0040:0071 is the Ctrl-Break flag, and this module does not write it.
  *
- * This offset is NOT in firmware.h's map, and it is not in the task
- * book's list of fields this module owns either -- but the task book's
- * pitfalls section asks for it by number, it is the only byte in the
- * data area nothing else writes, and the flag is what a program checks
- * to notice that it is not reading keys fast enough. Recorded here
- * rather than silently dropped.
+ * It used to. An earlier task book said a full keyboard buffer sets bit 7
+ * there, and that note was the only document in the tree that mentioned
+ * the offset at all -- which is exactly why it went in: the field was in
+ * neither firmware.h's map nor this module's list of owned fields, and
+ * the note was believed over both. The rule it walked past is the one
+ * that exists to catch this.
+ *
+ * What the firmware does with a full buffer is beep and throw the
+ * keystroke away. Nothing in memory changes. Writing bit 7 there instead
+ * tells every program that polls the byte -- and polling it is the normal
+ * way, FreeDOS's break.c reads that address directly -- that the user
+ * pressed Ctrl-Break, once per keystroke dropped.
+ *
+ * The offset has a name in firmware.h now, next to that story, so the
+ * next person who needs "somewhere to record a lost key" finds out what
+ * the byte is already for.
  */
-#define BIOS16_BDA_OVERFLOW      0x0071u
-#define BIOS16_OVERFLOW_BUFFER_FULL 0x80u
 
 /* 0040:0017 bits that are not shift keys: the lock keys. They cannot be
  * derived from what is held, because they stay set after the key comes
@@ -107,13 +114,14 @@ static void kb_push(struct vm86_cpu *cpu, uint16_t word)
          * Full. The incoming keystroke is thrown away rather than
          * overwriting the oldest one: losing the newest key is
          * recoverable by the person typing, and corrupting the ring is
-         * not. The overflow is flagged so a program that cares can see
-         * it, and on real hardware the speaker clicks.
+         * not.
+         *
+         * That is the whole of it. The firmware beeps as well, and the
+         * beep is the only thing it does -- there is no flag to set, and
+         * the byte that looks like one belongs to Ctrl-Break. This
+         * machine has no speaker, so from here the keystroke simply does
+         * not exist.
          */
-        uint8_t flags = vm86_mem_read8(mem, bda_linear(BIOS16_BDA_OVERFLOW));
-
-        vm86_mem_write8(mem, bda_linear(BIOS16_BDA_OVERFLOW),
-                        (uint8_t)(flags | BIOS16_OVERFLOW_BUFFER_FULL));
         return;
     }
 

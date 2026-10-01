@@ -1538,6 +1538,57 @@ static void test_install_firmware_seeds_a_coherent_display(
                           bda + VM86_BDA_CURSOR + page * 2u, 0);
 }
 
+/*
+ * The row count and the video control byte, which the map gained last.
+ *
+ * Both are stored as the odd thing rather than the obvious one, and both
+ * are the kind of field where the obvious value is wrong in a way nothing
+ * notices: the row count is one less than the number of rows, so a
+ * machine that writes 25 there claims twenty-six rows and a machine that
+ * leaves it at zero claims one -- and the control byte's bit 7 is inverted
+ * in sense from its name, since *clear* means modes do clear memory.
+ */
+static void test_install_firmware_seeds_the_last_row_and_the_control_byte(
+        struct vm86_cpu *cpu)
+{
+    vm86_clear_services();
+    vm86_install_firmware(cpu);
+
+    uint32_t bda = (uint32_t)VM86_BDA_SEGMENT << 4;
+
+    vm86_expect_mem8("0040:0084 is rows minus one, not rows",
+                     cpu, bda + VM86_BDA_ROWS, 24u);
+    vm86_expect_mem8("0040:0087 has bit 7 clear, which means mode sets "
+                     "do clear memory", cpu, bda + VM86_BDA_VIDEO_CONTROL, 0u);
+}
+
+/*
+ * And the Ctrl-Break flag is seeded by nobody at all.
+ *
+ * It is the one field of the three that this machine deliberately does
+ * not maintain -- Ctrl-Break is not decoded -- and the failure it is
+ * guarding against is the opposite of the others': not a zero where a
+ * value belongs, but a value where nothing belongs. A machine that
+ * started up with bit 7 of that byte set would report the user having
+ * pressed Break before the keyboard was ever touched, and every program
+ * that polls it would take the branch.
+ *
+ * Nothing in the tree writes it, which is the state to keep; this case
+ * fails if anything ever starts.
+ */
+static void test_nothing_seeds_the_ctrl_break_flag(struct vm86_cpu *cpu)
+{
+    vm86_clear_services();
+
+    memset(cpu->mem->ram, 0, cpu->mem->size);
+
+    vm86_install_firmware(cpu);
+
+    vm86_expect_mem8("nothing was seeded there", cpu,
+                     ((uint32_t)VM86_BDA_SEGMENT << 4) + VM86_BDA_CTRL_BREAK,
+                     0u);
+}
+
 /* ------------------------------------------------------------------ */
 /* The registry                                                        */
 /* ------------------------------------------------------------------ */
@@ -1675,6 +1726,10 @@ static const struct vm86_test tests[] = {
       test_int_11h_and_12h_answer_from_the_data_area },
     { "install_firmware seeds a coherent display",
       test_install_firmware_seeds_a_coherent_display },
+    { "install_firmware seeds the last row and the control byte",
+      test_install_firmware_seeds_the_last_row_and_the_control_byte },
+    { "nothing seeds the Ctrl-Break flag",
+      test_nothing_seeds_the_ctrl_break_flag },
 
     { "registering NULL removes a service",
       test_registering_null_removes_a_service },

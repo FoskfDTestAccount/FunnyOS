@@ -33,6 +33,7 @@
 #include <string.h>
 
 #include <vm86/firmware.h>
+#include <vm86/host.h>
 
 #include "../bios/bios10.h"
 
@@ -891,7 +892,7 @@ static void test_0f_hands_back_the_control_bit_with_the_mode(
     vm86_expect_u16("and BH the active page", cpu->bh, 0u);
 
     vm86_expect_mem8("0040:0087 bit 7 says the same thing",
-                     cpu, (VM86_BDA_SEGMENT << 4) + 0x0087u, 0x80u);
+                     cpu, (VM86_BDA_SEGMENT << 4) + VM86_BDA_VIDEO_CONTROL, 0x80u);
 
     /* A mode set without the bit puts it back down. */
     cpu->al = 0x03;
@@ -902,7 +903,7 @@ static void test_0f_hands_back_the_control_bit_with_the_mode(
 
     vm86_expect_u16("and clearing it clears the bit", cpu->al, 0x03u);
     vm86_expect_mem8("in the data area too",
-                     cpu, (VM86_BDA_SEGMENT << 4) + 0x0087u, 0x00u);
+                     cpu, (VM86_BDA_SEGMENT << 4) + VM86_BDA_VIDEO_CONTROL, 0x00u);
 }
 
 /*
@@ -1058,6 +1059,23 @@ static void test_the_data_area_is_synced(struct vm86_cpu *cpu)
     cpu->al = 1;
     call(cpu, &st, 0x05);
 
+    /*
+     * Dirty the whole display half first, and then make one more call.
+     *
+     * Without this the assertions below are about a machine that happens
+     * to have zeroes in it: two of the values wanted are zero, and a case
+     * that starts from zero cannot tell "the service wrote it" from "the
+     * service never touched it". Writing 0xFF over the region and asking
+     * the service to publish again makes every assertion below a
+     * statement about a byte that had to be changed to pass.
+     */
+    for (unsigned at = 0x49u; at <= 0x62u; at++)
+        vm86_mem_write8(cpu->mem, bda + at, 0xFFu);
+
+    cpu->ah = 0x03;                 /* reads a cursor; changes nothing */
+    cpu->bh = 0;
+    call(cpu, &st, 0x03);
+
     vm86_expect_mem8 ("0040:0049 is the mode",
                       cpu, bda + VM86_BDA_VIDEO_MODE, 0x03);
     vm86_expect_mem16("0040:004A is the column count",
@@ -1076,9 +1094,55 @@ static void test_the_data_area_is_synced(struct vm86_cpu *cpu)
     vm86_expect_mem8 ("0040:0062 is the active page",
                       cpu, bda + VM86_BDA_ACTIVE_PAGE, 1);
     vm86_expect_mem8 ("0040:0084 is the last row number",
-                      cpu, bda + 0x0084u, 24u);
+                      cpu, bda + VM86_BDA_ROWS, 24u);
     vm86_expect_mem8 ("0040:0087 carries the video control byte",
-                      cpu, bda + 0x0087u, 0x00u);
+                      cpu, bda + VM86_BDA_VIDEO_CONTROL, 0x00u);
+}
+
+/*
+ * What the firmware seeds at power-on is the same answer the service
+ * publishes on its first call.
+ *
+ * Two writers of one region, which is the thing firmware.h's who-writes-
+ * what rule exists to prevent -- and it is allowed here for a stated
+ * reason (the service's reset() has no CPU, so until somebody calls
+ * INT 10h there would be nothing there at all). What makes that safe is
+ * that the two agree, and agreement is exactly what breaks silently: a
+ * program that reads the data area before its first video call and after
+ * it would get two different machines, and it would be the sort of
+ * difference that only shows up as a wrong page stride somewhere.
+ *
+ * The comparison is over the whole display half rather than field by
+ * field, so that a field added to one side and not the other lands here.
+ * It also covers the two bytes at 0040:004E, which neither writer touches
+ * -- if one of them ever started, this is where it would show.
+ */
+static void test_the_firmware_seeds_what_the_service_would(
+        struct vm86_cpu *cpu)
+{
+    struct bios10_state st;
+
+    vm86_clear_services();
+    vm86_install_firmware(cpu);
+
+    uint32_t bda = (uint32_t)VM86_BDA_SEGMENT << 4;
+
+    /* 0040:0049 through 0040:0062 inclusive. */
+    uint8_t seeded[0x62u - 0x49u + 1u];
+
+    for (unsigned i = 0; i < sizeof(seeded); i++)
+        seeded[i] = vm86_mem_read8(cpu->mem, bda + 0x49u + i);
+
+    /* The first video call a program would make, on a state that has only
+     * been reset -- which is what the machine is when the firmware has
+     * just seeded it. */
+    bios10_reset(&st);
+    cpu->al = 0x03;
+    call(cpu, &st, 0x00);
+
+    for (unsigned i = 0; i < sizeof(seeded); i++)
+        vm86_expect_mem8("the service left this byte as the firmware seeded "
+                         "it", cpu, bda + 0x49u + i, seeded[i]);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1217,6 +1281,8 @@ static const struct vm86_test tests[] = {
 
     { "the BIOS data area is kept in step",
       test_the_data_area_is_synced },
+    { "the firmware seeds what the service would",
+      test_the_firmware_seeds_what_the_service_would },
 
     { "the active page is at the right address",
       test_the_active_page_is_at_the_right_address },

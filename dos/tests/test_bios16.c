@@ -417,8 +417,16 @@ static void test_the_buffer_fills_and_then_refuses(struct vm86_cpu *cpu)
                     VM86_BDA_KB_BUFFER_END - 2);
     vm86_expect_u16("and nothing was written over the head",
                     bda16(cpu, VM86_BDA_KB_HEAD), VM86_BDA_KB_EMPTY);
-    vm86_expect_u16("the overflow was flagged",
-                    (uint16_t)(bda8(cpu, 0x0071u) & 0x80u), 0x80u);
+    /*
+     * And nothing else moved. This assertion used to read the other way
+     * round: an earlier task book said a full buffer sets bit 7 of
+     * 0040:0071, and this suite pinned it. That byte is the Ctrl-Break
+     * flag -- programs poll it to find out that the user hit Break -- and
+     * the firmware sets nothing there when a key is dropped. See the note
+     * on VM86_BDA_CTRL_BREAK in firmware.h.
+     */
+    vm86_expect_u16("no flag was set anywhere",
+                    (uint16_t)(bda8(cpu, VM86_BDA_CTRL_BREAK) & 0x80u), 0x00u);
 }
 
 static void test_the_buffer_wraps(struct vm86_cpu *cpu)
