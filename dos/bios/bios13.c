@@ -164,6 +164,20 @@ static uint8_t bios13_check(const struct bios13_disk *disk,
      * One sector's worth past the end is past the end. The comparison is
      * in bytes and in 64-bit arithmetic so that a run of 255 sectors at
      * a high cylinder cannot wrap its way to looking short.
+     *
+     * It is also the only bounds check there is, which is not something
+     * this line shows. bios13_transfer() indexes disk->image[] directly
+     * and tests nothing, so what this returns on failure is not the
+     * interesting part: the interesting part is that it is what keeps a
+     * read and a write inside the caller's array at all. Deleting it does
+     * not lose an error code -- the transfer runs off the end of somebody
+     * else's buffer. The audit that tried it got a segmentation fault
+     * rather than a failing case (docs/tasks/M4-bios13-audit-report.md,
+     * section 8).
+     *
+     * So anyone who relaxes this comparison -- a different unit, 32-bit
+     * arithmetic, "warn and carry on" -- has to give bios13_transfer a
+     * bound of its own first.
      */
     if ((uint64_t)request->lba * BIOS13_SECTOR_BYTES + request->bytes >
         disk->size)
@@ -192,6 +206,11 @@ static uint8_t bios13_check(const struct bios13_disk *disk,
 /*
  * Move the sectors. Every address and length here has already been
  * checked, so this cannot fail and cannot run off either end.
+ *
+ * That sentence is the whole of this function's bounds checking, and it
+ * is why the end-of-image comparison in bios13_check() is load-bearing
+ * for memory safety rather than only for the status it returns. See the
+ * note on it there.
  */
 static void bios13_transfer(struct vm86_cpu *cpu, struct bios13_disk *disk,
                             const struct bios13_request *request, bool write)
