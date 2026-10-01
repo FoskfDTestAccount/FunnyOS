@@ -641,12 +641,18 @@ void kmain(void)
             arg = 2;
         else if (strstr(cmdline, "selftest=fputest"))
             arg = 3;
+        else if (strstr(cmdline, "vm=files"))
+            arg = 10;
+        else if (strstr(cmdline, "vm=keys"))
+            arg = 11;
         else if (strstr(cmdline, "vm=1"))
             arg = 4;
         else if (strstr(cmdline, "vm=screen"))
             arg = 7;
         else if (strstr(cmdline, "vm=psp"))
             arg = 8;
+        else if (strstr(cmdline, "vm=int21"))
+            arg = 9;
         else if (strstr(cmdline, "selftest=spawn"))
             arg = 5;
 

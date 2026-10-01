@@ -482,6 +482,24 @@ static enum vm86_result op_iret(struct vm86_cpu *cpu, uint8_t opcode)
 {
     (void)opcode;
 
+    /* Retire the current frame before popping it, then restore the
+     * outer frame's identity. A keyboard IRQ can interrupt a retrying
+     * BIOS/DOS service; one "last SP" loses that outer frame forever. */
+    if(cpu->intr_depth>64 || (cpu->intr_depth &&
+        cpu->sp==cpu->intr_frame_sp && cpu->ss==cpu->intr_frame_ss)) {
+        cpu->intr_depth--;
+    } else if(cpu->intr_depth) {
+        /* An IRET on a guest-manufactured stack: do not claim to know
+         * which saved frame remains live after the stack switch. */
+        cpu->intr_depth=0;
+    }
+    if(cpu->intr_depth && cpu->intr_depth<=64) {
+        cpu->intr_frame_sp=cpu->intr_frames[cpu->intr_depth-1].sp;
+        cpu->intr_frame_ss=cpu->intr_frames[cpu->intr_depth-1].ss;
+    } else {
+        cpu->intr_frame_sp=cpu->intr_frame_ss=0;
+    }
+
     uint16_t offset  = vm86_pop16(cpu);
     uint16_t segment = vm86_pop16(cpu);
 

@@ -149,3 +149,8 @@ void uprintf(const char *fmt, ...)
 
     uflush();
 }
+
+int u_kbd_acquire(void) { return (int)u_syscall(SYS_KBD_ACQUIRE,0,0,0); }
+int u_kbd_poll(void) { return (int)u_syscall(SYS_KBD_POLL,0,0,0); }
+int u_kbd_release(void) { return (int)u_syscall(SYS_KBD_RELEASE,0,0,0); }
+int u_pollkey(void) { return (int)u_syscall(SYS_POLLKEY,0,0,0); }

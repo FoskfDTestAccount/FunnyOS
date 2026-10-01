@@ -481,6 +481,7 @@ static const char *result_name(enum vm86_result result)
     case VM86_HALT:           return "halt";
     case VM86_FAULT:          return "fault";
     case VM86_INTERNAL_ERROR: return "internal-error";
+    case VM86_EXIT:           return "exit";
     }
 
     return "unknown";

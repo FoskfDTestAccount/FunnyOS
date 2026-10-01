@@ -84,7 +84,10 @@ static const char hello_c[] =
  * system and pretending otherwise would break the habit before it is
  * even formed.
  */
+extern const unsigned char funnyos_dos_disk[];
+
 static const struct ramfs_file g_files[] = {
+    { "DOS.IMG", (const char *)funnyos_dos_disk, 720u * 512u },
     { "README.TXT", readme_txt, sizeof(readme_txt) - 1 },
     { "NOTES.TXT",  notes_txt,  sizeof(notes_txt)  - 1 },
     { "HELLO.C",    hello_c,    sizeof(hello_c)    - 1 },

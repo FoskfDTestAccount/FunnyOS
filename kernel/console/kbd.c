@@ -231,6 +231,42 @@ static volatile uint32_t g_tail;
 static struct kbd_state g_state;
 static uint64_t         g_scancodes;
 static bool             g_ready;
+static const struct process *g_raw_owner;
+static volatile uint8_t g_raw[512];
+static volatile unsigned g_raw_head, g_raw_tail;
+static volatile bool g_raw_overflow;
+
+bool kbd_raw_acquire(const struct process *who)
+{
+    bool enabled=interrupts_enabled(); interrupts_disable();
+    bool ok=who && (!g_raw_owner || g_raw_owner==who);
+    if(ok && !g_raw_owner) {
+        g_raw_owner=who; g_raw_head=g_raw_tail=0; g_raw_overflow=false;
+        g_tail=g_head;
+    }
+    if(enabled) interrupts_enable();
+    return ok;
+}
+int kbd_raw_poll(const struct process *who)
+{
+    if(!who || g_raw_owner!=who) return -1;
+    if(g_raw_overflow) return -10;
+    if(g_raw_head==g_raw_tail) return -1;
+    int byte=g_raw[g_raw_tail]; g_raw_tail=(g_raw_tail+1)%512; return byte;
+}
+bool kbd_raw_release(const struct process *who)
+{
+    bool enabled=interrupts_enabled(); interrupts_disable();
+    bool ok=who && g_raw_owner==who;
+    if(ok) {
+        g_raw_owner=NULL; g_raw_head=g_raw_tail=0; g_raw_overflow=false;
+        g_tail=g_head; g_state=(struct kbd_state){0};
+    }
+    if(enabled) interrupts_enable();
+    return ok;
+}
+void kbd_raw_release_if_held_by(const struct process *who) { (void)kbd_raw_release(who); }
+
 
 static void queue_push(int key)
 {
@@ -302,9 +338,14 @@ static void kbd_irq(struct interrupt_frame *frame, void *ctx)
 
         g_scancodes++;
 
-        int key = kbd_decode(&g_state, data);
-        if (key != KEY_NONE)
-            queue_push(key);
+        if(g_raw_owner) {
+            unsigned next=(g_raw_head+1)%512;
+            if(next==g_raw_tail) g_raw_overflow=true;
+            else { g_raw[g_raw_head]=data; g_raw_head=next; }
+        } else {
+            int key = kbd_decode(&g_state, data);
+            if (key != KEY_NONE) queue_push(key);
+        }
     }
 }
 
@@ -331,15 +372,9 @@ bool kbd_init(void)
     config |= 0x01;    /* enable IRQ 1 */
     config &= ~0x10;   /* enable the keyboard clock */
 
-    /*
-     * Bit 6 -- scancode translation -- is deliberately left alone.
-     *
-     * Firmware turns it on, and while it is on the controller rewrites
-     * the set 2 scancodes a modern keyboard sends into the set 1 codes
-     * this driver decodes. Clearing it would put the keyboard into set 2
-     * and every key would decode as some other key, which is a far more
-     * confusing failure than no input at all.
-     */
+    /* Our public raw stream is set 1, not whatever firmware happened to
+     * leave selected. The 8042 translates the keyboard's set 2 stream. */
+    config |= 0x40;
 
     if (!controller_command(CMD_WRITE_CONFIG))
         return false;

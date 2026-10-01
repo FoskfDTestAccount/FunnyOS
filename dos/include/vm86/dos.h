@@ -38,10 +38,10 @@
  * In: the PSP, the environment block, and the loader that puts a flat
  * binary behind them and points the registers at it.
  *
- * Not in: INT 21h. Nothing in this file executes a DOS function, because
- * nothing has to -- a program that has just been loaded and reads its own
- * PSP goes through no service at all. The functions arrive in W4, and this
- * header grows with them.
+ * Not in: the INT 21h dispatcher itself, which is int21.h. What is here is
+ * the *map* -- the vectors a DOS program knows by number and the offsets
+ * it reads out of its own segment -- and the dispatcher is a service like
+ * any other.
  */
 #ifndef VM86_DOS_H
 #define VM86_DOS_H
@@ -51,6 +51,34 @@
 
 #include <vm86/cpu.h>
 #include <vm86/firmware.h>
+
+/* ------------------------------------------------------------------ */
+/* The DOS interrupt vectors                                           */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Five numbers every DOS program knows directly, which is why they are
+ * here next to the PSP offsets rather than in the file that implements
+ * them: they are an interface, not an implementation.
+ *
+ * They are DOS's, not the BIOS's, and the split matters. firmware.h holds
+ * the BIOS's numbers because a program that wants the keyboard calls 16h
+ * on any machine IBM ever made; these are MS-DOS's, which is a program
+ * that ran on top of that firmware and could have been written by
+ * anybody. See the note at the top of this file.
+ *
+ * 23h has a default Ctrl-C exit service since W6. 22h and 24h still
+ * have no DOS handler; all three are named because the
+ * loader copies the *previous* contents of those three vectors into the
+ * PSP, and a number that is copied without being named is a number
+ * nobody can look up. See VM86_PSP_OLD_INT22 and docs/dos-refs-dos.md
+ * section 1.
+ */
+#define VM86_INT_TERMINATE      0x20u  /* INT 20h: the old exit         */
+#define VM86_INT_DOS            0x21u  /* the function dispatcher       */
+#define VM86_INT_EXIT_ADDRESS   0x22u  /* where a terminated program goes */
+#define VM86_INT_CTRL_BREAK     0x23u  /* Ctrl-Break, and Ctrl-C        */
+#define VM86_INT_CRITICAL_ERROR 0x24u  /* a critical I/O error          */
 
 /* ------------------------------------------------------------------ */
 /* The Program Segment Prefix                                          */
@@ -106,8 +134,18 @@
 /*
  * The version this machine reports, both here and through INT 21h AH=30h.
  *
- * AH is the major version and AL the minor as a plain hexadecimal byte --
- * so 3.30 is 0x1E03, because 30 decimal is 0x1E, and 5.0 is 0x0005.
+ * **AL is the major version and AH the minor**, as a plain hexadecimal
+ * byte -- so 3.30 is 0x1E03, because 30 decimal is 0x1E, and 5.0 is
+ * 0x0005. The two halves are in the order a reader of English would not
+ * guess, which is why it is worth saying twice: `0x1E03` read the other
+ * way round is version 30.3.
+ *
+ * This comment used to say the opposite -- that AH was the major version
+ * -- while the constant beside it was right. That is the worst shape a
+ * wrong fact can take here: the number is what the machine sends and the
+ * prose is what a person reads before changing it, so the two disagreed
+ * without anything failing. docs/dos-refs-dos.md section 9 has the source
+ * (AL = major, AH = minor) and says the same thing about the mistake.
  *
  * WHICH version to claim is a decision rather than a fact, and
  * dos-refs-dos.md section 6 records it: 3.30 is the lowest claim that

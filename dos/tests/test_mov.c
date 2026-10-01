@@ -1103,6 +1103,75 @@ static void test_pop_sp_takes_the_popped_word_from_the_other_form(
 
 /* ------------------------------------------------------------------ */
 
+/*
+ * MOV does not touch the flags.
+ *
+ * This gap was found the long way round. The DOS acceptance program
+ * captures the carry flag with `mov byte [g_cf], 0` followed by `jnc` --
+ * which is the only way 8086 code can copy a flag into memory -- and
+ * something had to be ruled out when the flag stopped arriving. It is
+ * worth a case of its own rather than a note: the whole idiom of saving a
+ * flag depends on it, and no other test in this tree would notice if a
+ * store started clearing the carry.
+ *
+ * Three encodings, because "MOV does not touch the flags" is a claim
+ * about the operation and not about one form: the byte store, the word
+ * store and the register store, with the carry set before each. `stc` and
+ * `pushf`/`pop ax` bracket the store, so what is read back is the flag on
+ * the far side of it.
+ */
+static void test_mov_leaves_the_flags_alone(struct vm86_cpu *cpu)
+{
+    /* mov byte [0x0200], 5 */
+    static const uint8_t byte_form[] = {
+        0xF9,                                       /* stc             */
+        0xC6, 0x06, 0x00, 0x02, 0x05,               /* mov b [200], 5  */
+        0x9C, 0x58,                                 /* pushf; pop ax   */
+        0xF4,                                       /* hlt             */
+    };
+
+    /* mov word [0x0200], 0x1234 */
+    static const uint8_t word_form[] = {
+        0xF9,                                       /* stc             */
+        0xC7, 0x06, 0x00, 0x02, 0x34, 0x12,         /* mov w [200],...  */
+        0x9C, 0x58,                                 /* pushf; pop ax   */
+        0xF4,                                       /* hlt             */
+    };
+
+    /* mov [0x0200], bx */
+    static const uint8_t reg_form[] = {
+        0xF9,                                       /* stc             */
+        0x89, 0x1E, 0x00, 0x02,                     /* mov [200], bx   */
+        0x9C, 0x58,                                 /* pushf; pop ax   */
+        0xF4,                                       /* hlt             */
+    };
+
+    struct {
+        const char    *what;
+        const uint8_t *code;
+        uint16_t       size;
+    } cases[] = {
+        { "mov r/m8, imm8",  byte_form, (uint16_t)sizeof byte_form },
+        { "mov r/m16, imm16", word_form, (uint16_t)sizeof word_form },
+        { "mov r/m16, r16",  reg_form,  (uint16_t)sizeof reg_form },
+    };
+
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        vm86_test_load(cpu, cases[i].code, cases[i].size);
+        vm86_test_run(cpu, 16u);
+
+        /* The carry is checked out of the stack rather than out of the
+         * register: POP is another instruction the flag could be lost to,
+         * and this way a loss shows up as the wrong word rather than as
+         * the right word reached by a different route. The bits that are
+         * always set are masked off, since they are not flags. */
+        vm86_expect_u16(cases[i].what, (uint16_t)(cpu->ax & VM86_CF),
+                        VM86_CF);
+    }
+}
+
+/* ------------------------------------------------------------------ */
+
 static const struct vm86_test tests[] = {
     { "xchg r/m8, r8 register form",      test_xchg_byte_registers },
     { "xchg r/m16, r16 register form",    test_xchg_word_registers },
@@ -1171,6 +1240,7 @@ static const struct vm86_test tests[] = {
 
     { "push and pop every register",      test_push_and_pop_each_register },
     { "mov imm8/imm16 register tables",   test_mov_immediate_covers_both_register_tables },
+    { "mov leaves the flags alone",       test_mov_leaves_the_flags_alone },
     { "push sp pushes the decremented SP", test_push_sp_pushes_the_decremented_pointer },
     { "pop sp, register form",            test_pop_sp_takes_the_popped_word_from_the_other_form },
 };

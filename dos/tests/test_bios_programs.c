@@ -106,6 +106,7 @@ static const char *stop_name(enum vm86_bios_stop stop)
     case VM86_BIOS_FAULT:      return "a fault with no handler";
     case VM86_BIOS_BROKEN:     return "the emulator's opcode tables";
     case VM86_BIOS_UNFINISHED: return "never finishing";
+    case VM86_BIOS_EXITED:     return "the program ending itself";
     case VM86_BIOS_NO_FIRMWARE:return "no firmware to run against";
     }
 

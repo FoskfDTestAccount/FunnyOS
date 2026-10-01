@@ -846,13 +846,210 @@ M4_MUTATIONS = [
 ]
 
 
+# ---------------------------------------------------------------------
+# M5: the DOS layer.
+#
+# W4's, and the first set whose anchors are in dos/dos -- a directory that
+# did not exist when the two tables above were written.
+#
+# The shape of these is different from M3's and M4's, and the difference
+# is worth naming. An instruction mutant usually changes an answer, and
+# some case notices. A *convention* mutant changes something no case
+# observes directly: whether the carry flag is cleared on success, whether
+# an unimplemented function puts a code in AX, which of the two halves of
+# the version is which. Those are the ones a suite written from its own
+# implementation would miss, so several of the entries below are exactly
+# them.
+# ---------------------------------------------------------------------
+
+M5_MUTATIONS = [
+    # ---- dos/dos/int21.c: the version -------------------------------
+    ('the version halves swapped', 'dos/int21.c',
+     '    cpu->ax = VM86_DOS_VERSION;',
+     '    cpu->ax = (uint16_t)((VM86_DOS_VERSION >> 8) |\n'
+     '                          (VM86_DOS_VERSION << 8));'),
+
+    # ---- dos/dos/int21.c: the console functions ---------------------
+    ('09h prints the terminator too', 'dos/int21.c',
+     '        if (ch == (uint8_t)VM86_INT21_STRING_END)\n'
+     '            break;',
+     '        if (ch == (uint8_t)VM86_INT21_STRING_END) {\n'
+     '            bios10_tty(cpu, st->video, ch);   /* mutated */\n'
+     '            break;\n'
+     '        }'),
+    ('the string walk never stops on unmapped memory', 'dos/int21.c',
+     '        if (vm86_mem_offset(mem, at) == VM86_MEM_UNMAPPED)\n'
+     '            break;',
+     '        /* mutated: the memory bound is the only one left */'),
+    ('a successful call leaves the carry alone', 'dos/int21.c',
+     '    vm86_flag_set(cpu, VM86_CF, false);\n}',
+     '    (void)cpu;   /* mutated: success touches no flag */\n}'),
+
+    # ---- dos/dos/int21.c: the vectors -------------------------------
+    ('25h writes the address the wrong way round', 'dos/int21.c',
+     '    vm86_mem_write16(cpu->mem, at,      cpu->dx);\n'
+     '    vm86_mem_write16(cpu->mem, at + 2u, cpu->ds);',
+     '    vm86_mem_write16(cpu->mem, at,      cpu->ds);\n'
+     '    vm86_mem_write16(cpu->mem, at + 2u, cpu->dx);'),
+    ('35h hands back the offset in ES', 'dos/int21.c',
+     '    cpu->bx = vm86_mem_read16(cpu->mem, at);\n\n'
+     '    /* Through the accessor, because ES has a cached base and writing '
+     'the\n'
+     '     * register directly would leave the cache describing the old\n'
+     '     * segment. See the note on seg_base in cpu.h. */\n'
+     '    vm86_set_seg(cpu, VM86_ES, vm86_mem_read16(cpu->mem, at + 2u));',
+     '    cpu->bx = vm86_mem_read16(cpu->mem, at + 2u);\n\n'
+     '    vm86_set_seg(cpu, VM86_ES, vm86_mem_read16(cpu->mem, at));'),
+
+    # ---- dos/dos/int21.c: the DTA -----------------------------------
+    ('1Ah keeps a linear address', 'dos/int21.c',
+     '    st->dta_segment = cpu->ds;\n'
+     '    st->dta_offset  = cpu->dx;',
+     '    uint32_t linear = ((uint32_t)cpu->ds << 4) + cpu->dx;\n'
+     '    st->dta_segment = (uint16_t)(linear >> 4);\n'
+     '    st->dta_offset  = (uint16_t)(linear & 0x000Fu);'),
+    ('the default DTA ignores the PSP segment', 'dos/int21.c',
+     '    st->dta_offset  = psp_segment ? '
+     '(uint16_t)VM86_INT21_DEFAULT_DTA : 0u;',
+     '    st->dta_offset  = (uint16_t)VM86_INT21_DEFAULT_DTA;'),
+
+    # ---- dos/dos/int21.c: the drive and the errors ------------------
+    ('0Eh ignores its argument', 'dos/int21.c',
+     '    if (cpu->dl != (uint8_t)VM86_INT21_DRIVE_F) {',
+     '    if (false && cpu->dl != (uint8_t)VM86_INT21_DRIVE_F) {'),
+    ('19h always answers with drive A:', 'dos/int21.c',
+     '    cpu->al = (uint8_t)VM86_INT21_DRIVE_F;',
+     '    cpu->al = 0u;'),
+    ('an unknown function returns an error code in AX', 'dos/int21.c',
+     '        cpu->al = 0u;\n'
+     '        vm86_flag_set(cpu, VM86_CF, true);',
+     '        cpu->ax = 1u;\n'
+     '        vm86_flag_set(cpu, VM86_CF, true);'),
+    ('an error sets the carry but no code', 'dos/int21.c',
+     '    vm86_flag_set(cpu, VM86_CF, true);\n'
+     '    cpu->ax = code;',
+     '    vm86_flag_set(cpu, VM86_CF, true);\n'
+     '    (void)code;'),
+
+    # ---- dos/dos/int21.c: terminating -------------------------------
+    ('4Ch exits with zero instead of AL', 'dos/int21.c',
+     '        vm86_service_exit(cpu, cpu->al);',
+     '        vm86_service_exit(cpu, 0u);'),
+    ('INT 20h exits with a code of its own', 'dos/int21.c',
+     '    (void)ctx;   /* INT 20h carries nothing; see the note in '
+     'int21.h */\n\n'
+     '    vm86_service_exit(cpu, 0u);',
+     '    (void)ctx;\n\n'
+     '    vm86_service_exit(cpu, 1u);'),
+
+    # ---- dos/intr/trap.c: the exit reaching the run loop ------------
+    ('the trap does not report the exit', 'intr/trap.c',
+     '    if (cpu->exited)\n'
+     '        return VM86_EXIT;',
+     '    if (false && cpu->exited)\n'
+     '        return VM86_EXIT;'),
+    ('the trap never writes a service\'s flags back', 'intr/trap.c',
+     '    if (have_frame) {',
+     '    if (false && have_frame) {'),
+
+    # ---- dos/dos/psp.c: the loader and the dispatcher's PSP ---------
+    ('the loader points every segment but CS at zero', 'dos/psp.c',
+     '    vm86_set_seg(cpu, VM86_DS, start->segment);',
+     '    vm86_set_seg(cpu, VM86_DS, 0u);'),
+]
+
+
 def layer_of(path):
     """Which layer a mutant belongs to, from the file it edits."""
     head = path.split('/')[0]
-    return head if head in ('cpu', 'mem', 'intr', 'bios') else 'tests'
+    return head if head in ('cpu', 'mem', 'intr', 'bios', 'dos') else 'tests'
 
 
-MUTATIONS = list(M3_MUTATIONS) + M4_MUTATIONS
+# W5/W6 targeted resource defects. EXPECTED diagnoses live in
+# inject-resources.py; the ordinary campaign can also run these.
+M56_MUTATIONS = [('W5 mount ignores boot signature',
+  'dos/fat.c',
+  'image[510]!=0x55 || image[511]!=0xAA',
+  'false'),
+ ('W5 read never shortens at EOF',
+  'dos/fat.c',
+  'if(count>size-f->position) count=size-f->position;',
+  'if(count>size-f->position) count=0;'),
+ ('W5 close leaves descriptor live',
+  'dos/fat.c',
+  'f->used=false; return 0;',
+  'f->used=true; return 0;'),
+ ('W5 seek loses signed displacement',
+  'dos/fat.c',
+  'int64_t n=base+offset;',
+  'int64_t n=base+(uint32_t)offset;'),
+ ('W5 writes only the first FAT', 'dos/fat.c', 'i<v->copies;i++', 'i<1;i++'),
+ ('W5 truncate retains old size',
+  'dos/fat.c',
+  'if(!count || f->position>old) put32(p+28,f->position);',
+  'if(count && f->position>old) put32(p+28,f->position);'),
+ ('W5 allows writing a readonly file',
+  'dos/fat.c',
+  '((a&1) && (create || mode))',
+  '(false && (create || mode))'),
+ ('W5 search restarts on FindNext',
+  'dos/int21.c',
+  'index|=(uint32_t)vm86_mem_read8(cpu->mem,guest_address(seg,off,15+i))<<(8*i);',
+  'index=0;'),
+ ('W5 DTA size is one byte late',
+  'dos/int21.c',
+  'result[26+i]=p[28+i];',
+  'result[27+i]=p[28+i];'),
+ ('W5 read ignores invalid guest buffers',
+  'dos/int21.c',
+  'if(!guest_range(cpu,cpu->ds,cpu->dx,count)) { dos_fail(cpu,13); return; }',
+  'if(false && !guest_range(cpu,cpu->ds,cpu->dx,count)) { dos_fail(cpu,13); return; }'),
+ ('W5 file read answer always zero',
+  'dos/int21.c',
+  'cpu->ax=(uint16_t)total; dos_ok(cpu);',
+  'cpu->ax=0; dos_ok(cpu);'),
+ ('W5 seek swaps AX and DX',
+  'dos/int21.c',
+  'cpu->ax=(uint16_t)pos; cpu->dx=(uint16_t)(pos>>16);',
+  'cpu->dx=(uint16_t)pos; cpu->ax=(uint16_t)(pos>>16);'),
+ ('W6 availability says zero for a waiting key',
+  'dos/int21.c',
+  '? 0xFF : 0; dos_ok(cpu);',
+  '? 0 : 0; dos_ok(cpu);'),
+ ('W6 direct empty input clears ZF',
+  'dos/int21.c',
+  'cpu->al=0; vm86_flag_set(cpu,VM86_ZF,true); dos_ok(cpu);',
+  'cpu->al=0; vm86_flag_set(cpu,VM86_ZF,false); dos_ok(cpu);'),
+ ('W6 echo call never echoes',
+  'dos/int21.c',
+  'if(fn==0x01) bios10_tty(cpu,st->video,ch);',
+  'if(false && fn==0x01) bios10_tty(cpu,st->video,ch);'),
+ ('W6 no echo call echoes',
+  'dos/int21.c',
+  'if(fn==0x01) bios10_tty(cpu,st->video,ch);',
+  'if(fn==0x01 || fn==0x07) bios10_tty(cpu,st->video,ch);'),
+ ('W6 extended key loses its scan byte',
+  'dos/int21.c',
+  '*ch=st->extended_key; st->extended_pending=false;',
+  '*ch=0; st->extended_pending=false;'),
+ ('W6 line count includes carriage return',
+  'dos/int21.c',
+  'guest_address(seg,off,1),st->line_length);',
+  'guest_address(seg,off,1),(uint8_t)(st->line_length+1));'),
+ ('W6 line buffer does not reserve carriage return',
+  'dos/int21.c',
+  'st->line_length<max-1u',
+  'st->line_length<max'),
+ ('W6 backspace never removes a character',
+  'dos/int21.c',
+  'st->line_length--; bios10_tty(cpu,st->video,8);',
+  'st->line_length+=0; bios10_tty(cpu,st->video,8);'),
+ ('W6 IRET forgets the outer interrupt frame',
+  'cpu/ops_ctl.c',
+  'cpu->intr_frame_sp=cpu->intr_frames[cpu->intr_depth-1].sp;',
+  'cpu->intr_frame_sp=0;')]
+
+MUTATIONS = list(M3_MUTATIONS) + list(M4_MUTATIONS) + list(M5_MUTATIONS) + list(M56_MUTATIONS)
 
 
 # ---------------------------------------------------------------------

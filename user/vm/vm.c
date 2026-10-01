@@ -80,6 +80,8 @@
 #include <vm86/dos.h>
 #include <vm86/firmware.h>
 #include <vm86/host.h>
+#include <vm86/int21.h>
+#include <vm86/fat.h>
 #include <vm86/mem.h>
 #include <vm86/ops.h>
 
@@ -486,7 +488,13 @@ struct vm_screen {
 
 static struct bios10_state g_video;
 static struct bios16_state g_keyboard;
+static struct fat_volume g_files;
+static bool g_mounted, g_raw_active;
+static unsigned g_resource_hold;
+static uint8_t g_disk[720u*512u] __attribute__((section(".guestram"), aligned(4096)));
+static uint8_t g_com[65280] __attribute__((section(".guestram"), aligned(4096)));
 static struct bios1a_state g_clock;
+static struct int21_state  g_dos21;
 static struct vm_screen    g_screen;
 static struct vm86_display g_display;
 
@@ -650,6 +658,16 @@ static void power_on(struct vm86_mem *mem, struct vm86_cpu *cpu)
     bios1a_reset(&g_clock);
 
     /*
+     * The DOS dispatcher comes up with no program behind it, and
+     * machine_build_dos gives it the real PSP afterwards -- the default
+     * transfer address lives inside the PSP, so it cannot be set until
+     * the loader has chosen a segment. A machine built by
+     * machine_build, above, never loads a program at all and keeps the
+     * empty one.
+     */
+    int21_reset(&g_dos21, &g_video, 0u);
+
+    /*
      * `drawn` is cleared so that the first present of a case reaches the
      * kernel whatever the previous case left in `frame`, and `holding` is
      * deliberately not: the console, once taken, is this process's across
@@ -672,6 +690,10 @@ static void power_on(struct vm86_mem *mem, struct vm86_cpu *cpu)
     vm86_register_service(VM86_INT_TIME,          bios1a_service, &g_clock);
     vm86_register_service(VM86_INT_TIMER,         bios1a_irq,     &g_clock);
     vm86_register_service(VM86_INT_DISK,          bios13_service, NULL);
+    vm86_register_service(VM86_INT_CTRL_BREAK, int21_break_service, NULL);
+    vm86_register_service(VM86_INT_DOS,           int21_service, &g_dos21);
+    vm86_register_service(VM86_INT_TERMINATE,     int21_terminate_service,
+                          NULL);
 }
 
 static void machine_build(struct vm86_mem *mem, struct vm86_cpu *cpu,
@@ -710,8 +732,12 @@ static void machine_build(struct vm86_mem *mem, struct vm86_cpu *cpu,
 #define GUEST_ENVIRONMENT_SEGMENT 0x0F00u
 
 /* What a program is told it is called. The drive letter matches the one
- * the shell's prompt uses, which is what this filesystem is called. */
+ * the shell's prompt uses, which is what this filesystem is called -- and
+ * the same letter the DOS layer answers INT 21h AH=19h with, so a program
+ * that asks which drive it is on and one that reads its own path back out
+ * of the environment agree. */
 #define GUEST_PROGRAM_PATH "F:\\PSP.COM"
+#define GUEST_INT21_PATH   "F:\\INT21.COM"
 
 /*
  * The environment a started program inherits.
@@ -743,13 +769,13 @@ static const char *const g_dos_environment[] = {
 static enum vm86_dos_load_result
 machine_build_dos(struct vm86_mem *mem, struct vm86_cpu *cpu,
                   const uint8_t *image, uint32_t size, const char *tail,
-                  struct vm86_dos_psp *out)
+                  const char *path, struct vm86_dos_psp *out)
 {
     struct vm86_dos_start start = {
         .segment     = GUEST_SEGMENT,
         .environment = GUEST_ENVIRONMENT_SEGMENT,
         .parent      = GUEST_SEGMENT,
-        .path        = GUEST_PROGRAM_PATH,
+        .path        = path,
         .tail        = tail,
         .vars        = g_dos_environment,
         .var_count   = (uint32_t)GUEST_ENVIRONMENT_COUNT,
@@ -757,7 +783,21 @@ machine_build_dos(struct vm86_mem *mem, struct vm86_cpu *cpu,
 
     power_on(mem, cpu);
 
-    return vm86_dos_load(cpu, image, size, &start, out);
+    enum vm86_dos_load_result result =
+        vm86_dos_load(cpu, image, size, &start, out);
+
+    /*
+     * The dispatcher's default transfer address is inside the PSP, so it
+     * can only be set once the loader has said which segment that is.
+     * Only on success: a refused load left no program for a transfer
+     * address to belong to.
+     */
+    if (result == VM86_DOS_LOADED) {
+        int21_reset(&g_dos21, &g_video, out->segment);
+        if(g_mounted) g_dos21.files=&g_files;
+    }
+
+    return result;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1024,22 +1064,31 @@ static bool run_case(const struct guest_case *c)
  * at a loaded machine before it runs, and whether a program may run at all
  * is not the loader's decision.
  *
- * What is deliberately NOT here is the keyboard. The kernel hands out
- * decoded key codes rather than scan codes, and the only call that gets
- * one blocks until a key arrives -- so a guest waiting on INT 16h would
- * wait forever and the machine's clock would stop with it. key.asm is a
- * host-suite case. M4-README.md section 8 records the gap in full; nothing
- * here pretends to close it.
+ * W6 acquires a raw set-1 stream for mounted DOS programs. Byte delivery
+ * happens between slices, never by reverse-mapping translated host keys,
+ * and never by blocking the interpreter's host thread.
+
  */
 static bool drive(const char *name)
 {
     enum vm86_stop  stop = VM86_STOP_STEPS;
     unsigned        slices;
     unsigned long   last_ms = u_uptime_ms();
+    bool input_ready = g_resource_hold != 6;
 
     for (slices = 0; slices < VM_RUN_MAX_TURNS; slices++) {
         uint64_t retired = g_cpu.insn_count;
 
+        /* Never overwrite the emulated 8042's one-byte latch. Prefix,
+         * modifier, make and break bytes each traverse INT 09h separately. */
+        if(g_raw_active && input_ready && !g_keyboard.controller_full && vm86_next_pending(&g_cpu)<0) {
+            int scan=u_kbd_poll();
+            if(scan==-10) { uputs("  VM: keyboard stream overflow: FAIL\n"); return false; }
+            if(scan>=0) {
+                bios16_key_arrived(&g_keyboard,(uint8_t)scan);
+                vm86_raise(&g_cpu,VM86_INT_KEYBOARD);
+            }
+        }
         stop = vm86_run(&g_cpu, VM_SLICE_STEPS);
 
         /*
@@ -1056,7 +1105,21 @@ static bool drive(const char *name)
         if (g_cpu.insn_count != retired)
             present(&g_cpu);
 
-        if (stop == VM86_STOP_FAULT || stop == VM86_STOP_BROKEN)
+        /* The hardware acceptance sample first proves an empty BIOS/DOS
+         * queue. Announce readiness only after the guest has actually
+         * printed its prompt, not merely after raw acquisition. Queued
+         * physical keys stay in the kernel until then, so slow TCG cannot
+         * turn a boot-time race into an "empty poll" failure. */
+        if(!input_ready) {
+            static const char prompt[]="W6 BIOS ready";
+            bool visible=true;
+            for(unsigned i=0;i<sizeof(prompt)-1;i++)
+                if(vm86_mem_read8(g_cpu.mem,VM86_TEXT_BASE+i*2u)!=(uint8_t)prompt[i]) visible=false;
+            if(visible) { input_ready=true; uputs("W6 input ready\n"); }
+        }
+
+        if (stop == VM86_STOP_FAULT || stop == VM86_STOP_BROKEN ||
+            stop == VM86_STOP_EXIT)
             break;
 
         /*
@@ -1105,6 +1168,25 @@ static bool drive(const char *name)
 
     present(&g_cpu);
 
+    /*
+     * A service whose flags never reached the guest, reported and only
+     * reported when it happens.
+     *
+     * The guest cannot tell the two apart: a service that answered "no"
+     * with the carry flag and one whose carry flag was dropped both leave
+     * the program reading CF. So the machine says which happened, here,
+     * because there is nowhere else it can be seen -- and it says it only
+     * when something went wrong, so that its absence is the all-clear. See
+     * the note on the accessors in host.h, and dos/tests/test_int21.c,
+     * which asserts the same two numbers where they can be checked in a
+     * millisecond.
+     */
+    if (vm86_flags_declined() != 0)
+        uprintf("  flags  : WARNING -- %u of %u service flag write-backs "
+                "found no frame to go into\n",
+                (unsigned)vm86_flags_declined(),
+                (unsigned)(vm86_flags_declined() +
+                           vm86_flags_written_back()));
 
     if (stop == VM86_STOP_BROKEN) {
         uprintf("  result : INTERNAL ERROR, the opcode table did not "
@@ -1126,6 +1208,20 @@ static bool drive(const char *name)
                 slices, (unsigned)g_ms_advanced);
         uprintf("  VM: case %s: FAIL (runaway guest)\n", name);
         return false;
+    }
+
+    /*
+     * The program ended itself, which is a normal ending and not a
+     * failure. The code is printed because it is the whole difference
+     * between this and a halt: a caller that did not say it would be
+     * saying that AH=4Ch and `cli; hlt` are the same event.
+     */
+    if (stop == VM86_STOP_EXIT) {
+        uprintf("  result : the program ended itself with code %u, after "
+                "%u slice(s) and %u ms of real time\n",
+                (unsigned)g_cpu.exit_code, slices + 1u,
+                (unsigned)g_ms_advanced);
+        return true;
     }
 
     uprintf("  result : halted after %u slice(s), %u ms of real time\n",
@@ -1159,14 +1255,15 @@ static bool run_corpus(const char *name, const uint8_t *image, uint32_t size)
  * has to say so in words that name the reason.
  */
 static bool run_dos_program(const char *name, const uint8_t *image,
-                            uint32_t size, const char *tail)
+                            uint32_t size, const char *tail,
+                            const char *path)
 {
     struct vm86_dos_psp psp;
 
     uprintf("\n  --- guest case \"%s\" ---\n", name);
 
     enum vm86_dos_load_result result =
-        machine_build_dos(&g_mem, &g_cpu, image, size, tail, &psp);
+        machine_build_dos(&g_mem, &g_cpu, image, size, tail, path, &psp);
 
     if (result != VM86_DOS_LOADED) {
         uprintf("  result : the loader refused it (reason %u)\n",
@@ -1850,6 +1947,68 @@ int vm_screen_hold(void)
 }
 
 /*
+ * The W4 acceptance, with the screen left up.
+ *
+ * A .COM that asks DOS for things and prints what it was told, on the
+ * real machine rather than in a host suite. The host suite is where the
+ * bytes are checked -- dos/tests/test_int21.c, with every expected value
+ * transcribed from docs/dos-refs-dos.md and sixteen injections proving
+ * the assertions can fail -- and what this adds is the same thing vm=psp
+ * added for the loader: that it works in the address space it will be
+ * used in, and that what it printed is *visible*.
+ *
+ * The program ends with INT 21h AH=4Ch, so this is the first run in the
+ * project whose result is an exit code rather than a halt. drive() prints
+ * it; tools/run-screen-test.sh asserts on the line.
+ *
+ * No command tail: this program reads nothing out of its PSP except the
+ * segment registers, and a tail here would be a second thing the two runs
+ * had in common rather than a second thing checked.
+ */
+int vm_int21_hold(void)
+{
+    unsigned checks   = 0;
+    unsigned failures = 0;
+
+    uputs("\n[vm86 int21]\n");
+
+    if (!screen_take())
+        return 1;
+
+    if (!run_dos_program("int21", vm_corpus_dos_int21,
+                         (uint32_t)vm_corpus_dos_int21_size, NULL,
+                         GUEST_INT21_PATH)) {
+        screen_give_back();
+        return 1;
+    }
+
+    check_screen("int21", g_presents, g_refused, &checks, &failures);
+    report_rows("int21", &g_cpu);
+
+    uprintf("  screen : the cursor is at cell %u\n",
+            (unsigned)bios10_cursor_cell(&g_cpu, &g_video));
+
+    uprintf("  VM: case int21: %s\n", failures ? "FAIL" : "PASS");
+    uprintf("  checks : %u ok, %u failed\n", checks - failures, failures);
+    uprintf("  VM: RESULT %s\n", failures ? "FAIL" : "PASS");
+
+    if (failures) {
+        screen_give_back();
+        return 1;
+    }
+
+    uprintf("  screen : the page stays up until a key arrives\n");
+    uflush();
+
+    while (u_getkey() == 0)
+        ;
+
+    screen_give_back();
+
+    return 0;
+}
+
+/*
  * The DOS acceptance, with the screen left up.
  *
  * This is the first program in the project that is loaded the way DOS
@@ -1883,7 +2042,8 @@ int vm_psp_hold(void)
         return 1;
 
     if (!run_dos_program("psp", vm_corpus_dos_psp,
-                         (uint32_t)vm_corpus_dos_psp_size, VM_PSP_TAIL)) {
+                         (uint32_t)vm_corpus_dos_psp_size, VM_PSP_TAIL,
+                         GUEST_PROGRAM_PATH)) {
         screen_give_back();
         return 1;
     }
@@ -1912,4 +2072,71 @@ int vm_psp_hold(void)
     screen_give_back();
 
     return 0;
+}
+
+/* Resource acquisition is outside DOS. The FAT implementation can be fed
+ * the same bytes by a host suite, and never knows about SYS_OPEN/READ. */
+static bool mount_disk(void)
+{
+    g_mounted=false;
+    int fd=u_open("DOS.IMG",O_RDONLY);
+    if(fd<0) { uputs("  VM: DOS.IMG missing: FAIL\n"); return false; }
+    unsigned used=0;
+    while(used<sizeof(g_disk)) {
+        long n=u_read(fd,g_disk+used,sizeof(g_disk)-used);
+        if(n<=0) break;
+        used+=(unsigned)n;
+    }
+    uint8_t extra;
+    long trailing=u_read(fd,&extra,1);
+    u_close(fd);
+    if(used!=sizeof(g_disk) || trailing!=0 || fat_mount(&g_files,g_disk,used)) {
+        uputs("  VM: invalid FAT image: FAIL\n"); return false;
+    }
+    g_mounted=true;
+    uputs("  VM: FAT12 mounted from DOS.IMG\n");
+    return true;
+}
+static bool load_com(const char *name,unsigned *size)
+{
+    uint16_t handle;
+    if(fat_open(&g_files,name,0,false,0,&handle)) return false;
+    uint32_t n=0; int e=fat_read(&g_files,handle,g_com,sizeof(g_com),&n);
+    uint8_t extra; uint32_t trailing=0;
+    if(!e) e=fat_read(&g_files,handle,&extra,1,&trailing);
+    fat_close(&g_files,handle);
+    if(e || trailing || !n) return false;
+    *size=n; return true;
+}
+int vm_run_file(const char *name,const char *tail)
+{
+    unsigned size;
+    if(!mount_disk() || !load_com(name,&size)) { uprintf("  VM: cannot load %s\n",name); return 1; }
+    if(!screen_take()) { g_mounted=false; return 1; }
+    if(u_kbd_acquire()!=0) { screen_give_back(); g_mounted=false; return 1; }
+    g_raw_active=true;
+    bool ran=run_dos_program(name,g_com,size,tail,name);
+    int code=ran && g_cpu.exited ? g_cpu.exit_code : 1;
+    report_rows(g_resource_hold ? (g_resource_hold==5 ? "files" : "keys") : name,&g_cpu);
+    uprintf("  screen : the cursor is at cell %u\n",(unsigned)bios10_cursor_cell(&g_cpu,&g_video));
+    g_raw_active=false;
+    u_kbd_release();
+    if(g_resource_hold && ran && code==0) {
+        uprintf("W%u screen ready\n",g_resource_hold);
+        /* W6's translated nonblocking primitive has a real consumer too:
+         * the hold observes empty polls, then the test's release key. */
+        while(u_pollkey()==0) { }
+        uputs("  VM: translated nonblocking release key: PASS\n");
+    }
+    screen_give_back(); g_mounted=false;
+    return code;
+}
+int vm_resources_test(int keyboard)
+{
+    const char *name=keyboard ? "KEYS.COM" : "FILES.COM";
+    g_resource_hold=keyboard ? 6u : 5u;
+    int code=vm_run_file(name,NULL);
+    g_resource_hold=0;
+    uprintf("W%u resource acceptance: %s\n",keyboard ? 6u : 5u,code==0 ? "PASS" : "FAIL");
+    return code;
 }

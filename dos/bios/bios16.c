@@ -520,10 +520,11 @@ void bios16_irq(struct vm86_cpu *cpu, void *ctx)
  * it is waiting for can never be delivered.
  *
  * `vm86_service_retry()` is the way out. It undoes the interrupt that
- * reached this service -- pops the frame the guest's INT pushed, rewinds
- * the instruction pointer to the INT itself -- and returns. The run loop
+ * reached this service by rewinding to the host trap in the existing
+ * stub. The interrupt frame stays live (no new INT and no extra push).
+ * The run loop
  * finishes its slice, the host feeds a key and raises IRQ1, and the guest
- * re-executes the INT and finds one. The waiting happens outside, where
+ * re-executes the trap and finds one. The waiting happens outside, where
  * it belongs.
  *
  * It is a retry and not a re-entrant wait, so it costs nothing to be
@@ -645,3 +646,6 @@ void bios16_init(struct vm86_cpu *cpu, struct bios16_state *st)
     vm86_mem_write16(cpu->mem, bda_linear(VM86_BDA_KB_TAIL),
                      (uint16_t)VM86_BDA_KB_EMPTY);
 }
+
+bool bios16_take(struct vm86_cpu *cpu, uint16_t *word) { return kb_take(cpu, word); }
+bool bios16_peek(struct vm86_cpu *cpu, uint16_t *word) { return kb_peek(cpu, word); }

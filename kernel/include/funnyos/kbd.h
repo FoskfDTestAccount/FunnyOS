@@ -97,4 +97,10 @@ bool kbd_selftest(void);
 /* Scancodes decoded since boot, including modifier presses. */
 uint64_t kbd_scancode_count(void);
 
+struct process;
+bool kbd_raw_acquire(const struct process *who);
+int kbd_raw_poll(const struct process *who);
+bool kbd_raw_release(const struct process *who);
+void kbd_raw_release_if_held_by(const struct process *who);
+
 #endif /* FUNNYOS_KBD_H */

@@ -84,6 +84,16 @@
  */
 #define ARG_VM_PSP      8
 
+/*
+ * A third interpreter mode, and a third claim again: a program that calls
+ * INT 21h and prints what it was told. This is the first one whose program
+ * ends by *exiting* rather than by halting, so the exit code is a value
+ * that has to travel the whole way out.
+ *
+ * `vm=int21` on the kernel command line.
+ */
+#define ARG_VM_INT21    9
+
 /* Deliberately not zero, for the same reason EXIT_TEST_CODE is not. */
 #define SPAWN_CHILD_CODE 42
 
@@ -377,7 +387,21 @@ struct command {
     void      (*run)(int argc, char **argv);
 };
 
+static void cmd_dos(int argc,char **argv)
+{
+    if(argc<2) { uputs("Syntax: DOS <8.3.COM> [arguments]\n"); return; }
+    char tail[127]; unsigned n=0;
+    for(int i=2;i<argc;i++) {
+        if(n && n<126) tail[n++]=' ';
+        for(const char *p=argv[i];*p && n<126;p++) tail[n++]=*p;
+    }
+    tail[n]=0;
+    int code=vm_run_file(argv[1],tail);
+    uprintf("DOS program returned %d\n",code);
+}
+
 static const struct command g_commands[] = {
+    { "dos", "DOS <file> [args]", "run a .COM from the FAT image", cmd_dos },
     { "help",   "HELP",              "list the commands",              cmd_help   },
     { "dir",    "DIR",               "list the files",                 cmd_dir    },
     { "type",   "TYPE <file>",       "print a file",                   cmd_type   },
@@ -616,6 +640,14 @@ int u_main(uint64_t arg)
         /* And the same again for a program loaded behind a PSP, which is
          * the first one in the project loaded the way DOS loads one. */
         return vm_psp_hold();
+    }
+
+    if(arg==10 || arg==11) return vm_resources_test(arg==11);
+
+    if (arg == ARG_VM_INT21) {
+        /* And once more for the DOS dispatcher: a program that asks DOS
+         * for things rather than reading its own memory. */
+        return vm_int21_hold();
     }
 
     banner();

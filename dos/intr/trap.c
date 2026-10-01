@@ -28,6 +28,10 @@
 static vm86_service_fn g_service[256];
 static void           *g_ctx[256];
 
+/* See the note on the accessors in host.h. */
+static uint64_t g_flags_written_back;
+static uint64_t g_flags_declined;
+
 void vm86_register_service(uint8_t vector, vm86_service_fn fn, void *ctx)
 {
     g_service[vector] = fn;
@@ -36,6 +40,7 @@ void vm86_register_service(uint8_t vector, vm86_service_fn fn, void *ctx)
 
 void vm86_clear_services(void)
 {
+    g_flags_written_back = g_flags_declined = 0;
     for (unsigned i = 0; i < 256; i++) {
         g_service[i] = NULL;
         g_ctx[i]     = NULL;
@@ -101,7 +106,7 @@ void vm86_clear_services(void)
  */
 static bool frame_flags_address(struct vm86_cpu *cpu, uint32_t *out)
 {
-    if (cpu->sp != cpu->intr_frame_sp)
+    if (!cpu->intr_depth || cpu->intr_depth>64 || cpu->ss!=cpu->intr_frame_ss || cpu->sp != cpu->intr_frame_sp)
         return false;
 
     /* It is the stack, so the segment is SS with no override -- the same
@@ -183,10 +188,36 @@ enum vm86_result vm86_host_trap(struct vm86_cpu *cpu, uint8_t opcode)
     if (g_service[service])
         g_service[service](cpu, g_ctx[service]);
 
-    if (have_frame)
+    /*
+     * A program that asked to end has ended. Nothing below matters: there
+     * is no IRET to make and no flags to put back, because the machine is
+     * about to stop with the guest's own stub still un-executed.
+     *
+     * Checked before the flag write-back rather than after, so that the
+     * exit is one thing rather than "an exit that also rewrote a word of
+     * the frame on its way out" -- the frame belongs to an IRET that will
+     * never run.
+     */
+    if (cpu->exited)
+        return VM86_EXIT;
+
+    if (have_frame) {
         write_flags_back(cpu, flags_at);
+        g_flags_written_back++;
+    } else {
+        g_flags_declined++;
+    }
 
     return VM86_CONTINUE;
+}
+
+uint64_t vm86_flags_written_back(void) { return g_flags_written_back; }
+uint64_t vm86_flags_declined(void)     { return g_flags_declined; }
+
+void vm86_service_exit(struct vm86_cpu *cpu, uint16_t code)
+{
+    cpu->exited    = true;
+    cpu->exit_code = code;
 }
 
 void vm86_service_retry(struct vm86_cpu *cpu)

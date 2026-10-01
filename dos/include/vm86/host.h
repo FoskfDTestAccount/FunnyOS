@@ -133,11 +133,13 @@
  * machine can give each one the real thing, without either knowing about
  * the other.
  *
- * The signature has no way to say "the program has ended". It gains one
- * in M5, when INT 20h and INT 21h/4Ch exist and something needs to end a
- * program; the compiler will then point at every service that has to
- * decide, which is what the -Wswitch discipline on enum vm86_result is
- * for. Nothing in M4 needs it: a program here ends by halting.
+ * The signature has no way to say "the program has ended" -- it returns
+ * nothing -- and it does not need one. A service that has been asked to
+ * terminate calls vm86_service_exit(), which sets a flag on the processor;
+ * the trap turns that into VM86_EXIT, the instruction layer passes it up,
+ * and the run loop stops the machine. See vm86_service_exit below, and
+ * VM86_EXIT in ops.h for why it is a value in that enum and not a
+ * parameter here.
  */
 typedef void (*vm86_service_fn)(struct vm86_cpu *cpu, void *ctx);
 
@@ -219,6 +221,50 @@ enum vm86_result vm86_host_trap(struct vm86_cpu *cpu, uint8_t opcode);
  * loop already gave up is the delay; there is nothing to add to it.
  */
 void vm86_service_retry(struct vm86_cpu *cpu);
+
+/*
+ * End the program, with `code` as its exit status.
+ *
+ * This is the answer to the sentence in the comment on vm86_service_fn
+ * above -- "the signature has no way to say 'the program has ended'". A
+ * service that has been asked to terminate by the guest -- INT 20h,
+ * INT 21h AH=00h, INT 21h AH=4Ch, and in M6 INT 27h -- calls this and
+ * returns.
+ *
+ * What it does is set the flag; what stops the machine is the run loop.
+ * That split is deliberate and is the same one vm86_service_retry() makes:
+ * a service's job is to say what the guest asked for, and the loop's is to
+ * decide what that means for the machine. A service that could stop the
+ * machine itself would be a service that can stop it halfway through an
+ * instruction that has not finished -- and the trap still has a stub's
+ * IRET to skip over, which it does by returning VM86_EXIT rather than
+ * VM86_CONTINUE.
+ *
+ * The code is not masked or bounds-checked. DOS takes AL whole, and a
+ * caller that passed something wider has already decided what its own low
+ * byte means.
+ */
+void vm86_service_exit(struct vm86_cpu *cpu, uint16_t code);
+
+/*
+ * Diagnostics: how often the trap has put a service's flags back into its
+ * interrupt frame, and how often it declined because the stack pointer
+ * did not match the frame it had recorded.
+ *
+ * They exist because the two are indistinguishable from the guest's side.
+ * A service that sets the carry flag and a service whose carry flag was
+ * dropped both leave the program reading CF -- and the program has no way
+ * to tell "the machine said no" from "the machine said nothing". These
+ * counters are the only place that difference is recorded, and they were
+ * added the second time a lost flag cost an afternoon.
+ *
+ * The declined count is not an error on its own: a stub reached through a
+ * TSR's chained far call has two words under it rather than three, and
+ * declining to write over the wrong word is exactly right. What the
+ * numbers are for is telling that case from the other one.
+ */
+uint64_t vm86_flags_written_back(void);
+uint64_t vm86_flags_declined(void);
 
 /*
  * The lowest-numbered vector that is pending, or -1 when none is.
@@ -362,6 +408,19 @@ enum vm86_stop {
      * this run reached the handler it should have. This is never the
      * guest's fault and must not be reported as though it were. */
     VM86_STOP_BROKEN,
+
+    /*
+     * A service ended the program: the guest executed an INT whose handler
+     * called vm86_service_exit(). cpu->exit_code holds what it ended with.
+     *
+     * Its own value rather than VM86_STOP_HALT because the two are
+     * different events with different consequences. A program that halts
+     * with interrupts off is done; a program that exits is done *and has
+     * said what to return*, and a caller that folded them together would
+     * drop the code on the floor -- silently, since zero and "no code"
+     * would read the same.
+     */
+    VM86_STOP_EXIT,
 };
 
 /*

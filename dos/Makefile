@@ -144,12 +144,20 @@ $(BUILD)/corpus/%.c: $(BUILD)/corpus/%.bin ../tools/bin2c.py
 	@echo "  EMBED   $@"
 	@python3 ../tools/bin2c.py $< corpus_$(basename $(@F)) $@
 
-# The replayer and its header, added to the one suite that uses them.
+# The replayer and its header, added to the suite that uses them.
 #
-# replay.h is an order-only prerequisite so that editing it rebuilds the
-# suite without being handed to the compiler: everything in $^ ends up on
-# the command line, and a .h file there is not a thing to compile.
-$(BUILD)/test_corpus: $(CORPUS_EMBED) corpus/replay.c | corpus/replay.h
+# replay.h is an ordinary prerequisite, and it was an order-only one (`|
+# ...`) until M5 found out what that means. Order-only prerequisites are
+# not compared by timestamp -- that is the whole of what the word says --
+# so editing the header did not rebuild the three suites that include it,
+# and `make test` went on running binaries built from the header before
+# the edit. It is exactly the failure the note at the top of this file
+# warns about, arriving by a route that file did not name.
+#
+# The header has to stay out of the compiler's command line, though, and
+# that is why the shared recipe below filters .h out of $^ rather than
+# this rule keeping the header away from it.
+$(BUILD)/test_corpus: $(CORPUS_EMBED) corpus/replay.c corpus/replay.h
 
 # --- A second corpus: whole programs that talk to the firmware --------
 #
@@ -177,7 +185,7 @@ BIOS_CORPUS_EMBED := $(patsubst corpus/%.asm,$(BUILD)/corpus/%.c,$(BIOS_CORPUS_S
 ifneq ($(strip $(BIOS_CORPUS_SRC)),)
 $(BUILD)/test_bios_programs: $(BIOS_CORPUS_EMBED) \
                             $(wildcard corpus/bios/replay.c) \
-                            | $(wildcard corpus/bios/replay.h)
+                            $(wildcard corpus/bios/replay.h)
 endif
 
 # --- A third corpus: programs loaded the way DOS loads one ------------
@@ -198,20 +206,46 @@ DOS_CORPUS_EMBED := $(patsubst corpus/%.asm,$(BUILD)/corpus/%.c,$(DOS_CORPUS_SRC
 
 .SECONDARY: $(DOS_CORPUS_BIN)
 
+# Two suites want these, and for the same two reasons: each runs a whole
+# DOS program on the full replay machine, and each reads what it left on
+# the page. test_dos is the loader's, test_int21 is the dispatcher's, and
+# the corpus and the replayer are shared because a DOS program runs on the
+# same machine either way -- only the question being asked differs.
 ifneq ($(strip $(DOS_CORPUS_SRC)),)
 $(BUILD)/test_dos: $(DOS_CORPUS_EMBED) \
                    $(wildcard corpus/bios/replay.c) \
-                   | $(wildcard corpus/bios/replay.h)
+                   $(wildcard corpus/bios/replay.h)
+
+$(BUILD)/test_files $(BUILD)/test_input: $(DOS_CORPUS_EMBED) $(wildcard corpus/bios/replay.c) $(wildcard corpus/bios/replay.h)
+
+$(BUILD)/test_int21: $(DOS_CORPUS_EMBED) \
+                     $(wildcard corpus/bios/replay.c) \
+                     $(wildcard corpus/bios/replay.h)
 endif
 
 .PHONY: all test list clean $(addprefix test-,$(SUITES))
 
 all: test
 
-$(BUILD)/test_%: tests/test_%.c $(HARNESS_C) $(CORE_C) $(LIBK_C)
+# Every header in the subsystem, as a prerequisite of every suite.
+#
+# The suite is built from its sources in one command, so the compiler
+# always sees a consistent set -- but make does not know that a header
+# changed, so without this line `make test` happily re-runs a binary built
+# from the header before the edit. The recipe filters the .h files back
+# out of $^ before handing anything to the compiler.
+#
+# The top-level Makefile had the same gap in a worse form, because there
+# each translation unit is a separate object file: a header change left
+# half of them compiled against the old struct, and the two halves
+# disagreed at run time with no error anywhere. See the note on DEPS
+# there; this is the same lesson one layer down.
+HEADERS := $(shell find . ../libk/include -name '*.h' 2>/dev/null | sort)
+
+$(BUILD)/test_%: tests/test_%.c $(HARNESS_C) $(CORE_C) $(LIBK_C) $(HEADERS)
 	@mkdir -p $(@D)
 	@echo "  CCh     $@"
-	@$(CC) $(CFLAGS) -o $@ $^
+	@$(CC) $(CFLAGS) -o $@ $(filter-out %.h,$^)
 
 # Run every suite, and report at the end rather than at the first failure:
 # one run should tell you everything that is wrong.

@@ -12,7 +12,7 @@
  * These programs do not compute, they talk. They execute INT 10h and INT
  * 13h, they wait to be interrupted, and what they are graded on is what
  * ended up on a screen rather than in a register. None of that exists on a
- * bare processor: the vectors have to be installed, four services have to
+ * bare processor: the vectors have to be installed, the services have to
  * be registered with devices behind them, the host has to take the
  * processor back at intervals to advance a clock and poll a keyboard, and
  * the screen has to be read out of guest memory because a program may
@@ -277,6 +277,20 @@ enum vm86_bios_stop {
      * screen that will never change. */
     VM86_BIOS_UNFINISHED,
 
+    /*
+     * The program ended itself: it executed an INT whose handler called
+     * vm86_service_exit(). INT 20h and INT 21h AH=00h/4Ch are the three
+     * ways a DOS program does that, and the code it ended with is in
+     * vm86_bios_exit_code().
+     *
+     * Its own outcome and not VM86_BIOS_HALTED, because the two are
+     * different events: a program that halts with interrupts off is done,
+     * and a program that exits is done *and has said what to return*. A
+     * caller that read them as one would drop the code, silently, since
+     * zero and "no code" would look the same.
+     */
+    VM86_BIOS_EXITED,
+
     /* There are no services in this build to run anything against. See
      * the note on the header check above. */
     VM86_BIOS_NO_FIRMWARE,
@@ -308,7 +322,7 @@ uint8_t *vm86_bios_disk(struct vm86_bios_machine *);
 
 /*
  * Put `image` into guest memory at the convention's address, reset the
- * processor, install the firmware and register the four services.
+ * processor, install the firmware and register the services.
  *
  * Loading and running are separate calls because one sample needs two
  * runs: key.asm has to be looked at while it is still waiting and again
@@ -365,8 +379,21 @@ uint32_t       vm86_bios_memory_size(void);
  * retried blocking read, above all. */
 const struct vm86_cpu *vm86_bios_cpu(const struct vm86_bios_machine *);
 
+/*
+ * What the program exited with, or 0 if it did not exit.
+ *
+ * Only meaningful after VM86_BIOS_EXITED. It is an accessor rather than a
+ * field of the stop enum because a return code has 256 values and an
+ * outcome has four, and folding one into the other would need 256
+ * enumerators to say what a single number says.
+ */
+uint16_t vm86_bios_exit_code(const struct vm86_bios_machine *);
+
 /* One cell of a recorded screen. */
 struct vm86_bios_cell vm86_bios_cell_at(const struct vm86_bios_screen *,
                                         uint16_t cell);
+
+int vm86_bios_mount_fat(struct vm86_bios_machine *, uint8_t *image, uint32_t size);
+void vm86_bios_feed_key(struct vm86_bios_machine *, uint8_t scan);
 
 #endif /* VM86_BIOS_REPLAY_H */

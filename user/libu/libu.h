@@ -127,4 +127,9 @@ int u_screen_present(const unsigned char *cells, unsigned columns,
 /* Give the screen back to the kernel. */
 int u_screen_release(void);
 
+int u_kbd_acquire(void);
+int u_kbd_poll(void);
+int u_kbd_release(void);
+int u_pollkey(void);
+
 #endif /* LIBU_H */

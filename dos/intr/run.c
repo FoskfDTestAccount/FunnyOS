@@ -220,6 +220,20 @@ enum vm86_stop vm86_run(struct vm86_cpu *cpu, uint64_t steps)
              * ending would take a broken emulator for a clean run.
              */
             return VM86_STOP_BROKEN;
+
+        case VM86_EXIT:
+            /*
+             * The program ended itself: it executed an INT whose handler
+             * asked to terminate. The code is already on the processor,
+             * put there by vm86_service_exit(), and the caller reads it
+             * from cpu->exit_code.
+             *
+             * It is deliberately not VM86_HALT. HLT is a guest waiting
+             * for an interrupt and this is a guest that is finished; the
+             * two are told apart here, once, rather than by every caller
+             * wondering whether a halt meant an exit.
+             */
+            return VM86_STOP_EXIT;
         }
     }
 }

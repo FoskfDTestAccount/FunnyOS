@@ -105,6 +105,7 @@ CFLAGS := -std=c17 -g -O2 \
           -ffreestanding -fno-stack-protector -fno-pic -fno-pie \
           -mno-red-zone -mcmodel=kernel -mgeneral-regs-only \
           -Wall -Wextra \
+          -MMD -MP \
           $(INCLUDES)
 
 NASMFLAGS := -f elf64 -g -F dwarf
@@ -155,6 +156,11 @@ ASM_OBJS := $(patsubst %.asm,$(OBJ_DIR)/%.asm.o,$(ASM_SOURCES))
 #       <vm86/...>, and nothing else on the user side puts that directory
 #       on the search path.
 #
+#   -MMD -MP
+#       Write a dependency file per object, listing the headers it was
+#       compiled against. See the note on DEPS below, which is the reason
+#       these two flags are here rather than being a nicety.
+#
 # libk is compiled a second time for user space. It is freestanding
 # already, so the only thing that changes is the code model.
 # ---------------------------------------------------------------------
@@ -163,6 +169,7 @@ USER_CFLAGS := -std=c17 -g -O2 \
                -ffreestanding -fno-stack-protector -fno-pic -fno-pie \
                -mno-red-zone -mcmodel=small \
                -fno-builtin -Wall -Wextra \
+               -MMD -MP \
                -Iuser -Idos/include -Ikernel/include -Ilibk/include
 
 # The user program is linked into a single loadable segment, so the linker
@@ -226,7 +233,7 @@ VM_CORPUS_OBJS := $(patsubst %.c,%.c.o,$(VM_CORPUS_C))
 # These samples are loaded with a Program Segment Prefix rather than by the
 # M3/M4 convention, which is why they are not in the list above: the two
 # entry conventions both exist and a sample belongs to exactly one of them.
-VM_CORPUS_DOS_SRC  := dos/corpus/dos/psp.asm
+VM_CORPUS_DOS_SRC  := dos/corpus/dos/psp.asm dos/corpus/dos/int21.asm dos/corpus/dos/files.asm dos/corpus/dos/keys.asm
 VM_CORPUS_DOS_BIN  := $(patsubst dos/corpus/dos/%.asm,$(BUILD_DIR)/vmcorpus/dos_%.bin,$(VM_CORPUS_DOS_SRC))
 VM_CORPUS_DOS_C    := $(patsubst dos/corpus/dos/%.asm,$(BUILD_DIR)/generated/vm_corpus_dos_%.c,$(VM_CORPUS_DOS_SRC))
 VM_CORPUS_DOS_OBJS := $(patsubst %.c,%.c.o,$(VM_CORPUS_DOS_C))
@@ -266,9 +273,47 @@ INIT_BLOB_OBJ := $(BUILD_DIR)/generated/funnycom_blob.c.o
 OBJS := $(C_OBJS) $(ASM_OBJS) $(INIT_BLOB_OBJ)
 
 # ---------------------------------------------------------------------
+# What each object was compiled against
+#
+# One .d file per object, written by -MMD and read back here. This is not
+# a convenience: without it, changing a header does not rebuild the
+# objects that include it, and the two halves of a kernel or a user
+# program end up compiled against *different versions of the same struct*
+# -- with no error, because each object on its own is perfectly valid.
+#
+# That is not hypothetical. It happened in M5, and what it looked like was
+# an emulator defect: a field one file wrote was never seen by the file
+# that read it, so the 8086 subsystem ran with a stale view of its own
+# processor and a service's carry flag stopped reaching the guest. The
+# host suite -- which compiles every source in one command and is
+# therefore always self-consistent -- disagreed with the Ring 3 run, and
+# the difference took an afternoon to find because a half-rebuilt binary
+# reports nothing at all.
+#
+# -MP adds a phony target per header so that deleting one is not an error.
+# ASM objects are not covered; nasm is given no equivalent flag here, and
+# the kernel's .asm files include no headers.
+# ---------------------------------------------------------------------
+DEPS := $(C_OBJS:.o=.d) $(USER_C_OBJS:.o=.d) $(VM_CORPUS_OBJS:.o=.d) \
+        $(VM_CORPUS_DOS_OBJS:.o=.d) $(INIT_BLOB_OBJ:.o=.d)
+
+# The default goal, named rather than inherited.
+#
+# make takes the first target it sees as the goal, and the include below
+# pulls in a rule for every object before this file's own `all:` is read.
+# Without this line, `make` builds whichever object happens to be listed
+# first in the first .d file and stops -- reporting "'...acpi.c.o' is up
+# to date", doing nothing, and exiting 0. That is a worse failure than the
+# one this section exists to fix, because it is silent and it looks like a
+# build that had nothing to do.
+.DEFAULT_GOAL := all
+
+-include $(DEPS)
+
+# ---------------------------------------------------------------------
 # Targets
 # ---------------------------------------------------------------------
-.PHONY: all user run test test-uefi test-all test-fault test-input test-user test-vm test-screen check export clean distclean help
+.PHONY: test-dos-resources all user run test test-uefi test-all test-fault test-input test-user test-vm test-screen check export clean distclean help
 
 all: $(ISO)
 
@@ -277,7 +322,7 @@ user: $(USER_BIN)
 
 $(KERNEL): $(OBJS) linker.ld
 	@echo "  LD      $@"
-	@$(LD) $(LDFLAGS) -o $@ $(OBJS)
+	@$(LD) $(LDFLAGS) -o $@ $(OBJS) $(FAT_OBJ)
 	@bash $(CHECK_VECTOR_REGS) $@
 
 $(OBJ_DIR)/%.c.o: %.c
@@ -289,6 +334,22 @@ $(OBJ_DIR)/%.asm.o: %.asm
 	@mkdir -p $(@D)
 	@echo "  NASM    $<"
 	@$(NASM) $(NASMFLAGS) $< -o $@
+
+# W5: the kernel carries a resource, not a FAT parser. SYS_OPEN/READ
+# copy its bytes into the VM's own mutable, private mount.
+FAT_IMAGE := $(BUILD_DIR)/dos.img
+FAT_BLOB := $(BUILD_DIR)/generated/dos_disk.c
+FAT_OBJ := $(OBJ_DIR)/generated/dos_disk.c.o
+$(FAT_IMAGE): $(TOOLS_DIR)/make-fat-image.py $(VM_CORPUS_DOS_BIN)
+	@mkdir -p $(@D)
+	@python3 $(TOOLS_DIR)/make-fat-image.py $@ FILES.COM=$(BUILD_DIR)/vmcorpus/dos_files.bin KEYS.COM=$(BUILD_DIR)/vmcorpus/dos_keys.bin INT21.COM=$(BUILD_DIR)/vmcorpus/dos_int21.bin PSP.COM=$(BUILD_DIR)/vmcorpus/dos_psp.bin
+$(FAT_BLOB): $(FAT_IMAGE) $(TOOLS_DIR)/bin2c.py
+	@mkdir -p $(@D)
+	@python3 $(TOOLS_DIR)/bin2c.py $< funnyos_dos_disk $@
+$(FAT_OBJ): $(FAT_BLOB)
+	@mkdir -p $(@D)
+	@$(CC) $(CFLAGS) -c $< -o $@
+$(KERNEL): $(FAT_OBJ)
 
 # ---------------------------------------------------------------------
 # User program
@@ -498,7 +559,11 @@ test-screen: $(ISO)
 	    bash $(RUN_SCREEN_TEST) $(ISO)
 
 # Everything. Use this before committing.
+test-dos-resources: $(ISO)
+	@FUNYOS_BUILD_DIR=$(BUILD_DIR) python3 $(TOOLS_DIR)/run-dos-resources-test.py
+
 check: $(ISO)
+	@$(MAKE) -C dos test
 	@bash $(RUN_TEST) $(ISO) bios
 	@bash $(RUN_TEST) $(ISO) uefi
 	@bash $(RUN_FAULT_TEST) bios
@@ -508,6 +573,7 @@ check: $(ISO)
 	    bash $(TOOLS_DIR)/run-vm-test.sh $(ISO) bios
 	@FUNYOS_BUILD_DIR=$(BUILD_DIR) \
 	    bash $(RUN_SCREEN_TEST) $(ISO)
+	@FUNYOS_BUILD_DIR=$(BUILD_DIR) python3 $(TOOLS_DIR)/run-dos-resources-test.py
 
 # Copy the ISO into the project directory so other emulators on Windows
 # can open it. Output goes to dist/ rather than the project root because
@@ -540,7 +606,7 @@ help:
 	@echo "  make test-user  Load and run the user program in its modes"
 	@echo "  make test-vm    Run the 8086 interpreter in Ring 3 and assert"
 	@echo "  make test-screen Read the framebuffer back and judge the pixels"
-	@echo "  make check      Run every test above"
+	@echo "  make check      Run host suites and every QEMU test above"
 	@echo "  make export     Copy the ISO into the project directory"
 	@echo "  make clean      Remove build artifacts"
 	@echo "  make distclean  Remove build artifacts and download cache"

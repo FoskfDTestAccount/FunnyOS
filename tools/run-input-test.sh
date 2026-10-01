@@ -30,7 +30,7 @@ MODE="${2:-bios}"
 # which includes a 200 ms timer self-check.
 BOOT_WAIT="${INPUT_BOOT_WAIT:-8}"
 KEY_DELAY="${INPUT_KEY_DELAY:-0.15}"
-TIMEOUT_SECS="${QEMU_TIMEOUT:-45}"
+TIMEOUT_SECS="${QEMU_TIMEOUT:-75}"
 
 if [ ! -f "$ISO" ]; then
     echo "ERROR: ISO not found: $ISO" >&2
@@ -111,6 +111,22 @@ type_line() {
     type_line "help"
     type_line "type readme.txt"
     type_line "xyzzy"
+
+    # W5/W6: a mounted .COM can run from the actual shell, release both
+    # resources, and run again with a fresh mount. Then exercise BIOS
+    # and DOS keyboard reads before checking that the shell gets keys back.
+    type_line "dos files.com"
+    sleep 1
+    type_line "dos files.com"
+    sleep 1
+    type_line "dos keys.com"
+    sleep 0.5
+    for key in a shift-b up f1 c d backspace e ret; do
+        echo "sendkey $key"
+        sleep 0.2
+    done
+    sleep 0.5
+    type_line "echo afterdos"
 
     echo "quit"
 } | timeout "$TIMEOUT_SECS" qemu-system-x86_64 \
@@ -202,6 +218,18 @@ expect_present "native x86-64 operating system"     "TYPE printed README.TXT"
 
 # An unrecognised command is reported rather than ignored or fatal.
 expect_present "Bad command or file name: xyzzy"    "unknown command reported"
+
+expect_present "W5 files: PASS"                     "shell ran a .COM loaded from FAT"
+expect_present "W6 keys: PASS"                      "shell DOS runner received raw keys"
+expect_present "DOS program returned 0"             "DOS exit code reached the shell"
+expect_line    "afterdos"                            "shell received keyboard after VM release"
+if [ "$(grep -cF 'DOS program returned 0' "$CLEAN")" -ne 3 ]; then
+    echo "  [FAIL] all three shell-launched DOS runs must return zero"
+    FAILED=1
+else
+    echo "  [ok]   repeated mounts and keyboard ownership released cleanly"
+fi
+CHECKS=$((CHECKS + 1))
 
 # Nothing arrived on a vector with no handler, and nothing escalated.
 expect_absent  "unhandled interrupt"                "every interrupt reached its handler"

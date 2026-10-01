@@ -369,6 +369,15 @@ static int64_t syscall_dispatch(uint64_t number, uint64_t a0, uint64_t a1,
     case SYS_READDIR:
         return sys_readdir(a0, a1);
 
+    case SYS_KBD_ACQUIRE:
+        if(!kbd_ready()) return SYSCALL_ENODEV;
+        return kbd_raw_acquire(process_current()) ? 0 : SYSCALL_EPERM;
+    case SYS_KBD_POLL:
+        return kbd_raw_poll(process_current());
+    case SYS_KBD_RELEASE:
+        return kbd_raw_release(process_current()) ? 0 : SYSCALL_EPERM;
+    case SYS_POLLKEY:
+        return kbd_poll();
     case SYS_GETKEY:
         return kbd_getchar();
 

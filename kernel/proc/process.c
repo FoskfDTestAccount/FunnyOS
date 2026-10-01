@@ -9,6 +9,7 @@
 #include <funnyos/panic.h>
 #include <funnyos/pmm.h>
 #include <funnyos/screen.h>
+#include <funnyos/kbd.h>
 #include <funnyos/vmm.h>
 
 #include <libk/string.h>
@@ -333,6 +334,7 @@ void process_destroy(struct process *p)
      * later reader has to work out.
      */
     screen_release_if_held_by(p);
+    kbd_raw_release_if_held_by(p);
 
     /* The program's memory starts at a fixed base and runs for as long as
      * the process was given -- which is not the length of its image, and

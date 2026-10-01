@@ -81,6 +81,25 @@ enum vm86_result {
      * reports a normal ending -- the acceptance test for the
      * integration asserts exactly that, and would pass. */
     VM86_INTERNAL_ERROR,
+
+    /*
+     * A service ended the program. cpu->exited is set and cpu->exit_code
+     * holds what it ended with.
+     *
+     * Its own value rather than VM86_HALT, and for the reason the note
+     * above gives about VM86_INTERNAL_ERROR: HLT is something the guest
+     * did -- it executed an instruction that asked the processor to wait
+     * -- and this is something the guest asked the *host* to do. A caller
+     * that stopped on HLT would report a program that exits with
+     * `INT 21h/4Ch` and one that ends with `cli; hlt` as the same event,
+     * and the return code would go nowhere.
+     *
+     * The name is also the reason this was added to the enum rather than
+     * to the service signature: every `switch` over this type that does
+     * not mention it fails to compile under -Wswitch, so the compiler
+     * lists the consumers instead of somebody remembering them.
+     */
+    VM86_EXIT,
 };
 
 /*

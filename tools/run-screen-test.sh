@@ -32,6 +32,17 @@
 #               visible, rather than only correct in a host suite's
 #               comparison.
 #
+#   vm=int21    a .COM that asks DOS for things. This is W4's, and it is
+#               the first run here whose program ends by *exiting* rather
+#               than halting -- so the return code is a value that has to
+#               travel the whole way out, and the line drive() prints
+#               saying which code it was is asserted below.
+#
+# Three runs rather than one, because "the page is on the screen" is three
+# separate claims wearing one sentence: that the display draws what the
+# guest's memory holds, that a *loaded* program's memory is the right
+# memory, and that a program which talks to DOS is talking to something.
+#
 # The pixels are judged by tools/check-screen-pixels.py, which locates the
 # page from the serial log, takes the expected characters from the rows the
 # interpreter reports, measures the two colours off the screen rather than
@@ -289,6 +300,48 @@ expect_present "screen : psp row 15 = \"PSP:0040 = 1E03\"" \
 # it does. The match stops before the trailing pair.
 expect_present 'screen : psp row 21 = "TAIL     = " A:FILE.EXE' \
     "and the command tail it was given, blank and all"
+
+capture "vm=int21" "int21"
+
+# The program ran, called INT 21h for each function, and ended by exiting
+# rather than by halting. The code is seven so that it cannot be confused
+# with the zero a machine that never reached the call would have.
+expect_present "VM: case int21: PASS" \
+    "the program printed what DOS told it"
+expect_present "result : the program ended itself with code 7" \
+    "and ended by exiting with the code it asked for"
+
+# The dispatcher's answers, read off the screen. The version is the one
+# docs/dos-refs-dos.md section 6 chose -- 3.30, AL the major and AH the
+# minor, so 1E03 -- and the row below it is the string AH=09h printed.
+expect_present 'screen : int21 row 0 = "DOS version = 1E03"' \
+    "AH=30h reported 3.30 with the halves the right way round"
+expect_present 'screen : int21 row 1 = "W4: INT 21h says hello!"' \
+    "AH=09h printed a string and AH=02h finished the line"
+# The firmware's own stub for 21h, at a position the interpreter's map
+# gives: four bytes per vector, in segment F000, from a base of zero.
+expect_present 'screen : int21 row 2 = "vector 21h  = F000:0084"' \
+    "AH=35h read the vector table"
+# Written with 25h and read back with 35h -- a pair, because either alone
+# is satisfied by a function that ignores its arguments.
+expect_present 'screen : int21 row 3 = "vector 60h  = 1000:1234"' \
+    "AH=25h wrote a vector and AH=35h saw it"
+# The segment and the offset, not a linear address.
+expect_present 'screen : int21 row 4 = "DTA         = 1000:0200"' \
+    "AH=1Ah stored the transfer address AH=2Fh handed back"
+# F: is the sixth letter, so index 5.
+expect_present 'screen : int21 row 5 = "drive       = 05"' \
+    "AH=19h reported the machine's drive, counting from zero"
+# The count is the numbering's range, not the media present.
+expect_present 'screen : int21 row 6 = "select F:   = 06"' \
+    "AH=0Eh selected the drive that exists"
+# The line that proves AH=0Eh reads its argument at all.
+expect_present 'screen : int21 row 7 = "select A:   = 000F CF=1"' \
+    "selecting a drive that is not there failed, with the code"
+# AL to zero, the carry up, and AH left holding the function number --
+# which is what the four digits show.
+expect_present 'screen : int21 row 8 = "function 55 = 5500 CF=1"' \
+    "a function this machine has not got answered the way FreeDOS does"
 
 echo
 if [ "$FAILED" -eq 0 ]; then

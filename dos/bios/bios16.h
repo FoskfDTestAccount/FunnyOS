@@ -161,4 +161,7 @@ void bios16_reset(struct bios16_state *st);
  */
 void bios16_init(struct vm86_cpu *cpu, struct bios16_state *st);
 
+bool bios16_take(struct vm86_cpu *cpu, uint16_t *word);
+bool bios16_peek(struct vm86_cpu *cpu, uint16_t *word);
+
 #endif /* VM86_BIOS16_H */

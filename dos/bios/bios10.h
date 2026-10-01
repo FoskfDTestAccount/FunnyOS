@@ -102,6 +102,25 @@ void bios10_reset(struct bios10_state *st);
 void bios10_service(struct vm86_cpu *cpu, void *ctx);
 
 /*
+ * Write one character the way AH=0Eh does.
+ *
+ * Exposed because the DOS layer's console output is exactly this and
+ * nothing else. DOS's AH=02h and AH=09h printed by reaching the BIOS's
+ * teletype routine, so on a real machine all three ended up in the same
+ * code; sharing one implementation here is what the machine did rather
+ * than a shortcut. A second copy would be a second place for the four
+ * control characters to be wrong, and the two would disagree on the day
+ * one of them was fixed.
+ *
+ * The state is a parameter and not reached through the video service's
+ * registry slot on purpose: `ctx` belongs to whoever registered the
+ * service, and a caller that has the state in hand -- as the DOS layer
+ * does -- should not have to go looking for it. `vm86_register_service`
+ * is process-wide and its table is private to trap.c.
+ */
+void bios10_tty(struct vm86_cpu *cpu, struct bios10_state *st, uint8_t ch);
+
+/*
  * Where the cursor is, as a cell index (row * columns + column), or
  * VM86_DISPLAY_NO_CURSOR when there is nothing to draw.
  *

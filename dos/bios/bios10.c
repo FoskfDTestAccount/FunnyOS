@@ -447,6 +447,21 @@ static void teletype(struct vm86_cpu *cpu, struct bios10_state *st, uint8_t ch)
     st->cursor[page] = make_cursor(row, col);
 }
 
+void bios10_tty(struct vm86_cpu *cpu, struct bios10_state *st, uint8_t ch)
+{
+    teletype(cpu, st, ch);
+
+    /*
+     * The data area is republished, and it is not optional here even
+     * though INT 10h AH=0Eh does it further down its own path. A DOS
+     * program that prints with INT 21h and then reads the cursor position
+     * out of 0040:0050 -- which is the cheap way to ask and therefore the
+     * common one -- would otherwise see a cursor that stopped moving at
+     * the last BIOS call. See sync_bda.
+     */
+    sync_bda(cpu, st);
+}
+
 /* ------------------------------------------------------------------ */
 /* AH=09h and AH=0Ah, writing at the cursor                            */
 /* ------------------------------------------------------------------ */

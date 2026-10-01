@@ -47,6 +47,12 @@ void vm86_interrupt(struct vm86_cpu *cpu, uint8_t vector)
      * reached by chains that push a different number of words.
      */
     cpu->intr_frame_sp = cpu->sp;
+    cpu->intr_frame_ss = cpu->ss;
+    if(cpu->intr_depth<64) {
+        cpu->intr_frames[cpu->intr_depth].sp=cpu->sp;
+        cpu->intr_frames[cpu->intr_depth].ss=cpu->ss;
+    }
+    cpu->intr_depth++;
 
     vm86_flag_set(cpu, VM86_IF, false);
     vm86_flag_set(cpu, VM86_TF, false);

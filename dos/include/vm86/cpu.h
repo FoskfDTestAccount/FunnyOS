@@ -183,6 +183,25 @@ struct vm86_cpu {
     /* Set by HLT, cleared by anything that resumes the processor. */
     bool halted;
 
+    /*
+     * Set by a service that has been asked to end the program -- INT 20h,
+     * INT 21h AH=00h or AH=4Ch -- with the code it was asked to end with.
+     *
+     * A flag on the processor rather than a return value from the trap,
+     * because of what the trap would have to do with it. The trap returns
+     * an `enum vm86_result` to the instruction layer, which returns it to
+     * the run loop; putting the code in that enum is not possible, and
+     * putting it in a global would be a second piece of per-processor
+     * state living outside the processor.
+     *
+     * Nothing clears it on the way out, and that is right: the run loop
+     * stops the machine on the instruction that set it, so no later
+     * instruction can be confused by a stale value. vm86_reset() clears
+     * it, one machine at a time.
+     */
+    bool     exited;
+    uint16_t exit_code;
+
     /* --- Interrupts, added for M4 --- */
 
     /*
@@ -254,14 +273,16 @@ struct vm86_cpu {
      * for a chain made from inside an interrupt handler it is the saved
      * instruction pointer of the interrupt that got there first.
      *
-     * Zero means no interrupt has happened, which is a value SP cannot have
-     * had after a push sequence and so cannot be matched by accident in
-     * practice. A stale value left behind by an interrupt that has already
-     * returned can only be matched by a chained call that arrives with
-     * exactly the same stack pointer, which is the same assumption the
-     * stub's IRET is already making a few bytes later.
+     * intr_depth==0 means there is no recorded frame. INT pushes a host
+     * identity (SS:SP), and IRET restores the identity of the outer frame.
+     * This matters when IRQ1 interrupts a service waiting for input.
      */
     uint16_t intr_frame_sp;
+    uint16_t intr_frame_ss;
+    /* Host bookkeeping only; guest INT/IRET still use guest memory.
+     * Deeper nesting executes normally but declines service flag writes. */
+    struct { uint16_t ss, sp; } intr_frames[64];
+    uint32_t intr_depth;
 
     /* Prefixes for the instruction being executed. Cleared per
      * instruction by the run loop. */

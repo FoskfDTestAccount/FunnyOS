@@ -41,4 +41,25 @@ int vm_screen_hold(void);
  */
 int vm_psp_hold(void);
 
+/*
+ * The same thing again for the DOS dispatcher: one .COM that calls
+ * INT 21h for every function W4 covers, printing the answers, left on the
+ * screen.
+ *
+ * A third mode rather than a flag on the one above because it is a third
+ * claim. vm_psp_hold is about a program that was *loaded* the way DOS
+ * loads one and what it finds in its own memory; this one is about a
+ * program that *talks* to DOS and what it is told -- and the two happen
+ * to use the same loader without either being about it.
+ *
+ * It is also the first run here whose program ends by exiting rather than
+ * by halting, so the exit code is a thing that travels: through
+ * vm86_service_exit, through the trap, through the run loop, and out to
+ * the line the screen test asserts on.
+ */
+int vm_int21_hold(void);
+
+int vm_run_file(const char *name, const char *tail);
+int vm_resources_test(int keyboard);
+
 #endif /* FUNNYOS_USER_VM_H */

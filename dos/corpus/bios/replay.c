@@ -41,6 +41,8 @@
 #include <vm86/display.h>
 #include <vm86/dos.h>
 #include <vm86/host.h>
+#include <vm86/int21.h>
+#include <vm86/fat.h>
 #include <vm86/mem.h>
 
 #include "../../bios/bios10.h"
@@ -69,6 +71,15 @@ struct vm86_bios_machine {
     struct bios16_state  keyboard;
     struct bios1a_state  clock;
     struct bios13_disk   disk_device;
+
+    /* The DOS layer's two services: the INT 21h dispatcher, and the
+     * INT 20h handler that a bare RET from a .COM arrives at. Both are
+     * registered for every machine this builds -- a machine with DOS in
+     * it is what this is -- and the dispatcher's default DTA is fixed up
+     * by whoever loads a program, because the PSP it lives in does not
+     * exist until then. */
+    struct int21_state   dos21;
+    struct fat_volume files;
 
     /* The key is delivered at most once per load; a second one would be a
      * second keystroke, which no case here is about. */
@@ -180,6 +191,15 @@ static void power_on(struct vm86_bios_machine *machine)
     bios13_init(&machine->disk_device, machine->disk,
                 VM86_BIOS_DISK_IMAGE_BYTES);
 
+    /*
+     * The DOS dispatcher comes up with no program behind it -- segment
+     * zero, offset zero -- and vm86_bios_load_dos() gives it the real PSP
+     * once there is one. That is not a placeholder to be tidied away
+     * later: a DTA is *inside* the program's own segment, so the number
+     * does not exist until the loader has chosen one.
+     */
+    int21_reset(&machine->dos21, &machine->video, 0u);
+
     vm86_register_service(VM86_INT_VIDEO,         bios10_service,
                           &machine->video);
     vm86_register_service(VM86_INT_KEYBOARD_BIOS, bios16_service,
@@ -192,6 +212,11 @@ static void power_on(struct vm86_bios_machine *machine)
                           &machine->clock);
     vm86_register_service(VM86_INT_DISK,          bios13_service,
                           &machine->disk_device);
+    vm86_register_service(VM86_INT_CTRL_BREAK, int21_break_service, NULL);
+    vm86_register_service(VM86_INT_DOS,           int21_service,
+                          &machine->dos21);
+    vm86_register_service(VM86_INT_TERMINATE,     int21_terminate_service,
+                          NULL);
 }
 
 void vm86_bios_load(struct vm86_bios_machine *machine,
@@ -225,7 +250,20 @@ vm86_bios_load_dos(struct vm86_bios_machine *machine,
 {
     power_on(machine);
 
-    return vm86_dos_load(&machine->cpu, image, image_size, start, out);
+    enum vm86_dos_load_result result =
+        vm86_dos_load(&machine->cpu, image, image_size, start, out);
+
+    /*
+     * The dispatcher's default DTA is inside the PSP, so it cannot be set
+     * until the loader has said which segment that is. Only on success:
+     * a refused load left no program for a transfer address to belong to,
+     * and pointing the DTA at a segment nothing was written to would be
+     * an answer that looks like one.
+     */
+    if (result == VM86_DOS_LOADED)
+        int21_reset(&machine->dos21, &machine->video, out->segment);
+
+    return result;
 }
 
 /* ------------------------------------------------------------------ */
@@ -263,6 +301,17 @@ enum vm86_bios_stop vm86_bios_run(struct vm86_bios_machine *machine,
          */
         if (stop == VM86_STOP_HALT && !vm86_flag_test(&machine->cpu, VM86_IF))
             return VM86_BIOS_HALTED;
+
+        /*
+         * The program ended itself. The page is presented first, the same
+         * way the halt above is: a DOS program's last act is often to
+         * print something, and a screen that stopped one frame short of
+         * the exit would be a screen missing the line the exit was
+         * about. The code travels out separately -- see the note on
+         * VM86_BIOS_EXITED for why it is not folded into the outcome.
+         */
+        if (stop == VM86_STOP_EXIT)
+            return VM86_BIOS_EXITED;
 
         if (plan->ms_per_slice != 0) {
             uint32_t ticks = bios1a_advance(&machine->clock,
@@ -311,6 +360,11 @@ uint32_t vm86_bios_memory_size(void)
 const struct vm86_cpu *vm86_bios_cpu(const struct vm86_bios_machine *machine)
 {
     return &machine->cpu;
+}
+
+uint16_t vm86_bios_exit_code(const struct vm86_bios_machine *machine)
+{
+    return machine->cpu.exit_code;
 }
 
 struct vm86_bios_cell vm86_bios_cell_at(const struct vm86_bios_screen *screen,
@@ -414,6 +468,12 @@ const struct vm86_cpu *vm86_bios_cpu(const struct vm86_bios_machine *machine)
     return NULL;
 }
 
+uint16_t vm86_bios_exit_code(const struct vm86_bios_machine *machine)
+{
+    (void)machine;
+    return 0;
+}
+
 struct vm86_bios_cell vm86_bios_cell_at(const struct vm86_bios_screen *screen,
                                         uint16_t cell)
 {
@@ -425,3 +485,15 @@ struct vm86_bios_cell vm86_bios_cell_at(const struct vm86_bios_screen *screen,
 }
 
 #endif /* VM86_BIOS_REPLAY_HAVE_SERVICES */
+
+int vm86_bios_mount_fat(struct vm86_bios_machine *m,uint8_t *image,uint32_t size)
+{
+    int e=fat_mount(&m->files,image,size);
+    if(!e) m->dos21.files=&m->files;
+    return e;
+}
+void vm86_bios_feed_key(struct vm86_bios_machine *m,uint8_t scan)
+{
+    bios16_key_arrived(&m->keyboard,scan);
+    vm86_raise(&m->cpu,VM86_INT_KEYBOARD);
+}

@@ -50,6 +50,7 @@
 #define SYSCALL_EINVAL  (-6)   /* bad argument */
 #define SYSCALL_ENOSYS  (-7)   /* no such call */
 #define SYSCALL_EMFILE  (-8)   /* too many open files */
+#define SYSCALL_EOVERFLOW (-10)
 #define SYSCALL_ENODEV  (-9)   /* the device is not there -- no screen */
 
 /* Call numbers. */
@@ -66,7 +67,11 @@
 #define SYS_SCREEN_ACQUIRE 10  /* ()                                 -> 0 */
 #define SYS_SCREEN_PRESENT 11  /* (const void *cells, columns, cursor) -> 0 */
 #define SYS_SCREEN_RELEASE 12  /* ()                                 -> 0 */
-#define SYS_COUNT      13
+#define SYS_KBD_ACQUIRE 13 /* exclusive set-1 stream; flush shell's queue */
+#define SYS_KBD_POLL    14 /* -> byte 0..255, -1 when empty, -10 overflow */
+#define SYS_KBD_RELEASE 15 /* give keyboard back, drop pending raw bytes */
+#define SYS_POLLKEY     16 /* translated key, 0 when empty; never blocks */
+#define SYS_COUNT       17
 
 /* File descriptors 0, 1 and 2 are the console, so that a program can be
  * written without opening anything. Ramfs file descriptors start above
