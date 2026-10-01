@@ -73,7 +73,8 @@ CORE_C := \
     dbg/trace.c    \
     mem/mem.c      \
     $(wildcard intr/*.c) \
-    $(wildcard bios/*.c)
+    $(wildcard bios/*.c) \
+    $(wildcard dos/*.c)
 
 # libk provides memset and memcpy. Linking it here rather than the host's
 # means the tests exercise the same implementation the kernel does.
@@ -177,6 +178,30 @@ ifneq ($(strip $(BIOS_CORPUS_SRC)),)
 $(BUILD)/test_bios_programs: $(BIOS_CORPUS_EMBED) \
                             $(wildcard corpus/bios/replay.c) \
                             | $(wildcard corpus/bios/replay.h)
+endif
+
+# --- A third corpus: programs loaded the way DOS loads one ------------
+#
+# Same machinery a third time, and again a directory of its own. These
+# samples need a Program Segment Prefix and the loader that builds one,
+# which corpus/bios's samples neither have nor want -- their entry
+# convention is the M3 one, with interrupts off, frozen precisely so that
+# adding a PSP in M5 would not move them.
+#
+# The replayer is shared rather than copied: a DOS program runs on the
+# same machine with the same services, and only the 256 bytes in front of
+# it and the register state it starts in are different. Two replayers
+# would be two things to keep in step about what a machine is.
+DOS_CORPUS_SRC   := $(wildcard corpus/dos/*.asm)
+DOS_CORPUS_BIN   := $(patsubst corpus/%.asm,$(BUILD)/corpus/%.bin,$(DOS_CORPUS_SRC))
+DOS_CORPUS_EMBED := $(patsubst corpus/%.asm,$(BUILD)/corpus/%.c,$(DOS_CORPUS_SRC))
+
+.SECONDARY: $(DOS_CORPUS_BIN)
+
+ifneq ($(strip $(DOS_CORPUS_SRC)),)
+$(BUILD)/test_dos: $(DOS_CORPUS_EMBED) \
+                   $(wildcard corpus/bios/replay.c) \
+                   | $(wildcard corpus/bios/replay.h)
 endif
 
 .PHONY: all test list clean $(addprefix test-,$(SUITES))

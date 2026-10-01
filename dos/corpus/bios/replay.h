@@ -56,6 +56,7 @@
 #include <stdint.h>
 
 #include <vm86/cpu.h>
+#include <vm86/dos.h>
 #include <vm86/firmware.h>
 
 /*
@@ -142,6 +143,25 @@
 /* Where that segment lands in guest memory. A sample's own scratch is
  * addressed from its segment, so the suite adds this to read it back. */
 #define VM86_BIOS_LOAD_LINEAR   ((uint32_t)VM86_BIOS_LOAD_SEGMENT << 4)
+
+/*
+ * Where a DOS program's environment block goes.
+ *
+ * Just below the program's own 64 KiB block, which on this machine is free
+ * memory -- the vector table is at the bottom of the first segment and the
+ * stubs are at 0xF0000, and nothing else has claimed anything -- and which
+ * is *outside* the block, which the loader insists on. An environment
+ * inside the program's own memory is an environment the program will run
+ * over the moment it uses its heap.
+ *
+ * 0xF00 gives a paragraph-aligned block ending at 0xFFFF, four paragraphs
+ * below the program at 0x1000. It is a choice rather than a fact, like the
+ * load segment above it.
+ */
+#define VM86_BIOS_ENVIRONMENT_SEGMENT 0x0F00u
+
+#define VM86_BIOS_ENVIRONMENT_LINEAR \
+    ((uint32_t)VM86_BIOS_ENVIRONMENT_SEGMENT << 4)
 
 /*
  * Guest memory a case gets. A megabyte, which is what an 8086 can address,
@@ -297,6 +317,29 @@ uint8_t *vm86_bios_disk(struct vm86_bios_machine *);
  */
 void vm86_bios_load(struct vm86_bios_machine *,
                     const uint8_t *image, uint16_t image_size);
+
+/*
+ * Power the same machine on and load a program the way DOS loads one:
+ * a Program Segment Prefix at `start->segment`, the image behind it at
+ * :0x100, the four segment registers pointed at the PSP, IF set, and the
+ * zero word on the stack that turns a bare RET into an exit.
+ *
+ * The machine is the same machine and the services are the same services.
+ * What differs is 256 bytes of memory and the register state the program
+ * starts in, which is exactly the difference between "a program on a
+ * machine with a BIOS" and "a program under DOS".
+ *
+ * The M4 convention above is not replaced by this and does not move: its
+ * samples are entered with interrupts off and their expectations were
+ * written that way, and replay.h's own note about why is the record of
+ * that decision. `vm86_bios_load_dos` is the other door into the same
+ * house.
+ */
+enum vm86_dos_load_result
+vm86_bios_load_dos(struct vm86_bios_machine *,
+                   const struct vm86_dos_start *start,
+                   const uint8_t *image, uint32_t image_size,
+                   struct vm86_dos_psp *out);
 
 /*
  * Drive the machine until the program finishes or the plan runs out.

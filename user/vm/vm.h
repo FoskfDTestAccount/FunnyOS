@@ -29,4 +29,16 @@ int vm_selftest(void);
  */
 int vm_screen_hold(void);
 
+/*
+ * The same thing for the DOS loader: one .COM, loaded behind a Program
+ * Segment Prefix, read back off the screen.
+ *
+ * Separate from the one above because it is a different claim. That one is
+ * about a program appearing on a display; this one is about a program that
+ * was *loaded the way DOS loads one* appearing there -- the PSP it reads,
+ * the four segment registers pointed at it, the tail it was given, and all
+ * of it on a screen rather than only in a host test's comparison.
+ */
+int vm_psp_hold(void);
+
 #endif /* FUNNYOS_USER_VM_H */

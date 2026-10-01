@@ -74,6 +74,16 @@
  */
 #define ARG_VM_SCREEN   7
 
+/*
+ * The DOS loader's acceptance, held on screen. `vm=psp` on the kernel
+ * command line.
+ *
+ * Same shape as the mode above and a different claim: that one is a program
+ * appearing on a display, this one is a program *loaded the way DOS loads
+ * one* appearing there.
+ */
+#define ARG_VM_PSP      8
+
 /* Deliberately not zero, for the same reason EXIT_TEST_CODE is not. */
 #define SPAWN_CHILD_CODE 42
 
@@ -600,6 +610,12 @@ int u_main(uint64_t arg)
         /* Same interpreter, but this one holds the screen until somebody
          * types. It is the moment a screendump can be taken at. */
         return vm_screen_hold();
+    }
+
+    if (arg == ARG_VM_PSP) {
+        /* And the same again for a program loaded behind a PSP, which is
+         * the first one in the project loaded the way DOS loads one. */
+        return vm_psp_hold();
     }
 
     banner();

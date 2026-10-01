@@ -2,53 +2,64 @@
 """
 Read a screendump back and ask whether the guest's page is on it.
 
-This is the other half of W2's acceptance. Everything else about "a .COM's
-text reaches the screen" is checked from the inside: the interpreter
-asserts the page the guest left in its own memory, cell by cell, against
-what the manual and the sample's own header say, and the kernel reports
-what it was handed and where it put it. None of that can tell whether a
-single pixel was ever written, because none of it looks at the screen.
+This is the half of the acceptance that no amount of internal checking can
+reach. Everything else about "a program's text is on the screen" is
+asserted from the inside: the interpreter compares the page the guest left
+in its own memory against the manual, the kernel reports what it was handed
+and where it put it, and a host suite compares the loader's 256 bytes
+against a reference document. None of that can tell whether a single pixel
+was ever written, because none of it looks at a screen.
 
 So this opens the screendump and looks at it.
 
 -------------------------------------------------------------------------
-What it checks, and what it deliberately does not
+What it checks, and the one thing it deliberately does not
 
-The expected picture is built from three things:
+The expected picture is built from three sources:
 
-  * where the kernel says it put the page and how big the console is,
-    both read out of the serial log -- so no geometry is written down
-    here and a machine with a different framebuffer needs no change;
-  * the text the interpreter reports is in row 0 of the page, also from
-    the log, which is the guest's own memory;
-  * the glyphs, from kernel/console/font8x16.c -- the same table the
-    kernel draws with.
+  * where the kernel says it put the page and how big the console is, both
+    read out of the serial log -- so no geometry is written down here and a
+    machine with a different framebuffer needs no change;
+  * the rows the interpreter reports, also from the log, which it read out
+    of the guest's own memory;
+  * the glyphs, from kernel/console/font8x16.c -- the same table the kernel
+    draws with.
 
-That last one is the honest limitation and it is worth stating plainly:
-a wrong font would make the prediction and the rendering wrong together,
-and this would not notice. What it does check is everything between the
-guest's memory and the framebuffer -- that the block is at the origin the
-kernel claims, that each cell holds the glyph of the character the guest
-put there, that the two colours are used consistently and are not the
-console's own, that the cursor is drawn where the guest's cursor is, and
-that nothing outside the block was disturbed.
+That last one is the honest limitation and it is worth stating plainly: a
+wrong font would make the prediction and the rendering wrong together, and
+this would not notice. What it does check is everything between the guest's
+memory and the framebuffer -- that the block is at the origin the kernel
+claims, that every cell holds the glyph of the character the program put
+there, that the two colours are a cell attribute used consistently and are
+not the console's own, that the cursor is drawn where the program's cursor
+is, and that nothing outside the block was disturbed.
 
-The colours are measured rather than assumed: the background is read out
-of a cell the page is known to have left blank, and the foreground is the
+The colours are measured rather than assumed: the background is read out of
+a cell the page is known to have left blank, and the foreground is the
 other colour in the block. What that buys is not depending on the palette
 being written down correctly here. What it costs is that **the palette
-values themselves are not checked** -- a machine that rendered attribute
-7 as orange on green would pass every line below, because the same two
-colours would simply be orange and green. The one thing that is checked
-is that they are not the console's two, which is what discarding the
-attribute byte altogether would look like.
+values themselves are not checked** -- a machine that rendered attribute 7
+as orange on green would pass every line below, because the same two
+colours would simply be orange and green. The one thing that is checked is
+that they are not the console's two, which is what discarding the attribute
+byte altogether would look like.
 
-Whether the sixteen entries of the palette are the right sixteen is a
-claim from general knowledge rather than from anything in this repository
--- kernel/console/fb.c says so where the table is -- and nothing here
-tests it. It is a thing to look at on a screen.
+Whether the sixteen entries of the palette are the right sixteen is a claim
+from general knowledge rather than from anything in this repository --
+kernel/console/fb.c says so where the table is -- and nothing here tests it.
+It is a thing to look at on a screen.
 
 Usage: check-screen-pixels.py <screendump.ppm> <serial.log> <font8x16.c>
+
+The log lines it reads, all written by user/vm/vm.c:
+
+    Framebuffer    : 1024x768, 32 bpp, ...          -- the kernel, at boot
+    Screen         : a program has the screen, 80 columns at cell 24,11 of
+                     a 128x48 console
+    screen : <name> 80x25                           -- the page's shape
+    screen : <name> row 0 = "..."                   -- one per non-blank row
+    screen : <name> has 22 row(s) with something on them
+    screen : the cursor is at cell 22
 """
 
 import re
@@ -59,6 +70,8 @@ FONT_WIDTH = 8
 FONT_HEIGHT = 16
 FONT_FIRST = 32
 FONT_LAST = 126
+
+CURSOR_HEIGHT = 2       # scan lines under the cursor cell
 
 
 def fail(message):
@@ -142,12 +155,16 @@ def main():
         r'Screen\s+:\s+a program has the screen, (\d+) columns at cell '
         r'(\d+),(\d+) of a (\d+)x(\d+) console', log, 'placement line'))
 
-    page_cols, rows, text = field(
-        r'screen : \w+ (\d+)x(\d+), row 0 = "(.*)"', log, 'page report')
+    page_cols, rows = (int(v) for v in field(
+        r'screen : \w+ (\d+)x(\d+)', log, 'page shape'))
 
-    page_cols = int(page_cols)
-    rows      = int(rows)
-    text      = text.rstrip()
+    page = {}
+    for match in re.finditer(r'screen : \w+ row (\d+) = "(.*)"', log):
+        page[int(match.group(1))] = match.group(2)
+
+    if not page:
+        raise SystemExit('the serial log reports no rows of the page, so '
+                         'there is nothing to look for on the screen')
 
     cursor = int(field(r'screen : the cursor is at cell (\d+)', log,
                        'cursor line')[0])
@@ -156,12 +173,13 @@ def main():
         return fail(f'the kernel placed a {columns}-column page and the '
                     f'interpreter reports a {page_cols}-column one')
 
-    if len(text) > columns:
-        return fail(f'row 0 is {len(text)} characters wide and the page is '
-                    f'{columns}')
+    out_of_range = [r for r in page if r >= rows]
+    if out_of_range:
+        return fail(f'the interpreter reports rows {out_of_range} and the '
+                    f'page has {rows}')
 
     glyphs = read_font(font_path)
-    missing = sorted({ord(ch) for ch in text
+    missing = sorted({ord(ch) for line in page.values() for ch in line
                       if not FONT_FIRST <= ord(ch) <= FONT_LAST})
     if missing:
         return fail(f'the page holds characters the font has no glyph for: '
@@ -211,52 +229,43 @@ def main():
                     f'it was drawn outside its own rectangle')
 
     # ------------------------------------------------------------------
-    # The block is two colours, and they are the cell attribute.
+    # The two colours.
+    #
+    # Taken from the pixels of the first row the interpreter reports as
+    # having text on it -- not from a blank cell somewhere in the block.
+    #
+    # That choice was made twice. The first version read the background out
+    # of the block's last row, which is a cell the page leaves blank and is
+    # therefore all one colour in any correct rendering; it is also a cell
+    # a machine that never drew the page leaves all one colour, and the
+    # colour in that case is the console's. So a page with nothing drawn on
+    # it and a page drawn in the console's own colours produced the same
+    # measurement and the same message -- and the message named the second
+    # cause while the fault was the first. That was found by injection: a
+    # change that drew only row 0 was reported as "the attribute byte was
+    # not used", which is a different bug in a different file.
+    #
+    # Reading the colours out of a row that is *supposed* to have text on
+    # it separates the two: a row nobody drew has one colour, and a row
+    # drawn in the wrong colours has two that are not the page's.
+    first = min(page)
 
-    cell_bg = pixels[((row0 + rows - 1) * cell_h) * stride +
-                     (col0 * cell_w) * 3:
-                     ((row0 + rows - 1) * cell_h) * stride +
-                     (col0 * cell_w) * 3 + 3]
-
-    # A cell the page leaves blank has to be one colour throughout, or the
-    # page is not the one hello.asm's header describes. It is the source of
-    # the background colour for everything below, which is why it is read
-    # first: a colour taken from a table here would make this check agree
-    # with the kernel's palette by being the same idea twice.
+    colours = {}
     for dy in range(cell_h):
-        row = pixels[(y0 + (rows - 1) * cell_h + dy) * stride + x0:
-                     (y0 + (rows - 1) * cell_h + dy) * stride + x0 + cell_w * 3]
-        if row != cell_bg * cell_w:
-            return fail(f'the last row of the page is not blank -- cell '
-                        f'{rows - 1},0 is not one colour, and every cell of '
-                        f'hello.asm\'s page except row 0 is a space')
+        stripe = pixels[(y0 + first * cell_h + dy) * stride + x0:
+                        (y0 + first * cell_h + dy) * stride + x1]
+        for index in range(0, len(stripe), 3):
+            pixel = stripe[index:index + 3]
+            colours[pixel] = colours.get(pixel, 0) + 1
 
-    ink = None
-    for dy in range(cell_h):
-        row = pixels[(y0 + dy) * stride + x0:(y0 + dy) * stride + x1]
-        for index in range(0, len(row), 3):
-            if row[index:index + 3] != cell_bg:
-                ink = row[index:index + 3]
-                break
-        if ink:
-            break
+    if len(colours) < 2:
+        return fail(f'row {first} is the first row the interpreter reports '
+                    f'as having text on it, and it is one colour -- nothing '
+                    f'was drawn there, so there is nothing to read off the '
+                    f'screen')
 
-    if ink is None:
-        return fail('the whole page is one colour -- nothing was drawn on '
-                    'it, which is what an unrendered or unwritten '
-                    'framebuffer looks like')
-
-    if ink == cell_bg:
-        return fail('the page has one colour, so nothing on it can be read')
-
-    # The console's own two colours, in a page that has its own, are what
-    # throwing the attribute byte away looks like: fb_draw_page has an fg
-    # and a bg in hand either way, and using the wrong pair is one line.
-    if cell_bg == console_bg:
-        return fail('the page is drawn in the console\'s own background '
-                    'colour -- the attribute byte was not used, so what is '
-                    'on the screen is the kernel\'s idea of the text and '
-                    'not the program\'s')
+    ranked = sorted(colours.items(), key=lambda item: -item[1])
+    cell_bg, ink = ranked[0][0], ranked[1][0]
 
     print(f'  Page           : {page_cols}x{rows} at cell {col0},{row0} of a '
           f'{grid_cols}x{grid_rows} console')
@@ -264,23 +273,22 @@ def main():
           f'foreground {ink.hex()} (read off the screen, not from a table)')
 
     # ------------------------------------------------------------------
-    # Every cell holds the font's glyph for the character the guest left
-    # there, and the cursor is where the guest's cursor is.
+    # Every cell holds the font's glyph for the character the program left
+    # there, and the cursor is where the program's cursor is.
 
-    if cursor == 0xFFFF:
-        cursor_cell = None
-    else:
-        cursor_cell = cursor
+    cursor_cell = None if cursor == 0xFFFF else cursor
 
     mismatches = []
     checked = 0
 
     for cell_row in range(rows):
+        line = page.get(cell_row, '')
+
         for cell_col in range(columns):
             cell = cell_row * columns + cell_col
 
-            if cell_row == 0 and cell_col < len(text):
-                bits = glyphs[ord(text[cell_col])]
+            if cell_col < len(line):
+                bits = glyphs[ord(line[cell_col])]
             else:
                 bits = glyphs[ord(' ')]
 
@@ -288,7 +296,7 @@ def main():
                 py = y0 + cell_row * cell_h + dy
                 base = py * stride + (x0 + cell_col * cell_w * 3)
 
-                if cell == cursor_cell and dy >= cell_h - 2:
+                if cell == cursor_cell and dy >= cell_h - CURSOR_HEIGHT:
                     wanted = ink * cell_w
                 else:
                     wanted = b''.join(
@@ -300,32 +308,53 @@ def main():
                 if pixels[base:base + cell_w * 3] != wanted and \
                         len(mismatches) < 4:
                     mismatches.append((cell_row, cell_col, dy,
-                                       pixels[base:base + cell_w * 3],
-                                       wanted))
+                                       pixels[base:base + cell_w * 3]))
 
     if mismatches:
-        for cell_row, cell_col, dy, got, wanted in mismatches:
-            shown = text[cell_col] if cell_row == 0 and \
-                cell_col < len(text) else ' '
+        for cell_row, cell_col, dy, got in mismatches:
+            line = page.get(cell_row, '')
+            shown = line[cell_col] if cell_col < len(line) else ' '
 
             print(f'  [FAIL] cell {cell_row},{cell_col} scan line {dy} is not '
-                  f'the font\'s glyph for {shown!r}')
+                  f'the font\'s glyph for {shown!r} '
+                  f'(the screen has {got.hex()})')
 
         print('         a scan line in the page does not match the font, so '
               'the screen is not')
-        print('         showing the characters the guest put in its memory '
-              '(row 0 of the page:')
-        print(f'         "{text}")')
+        print('         showing the characters the program put in its '
+              'memory. Row 0 of the')
+        print(f'         page is "{page.get(0, "")}"')
         return 1
 
+    # ------------------------------------------------------------------
+    # And last, because it is the least specific of the claims: the console
+    # has two colours of its own, and a page drawn in them is a page whose
+    # attribute byte was discarded.
+    #
+    # This comes after the glyph comparison deliberately. Both faults look
+    # the same from a blank cell, and the glyph comparison tells them apart
+    # -- so the vague message is only reached by a screen whose characters
+    # are all correct, which is what "the colours are wrong" means.
+
+    if cell_bg == console_bg:
+        return fail('every character on the page is the font\'s, and the '
+                    'colours are the console\'s own -- the attribute byte '
+                    'was not used, so what is on the screen is the kernel\'s '
+                    'idea of the text and not the program\'s')
+
     print(f'  Glyphs         : {checked} scan lines match the font for the '
-          f'page\'s characters')
+          f'page\'s {len(page)} non-blank row(s)')
     print(f'  Cursor         : '
           + ('none' if cursor_cell is None
              else f'drawn at cell {cursor_cell} '
                   f'({cursor_cell // columns},{cursor_cell % columns})'))
-    print(f'  Text           : "{text}"')
-    print('  [ok]   the guest\'s page is on the screen, character for '
+
+    for row in sorted(page)[:4]:
+        print(f'  Row {row:<11}: "{page[row]}"')
+    if len(page) > 4:
+        print(f'  ...            : and {len(page) - 4} more non-blank row(s)')
+
+    print('  [ok]   the program\'s page is on the screen, character for '
           'character')
 
     return 0

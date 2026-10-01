@@ -199,6 +199,30 @@
  */
 #define VM86_TEXT_PAGE_STRIDE  0x1000u
 
+/*
+ * Conventional memory: how much there is, and where it stops.
+ *
+ * 640 KiB is what a PC leaves below the video window, and it is what this
+ * machine's guest memory map has: the 1 MiB the chip can address, minus
+ * the 384 KiB from 0xA0000 up that belongs to the display and the ROM.
+ *
+ * Two things read it and they have to agree, which is why it is here and
+ * not in either of them. The firmware publishes it -- INT 12h hands it
+ * back in AX and the data area holds it at 0040:0013h -- and the DOS
+ * layer uses it to fill in the PSP's "segment of the first byte past the
+ * memory allocated to this program", because DOS gives a .COM everything
+ * up to the top of conventional memory. A machine that tells a program
+ * there is 640 KiB and then tells it its own allocation ends at a
+ * megabyte is a machine contradicting itself in two places a program
+ * reads.
+ *
+ * The end is named as a segment as well as a size, because the segment is
+ * the form the one caller that needs an address wants it in.
+ */
+#define VM86_CONVENTIONAL_KB      640u
+#define VM86_CONVENTIONAL_END     (VM86_CONVENTIONAL_KB * 1024u)
+#define VM86_CONVENTIONAL_SEGMENT (VM86_CONVENTIONAL_END / 16u)
+
 /* The attribute byte: the low nibble is the foreground, the next three
  * bits the background, and the top bit makes the foreground blink -- or
  * the background bright, depending on a bit in the attribute controller

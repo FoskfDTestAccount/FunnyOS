@@ -188,7 +188,8 @@ USER_OBJ_DIR := $(BUILD_DIR)/userobj
 # this costs nothing before those directories exist.
 USER_C_SOURCES   := $(shell find user -name '*.c' | sort) libk/printf.c libk/string.c \
                     $(wildcard dos/cpu/*.c) $(wildcard dos/mem/*.c) \
-                    $(wildcard dos/intr/*.c) $(wildcard dos/bios/*.c)
+                    $(wildcard dos/intr/*.c) $(wildcard dos/bios/*.c) \
+                    $(wildcard dos/dos/*.c)
 USER_ASM_SOURCES := $(shell find user -name '*.asm' | sort)
 
 # --- The BIOS corpus, for the interpreter to run in Ring 3 ------------
@@ -215,15 +216,46 @@ VM_CORPUS_BIN  := $(patsubst dos/corpus/bios/%.asm,$(BUILD_DIR)/vmcorpus/%.bin,$
 VM_CORPUS_C    := $(patsubst dos/corpus/bios/%.asm,$(BUILD_DIR)/generated/vm_corpus_%.c,$(VM_CORPUS_SRC))
 VM_CORPUS_OBJS := $(patsubst %.c,%.c.o,$(VM_CORPUS_C))
 
+# --- The DOS corpus, for the same interpreter -------------------------
+#
+# A separate rule rather than a wider pattern, because the two corpora name
+# their symbols differently: dos/corpus/bios/hello.asm becomes
+# vm_corpus_hello, and a shared `%` would try to make dos/corpus/dos/psp.asm
+# into vm_corpus_dos/psp, which is not an identifier.
+#
+# These samples are loaded with a Program Segment Prefix rather than by the
+# M3/M4 convention, which is why they are not in the list above: the two
+# entry conventions both exist and a sample belongs to exactly one of them.
+VM_CORPUS_DOS_SRC  := dos/corpus/dos/psp.asm
+VM_CORPUS_DOS_BIN  := $(patsubst dos/corpus/dos/%.asm,$(BUILD_DIR)/vmcorpus/dos_%.bin,$(VM_CORPUS_DOS_SRC))
+VM_CORPUS_DOS_C    := $(patsubst dos/corpus/dos/%.asm,$(BUILD_DIR)/generated/vm_corpus_dos_%.c,$(VM_CORPUS_DOS_SRC))
+VM_CORPUS_DOS_OBJS := $(patsubst %.c,%.c.o,$(VM_CORPUS_DOS_C))
+
+$(BUILD_DIR)/vmcorpus/dos_%.bin: dos/corpus/dos/%.asm
+	@mkdir -p $(@D)
+	@echo "  NASM    $<"
+	@$(NASM) -f bin $< -o $@
+
+$(BUILD_DIR)/generated/vm_corpus_dos_%.c: $(BUILD_DIR)/vmcorpus/dos_%.bin $(TOOLS_DIR)/bin2c.py
+	@mkdir -p $(@D)
+	@echo "  EMBED   $@"
+	@python3 $(TOOLS_DIR)/bin2c.py $< vm_corpus_dos_$* $@
+
+$(BUILD_DIR)/generated/vm_corpus_dos_%.c.o: $(BUILD_DIR)/generated/vm_corpus_dos_%.c
+	@mkdir -p $(@D)
+	@echo "  CCu     $<"
+	@$(CC) $(USER_CFLAGS) -c $< -o $@
+
 # Kept rather than deleted after use, for the reason dos/Makefile gives for
 # the same two lines: make removes intermediates at the end of a run, and a
 # deleted .c whose .o survives comes back newer than it on the next build,
 # so the corpus would be re-assembled and re-embedded on every build.
-.SECONDARY: $(VM_CORPUS_BIN) $(VM_CORPUS_C)
+.SECONDARY: $(VM_CORPUS_BIN) $(VM_CORPUS_C) $(VM_CORPUS_DOS_BIN) $(VM_CORPUS_DOS_C)
 
 USER_C_OBJS   := $(patsubst %.c,  $(USER_OBJ_DIR)/%.c.o,$(USER_C_SOURCES))
 USER_ASM_OBJS := $(patsubst %.asm,$(USER_OBJ_DIR)/%.asm.o,$(USER_ASM_SOURCES))
-USER_OBJS     := $(USER_C_OBJS) $(USER_ASM_OBJS) $(VM_CORPUS_OBJS)
+USER_OBJS     := $(USER_C_OBJS) $(USER_ASM_OBJS) $(VM_CORPUS_OBJS) \
+                 $(VM_CORPUS_DOS_OBJS)
 
 USER_ELF := $(BUILD_DIR)/funnycom.elf
 USER_BIN := $(BUILD_DIR)/funnycom.bin

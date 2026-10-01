@@ -102,16 +102,13 @@
 /*
  * Conventional memory, which INT 12h hands back in AX.
  *
- * 640 KiB is what a PC leaves below the video window, and it is what the
- * guest's own memory map has: the 1 MiB the chip can address, minus the
- * 384 KiB from 0xA0000 up that belongs to the display and the ROM area.
- *
- * This has to agree with what the loader actually puts in the guest's
- * first megabyte. A machine that claims more than it has is a machine
- * where a program allocates into nothing and the fault shows up somewhere
- * else entirely.
+ * The number lives in firmware.h rather than here, because it is not only
+ * this file's: the DOS layer reads the same one to fill in the PSP's
+ * memory-top field, and "a machine that claims more than it has is a
+ * machine where a program allocates into nothing and the fault shows up
+ * somewhere else entirely" goes double when the two claims come from two
+ * files.
  */
-#define VM86_CONVENTIONAL_KB 640u
 
 /*
  * The data area lives at segment 0040, so an offset in it is that segment

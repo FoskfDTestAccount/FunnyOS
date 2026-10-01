@@ -645,6 +645,8 @@ void kmain(void)
             arg = 4;
         else if (strstr(cmdline, "vm=screen"))
             arg = 7;
+        else if (strstr(cmdline, "vm=psp"))
+            arg = 8;
         else if (strstr(cmdline, "selftest=spawn"))
             arg = 5;
 

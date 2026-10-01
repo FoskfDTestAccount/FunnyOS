@@ -77,6 +77,7 @@
 
 #include <vm86/cpu.h>
 #include <vm86/display.h>
+#include <vm86/dos.h>
 #include <vm86/firmware.h>
 #include <vm86/host.h>
 #include <vm86/mem.h>
@@ -622,8 +623,20 @@ static void present(const struct vm86_cpu *cpu)
  * a machine with no disk: every function answers with the status that says
  * so rather than being silently omitted.
  */
-static void machine_build(struct vm86_mem *mem, struct vm86_cpu *cpu,
-                          const uint8_t *image, uint32_t size)
+/*
+ * Power the machine on: guest RAM attached and cleared, no program in it,
+ * the firmware installed and the six services registered with devices
+ * behind them.
+ *
+ * Split out of machine_build because there are now two ways to put a
+ * program into a machine -- the M3/M4 convention these samples use, and
+ * the way DOS loads a .COM -- and only one way to build the machine.
+ *
+ * The services' own state has to be stood up here; the data area the
+ * firmware wrote is not the same thing. The mode, the cursor and the page
+ * are these structs' until a service changes them.
+ */
+static void power_on(struct vm86_mem *mem, struct vm86_cpu *cpu)
 {
     vm86_mem_attach(mem, g_guest_ram, (uint32_t)GUEST_RAM_BYTES);
     vm86_mem_clear(mem);
@@ -632,26 +645,6 @@ static void machine_build(struct vm86_mem *mem, struct vm86_cpu *cpu,
     vm86_clear_services();
     vm86_install_firmware(cpu);
 
-    for (uint32_t i = 0; i < size; i++)
-        vm86_mem_write8(mem,
-                        ((uint32_t)GUEST_SEGMENT << 4) +
-                            GUEST_LOAD_ADDRESS + i,
-                        image[i]);
-
-    vm86_set_seg(cpu, VM86_CS, GUEST_SEGMENT);
-    vm86_set_seg(cpu, VM86_DS, GUEST_SEGMENT);
-    vm86_set_seg(cpu, VM86_ES, GUEST_SEGMENT);
-    vm86_set_seg(cpu, VM86_SS, GUEST_SEGMENT);
-    vm86_flush_segments(cpu);
-
-    cpu->ip = GUEST_LOAD_ADDRESS;
-    cpu->sp = GUEST_STACK_TOP;
-
-    /*
-     * The services' own state has to be stood up here; the data area the
-     * firmware wrote is not the same thing. The mode, the cursor and the
-     * page are this struct's until a service changes them.
-     */
     bios10_reset(&g_video);
     bios16_reset(&g_keyboard);
     bios1a_reset(&g_clock);
@@ -679,6 +672,92 @@ static void machine_build(struct vm86_mem *mem, struct vm86_cpu *cpu,
     vm86_register_service(VM86_INT_TIME,          bios1a_service, &g_clock);
     vm86_register_service(VM86_INT_TIMER,         bios1a_irq,     &g_clock);
     vm86_register_service(VM86_INT_DISK,          bios13_service, NULL);
+}
+
+static void machine_build(struct vm86_mem *mem, struct vm86_cpu *cpu,
+                          const uint8_t *image, uint32_t size)
+{
+    power_on(mem, cpu);
+
+    for (uint32_t i = 0; i < size; i++)
+        vm86_mem_write8(mem,
+                        ((uint32_t)GUEST_SEGMENT << 4) +
+                            GUEST_LOAD_ADDRESS + i,
+                        image[i]);
+
+    vm86_set_seg(cpu, VM86_CS, GUEST_SEGMENT);
+    vm86_set_seg(cpu, VM86_DS, GUEST_SEGMENT);
+    vm86_set_seg(cpu, VM86_ES, GUEST_SEGMENT);
+    vm86_set_seg(cpu, VM86_SS, GUEST_SEGMENT);
+    vm86_flush_segments(cpu);
+
+    cpu->ip = GUEST_LOAD_ADDRESS;
+    cpu->sp = GUEST_STACK_TOP;
+}
+
+/* ------------------------------------------------------------------ */
+/* Starting a program the way DOS starts one                           */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Where a DOS program's environment block goes.
+ *
+ * Just below the program's own 64 KiB block, which is free memory on this
+ * machine -- the vector table is at the bottom of segment zero and the
+ * stubs are at 0xF000 -- and outside the block, which the loader insists
+ * on, because the program is told it owns the whole of that.
+ */
+#define GUEST_ENVIRONMENT_SEGMENT 0x0F00u
+
+/* What a program is told it is called. The drive letter matches the one
+ * the shell's prompt uses, which is what this filesystem is called. */
+#define GUEST_PROGRAM_PATH "F:\\PSP.COM"
+
+/*
+ * The environment a started program inherits.
+ *
+ * COMSPEC names a command interpreter and there is not one on a disk yet:
+ * the file system is W5 and the shell is still compiled into the kernel
+ * rather than being a file. So the value names what a program expects to
+ * find and nothing is there yet, which is worth saying because a program
+ * that goes looking will fail in a way that looks like a bug in W5's
+ * absence rather than in this line.
+ */
+static const char *const g_dos_environment[] = {
+    "COMSPEC=F:\\COMMAND.COM",
+    "PATH=F:\\",
+    "PROMPT=$P$G",
+};
+
+#define GUEST_ENVIRONMENT_COUNT \
+    (sizeof g_dos_environment / sizeof g_dos_environment[0])
+
+/*
+ * Power the machine on and load a program the way DOS loads one.
+ *
+ * The same machine and the same services as machine_build above; what
+ * differs is the 256 bytes in front of the program, the zero word on the
+ * stack, and the interrupt flag being set. See dos/include/vm86/dos.h for
+ * why that last one is not a detail.
+ */
+static enum vm86_dos_load_result
+machine_build_dos(struct vm86_mem *mem, struct vm86_cpu *cpu,
+                  const uint8_t *image, uint32_t size, const char *tail,
+                  struct vm86_dos_psp *out)
+{
+    struct vm86_dos_start start = {
+        .segment     = GUEST_SEGMENT,
+        .environment = GUEST_ENVIRONMENT_SEGMENT,
+        .parent      = GUEST_SEGMENT,
+        .path        = GUEST_PROGRAM_PATH,
+        .tail        = tail,
+        .vars        = g_dos_environment,
+        .var_count   = (uint32_t)GUEST_ENVIRONMENT_COUNT,
+    };
+
+    power_on(mem, cpu);
+
+    return vm86_dos_load(cpu, image, size, &start, out);
 }
 
 /* ------------------------------------------------------------------ */
@@ -934,10 +1013,16 @@ static bool run_case(const struct guest_case *c)
 /* ------------------------------------------------------------------ */
 
 /*
- * One program from dos/corpus/bios, driven the way the machine will be
- * driven: in slices, with the display refreshed between them, because the
- * host has a screen to draw and a clock to advance and a guest never asks
- * it to do either.
+ * Drive a machine that has already been built and has a program in it,
+ * until the program stops or the budget runs out: in slices, with the
+ * display refreshed between them, because the host has a screen to draw
+ * and a clock to advance and a guest never asks it to do either.
+ *
+ * Split out of the loaders below because there are two ways to put a
+ * program into a machine and one way to drive it. Loading and driving are
+ * separate for the reason the loader's header gives: a test wants to look
+ * at a loaded machine before it runs, and whether a program may run at all
+ * is not the loader's decision.
  *
  * What is deliberately NOT here is the keyboard. The kernel hands out
  * decoded key codes rather than scan codes, and the only call that gets
@@ -946,21 +1031,11 @@ static bool run_case(const struct guest_case *c)
  * host-suite case. M4-README.md section 8 records the gap in full; nothing
  * here pretends to close it.
  */
-static bool run_corpus(const char *name, const uint8_t *image, uint32_t size)
+static bool drive(const char *name)
 {
     enum vm86_stop  stop = VM86_STOP_STEPS;
     unsigned        slices;
-    unsigned long   last_ms;
-
-    uprintf("\n  --- guest case \"%s\" ---\n", name);
-
-    machine_build(&g_mem, &g_cpu, image, size);
-
-    uprintf("  image  : %u bytes at %04X:%04X, SP=%04X\n",
-            (unsigned)size, (unsigned)g_cpu.cs, (unsigned)g_cpu.ip,
-            (unsigned)g_cpu.sp);
-
-    last_ms = u_uptime_ms();
+    unsigned long   last_ms = u_uptime_ms();
 
     for (slices = 0; slices < VM_RUN_MAX_TURNS; slices++) {
         uint64_t retired = g_cpu.insn_count;
@@ -1057,6 +1132,58 @@ static bool run_corpus(const char *name, const uint8_t *image, uint32_t size)
             slices + 1u, (unsigned)g_ms_advanced);
 
     return true;
+}
+
+/* One program from dos/corpus/bios, loaded by the convention M3 and M4
+ * froze: a flat binary at 0x100 of its own segment, interrupts off. */
+static bool run_corpus(const char *name, const uint8_t *image, uint32_t size)
+{
+    uprintf("\n  --- guest case \"%s\" ---\n", name);
+
+    machine_build(&g_mem, &g_cpu, image, size);
+
+    uprintf("  image  : %u bytes at %04X:%04X, SP=%04X\n",
+            (unsigned)size, (unsigned)g_cpu.cs, (unsigned)g_cpu.ip,
+            (unsigned)g_cpu.sp);
+
+    return drive(name);
+}
+
+/*
+ * One program from dos/corpus/dos, loaded the way DOS loads one: a Program
+ * Segment Prefix at the segment, the program behind it, and interrupts on.
+ *
+ * The entry state is printed rather than only asserted, because these are
+ * the values a reader comparing this run against docs/dos-refs-dos.md
+ * needs in front of them -- and because a loader that refused the program
+ * has to say so in words that name the reason.
+ */
+static bool run_dos_program(const char *name, const uint8_t *image,
+                            uint32_t size, const char *tail)
+{
+    struct vm86_dos_psp psp;
+
+    uprintf("\n  --- guest case \"%s\" ---\n", name);
+
+    enum vm86_dos_load_result result =
+        machine_build_dos(&g_mem, &g_cpu, image, size, tail, &psp);
+
+    if (result != VM86_DOS_LOADED) {
+        uprintf("  result : the loader refused it (reason %u)\n",
+                (unsigned)result);
+        uprintf("  VM: case %s: FAIL (the loader refused it)\n", name);
+        return false;
+    }
+
+    uprintf("  image  : %u bytes, PSP at %04X, memory top %04X, "
+            "environment %04X\n",
+            (unsigned)size, (unsigned)psp.segment,
+            (unsigned)psp.memory_top, (unsigned)psp.environment);
+    uprintf("  entry  : CS=%04X IP=%04X SP=%04X FLAGS=%04X\n",
+            (unsigned)g_cpu.cs, (unsigned)g_cpu.ip, (unsigned)g_cpu.sp,
+            (unsigned)g_cpu.flags);
+
+    return drive(name);
 }
 
 /*
@@ -1166,35 +1293,64 @@ static void check_screen(const char *what, unsigned pages, unsigned refused,
 }
 
 /*
- * The first row of the page the guest left, read out of the guest's own
- * memory.
+ * Every row of the page that has something on it, read out of the guest's
+ * own memory.
  *
  * This is what puts the acceptance sentence's text into the serial log now
- * that the page is no longer printed a row at a time. It is a report and
- * not an assertion: it says what the guest's memory holds, which
- * check_page above has already asserted cell by cell against what the
- * manual and the sample's own header say. Whether any of it reached a
+ * that the page is no longer printed a row at a time, and it is what a
+ * screendump is judged against -- see tools/check-screen-pixels.py, which
+ * reads these lines and then looks for exactly these characters on the
+ * screen.
+ *
+ * It is a report and not an assertion. What it says is what the guest's
+ * memory holds, which check_page has already asserted cell by cell against
+ * the manual and the sample's own header. Whether any of it reached a
  * framebuffer is the question the screendump answers.
+ *
+ * Blank rows are left out. A row nobody mentions is expected to be blank,
+ * and saying so twenty-five times would bury the rows that carry the
+ * answer -- which is the failure mode of a report that prints everything
+ * it knows.
  */
-static void report_top_row(const char *what, const struct vm86_cpu *cpu)
+static void report_rows(const char *what, const struct vm86_cpu *cpu)
 {
     const uint8_t *page    = bios10_active_page(cpu, &g_video);
     uint16_t       columns = g_video.columns;
     char           line[VM86_TEXT_COLUMNS + 1u];
+    unsigned       reported = 0;
 
     if (!page || columns == 0 || columns > VM86_TEXT_COLUMNS)
         return;
 
-    for (uint16_t col = 0; col < columns; col++) {
-        uint8_t ch = page[col * 2u];
+    uprintf("  screen : %s %ux%u\n", what, (unsigned)columns,
+            (unsigned)BIOS10_ROWS);
 
-        line[col] = (ch >= 0x20u && ch < 0x7Fu) ? (char)ch : ' ';
+    for (uint16_t row = 0; row < BIOS10_ROWS; row++) {
+        uint16_t used = columns;
+
+        for (uint16_t col = 0; col < columns; col++) {
+            uint8_t ch = page[((uint32_t)row * columns + col) * 2u];
+
+            line[col] = (ch >= 0x20u && ch < 0x7Fu) ? (char)ch : ' ';
+        }
+
+        line[columns] = '\0';
+
+        /* Trailing spaces are the page's, not the program's: a teletype
+         * write stops where it stops, and a line padded to eighty columns
+         * is a line nobody wants to read in a log. */
+        while (used > 0 && line[used - 1] == ' ')
+            line[--used] = '\0';
+
+        if (used == 0)
+            continue;
+
+        uprintf("  screen : %s row %u = \"%s\"\n", what, (unsigned)row, line);
+        reported++;
     }
 
-    line[columns] = '\0';
-
-    uprintf("  screen : %s %ux%u, row 0 = \"%s\"\n", what,
-            (unsigned)columns, (unsigned)BIOS10_ROWS, line);
+    uprintf("  screen : %s has %u row(s) with something on them\n",
+            what, reported);
 }
 
 /*
@@ -1281,7 +1437,7 @@ static bool run_acceptance(void)
                ' ', VM86_ATTR_DEFAULT, &g_cpu, &checks, &failures);
     check_screen("hello", g_presents - pages, g_refused - refused,
                  &checks, &failures);
-    report_top_row("hello", &g_cpu);
+    report_rows("hello", &g_cpu);
 
     uprintf("  VM: case hello: %s\n", failures ? "FAIL" : "PASS");
 
@@ -1322,7 +1478,7 @@ static bool run_acceptance(void)
      */
     check_screen("direct (M4-8)", g_presents - pages, g_refused - refused,
                  &checks, &failures);
-    report_top_row("direct", &g_cpu);
+    report_rows("direct", &g_cpu);
 
     uprintf("  VM: case direct: %s\n", failures == before ? "PASS" : "FAIL");
     uprintf("  checks : %u ok, %u failed\n", checks - failures, failures);
@@ -1658,7 +1814,7 @@ int vm_screen_hold(void)
     check_page("hello", TEXT, text_length, VM86_ATTR_DEFAULT,
                ' ', VM86_ATTR_DEFAULT, &g_cpu, &checks, &failures);
     check_screen("hello", g_presents, g_refused, &checks, &failures);
-    report_top_row("hello", &g_cpu);
+    report_rows("hello", &g_cpu);
 
     uprintf("  screen : the cursor is at cell %u\n",
             (unsigned)bios10_cursor_cell(&g_cpu, &g_video));
@@ -1685,6 +1841,71 @@ int vm_screen_hold(void)
      * block. Spinning is still a screen that does not change, and the
      * alternative is returning and taking the page down.
      */
+    while (u_getkey() == 0)
+        ;
+
+    screen_give_back();
+
+    return 0;
+}
+
+/*
+ * The DOS acceptance, with the screen left up.
+ *
+ * This is the first program in the project that is loaded the way DOS
+ * loads one, running in the place it will be used rather than only in a
+ * host suite. That distinction is the same one W2 made about the display:
+ * the loader is a library in dos/, and a library exercised only by its own
+ * suite is a library whose first real use is also its first real test.
+ *
+ * The tail is passed rather than defaulted, because the whole point of
+ * that field is that it carries what the caller was given -- and a program
+ * started with an argument here exercises the FCBs, which is the part of
+ * the PSP a loader gets wrong by doing the obvious thing.
+ *
+ * The command-line values are not asserted here. The host suite owns the
+ * loader, with every expectation transcribed from docs/dos-refs-dos.md and
+ * five injections proving the assertions can fail. What this run adds is
+ * that the same loader works in the address space it will be used in, and
+ * that what it loaded is *visible* -- which is what the screendump in
+ * tools/run-screen-test.sh reads back off the framebuffer.
+ */
+#define VM_PSP_TAIL " A:FILE.EXE"
+
+int vm_psp_hold(void)
+{
+    unsigned checks   = 0;
+    unsigned failures = 0;
+
+    uputs("\n[vm86 dos]\n");
+
+    if (!screen_take())
+        return 1;
+
+    if (!run_dos_program("psp", vm_corpus_dos_psp,
+                         (uint32_t)vm_corpus_dos_psp_size, VM_PSP_TAIL)) {
+        screen_give_back();
+        return 1;
+    }
+
+    check_screen("psp", g_presents, g_refused, &checks, &failures);
+    report_rows("psp", &g_cpu);
+
+    uprintf("  screen : the cursor is at cell %u\n",
+            (unsigned)bios10_cursor_cell(&g_cpu, &g_video));
+
+    uprintf("  VM: case psp: %s\n", failures ? "FAIL" : "PASS");
+    uprintf("  checks : %u ok, %u failed\n", checks - failures, failures);
+    uprintf("  VM: RESULT %s\n", failures ? "FAIL" : "PASS");
+
+    if (failures) {
+        screen_give_back();
+        return 1;
+    }
+
+    uprintf("  screen : the page stays up until a key arrives\n");
+    uflush();
+
     while (u_getkey() == 0)
         ;
 

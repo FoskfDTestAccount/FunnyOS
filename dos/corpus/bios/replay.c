@@ -39,6 +39,7 @@
 
 #include <vm86/cpu.h>
 #include <vm86/display.h>
+#include <vm86/dos.h>
 #include <vm86/host.h>
 #include <vm86/mem.h>
 
@@ -141,52 +142,38 @@ uint8_t *vm86_bios_disk(struct vm86_bios_machine *machine)
     return machine->disk;
 }
 
-void vm86_bios_load(struct vm86_bios_machine *machine,
-                    const uint8_t *image, uint16_t image_size)
+/*
+ * Power the machine on: no program in it, firmware installed, services
+ * registered, screen cleared.
+ *
+ * Split out of vm86_bios_load because there are now two ways to put a
+ * program into a machine and only one way to build the machine. The order
+ * within it is the order the real hardware does it in -- POST builds the
+ * vector table, then something loads a program -- and it used to be
+ * load-bearing: under the old convention a program went to linear 0x100
+ * with CS = 0, which is inside the table, so installing the firmware
+ * second buried the program's first bytes under its own vector entries.
+ * The program has a segment of its own now; see VM86_BIOS_LOAD_SEGMENT.
+ *
+ * The services go in after the firmware, so that the two the firmware owns
+ * itself -- equipment and memory size -- are not unregistered by a clear.
+ * The registry is process-wide (see trap.c), so powering on is also what
+ * makes sure the entries belong to THIS machine's devices and not to a
+ * previous case's.
+ */
+static void power_on(struct vm86_bios_machine *machine)
 {
     struct vm86_cpu *cpu = &machine->cpu;
 
     vm86_mem_clear(&machine->mem);
     vm86_reset(cpu, &machine->mem);
 
-    /*
-     * The firmware first and the program second, which is the order the
-     * real machine does it in -- POST builds the table, then something
-     * loads a program -- and which used to be load-bearing. Under the old
-     * convention a program went to linear 0x100 with CS = 0, which is
-     * inside the table at 0x0000-0x03FF, so installing the firmware second
-     * buried the program's own first bytes under its own vector entries.
-     * The program has a segment of its own now; see the note on
-     * VM86_BIOS_LOAD_SEGMENT. The order stays because it is the honest one.
-     */
     vm86_clear_services();
     vm86_install_firmware(cpu);
-
-    for (uint16_t i = 0; i < image_size; i++)
-        vm86_mem_write8(&machine->mem,
-                        VM86_BIOS_LOAD_LINEAR + VM86_BIOS_LOAD_OFFSET + i,
-                        image[i]);
-
-    vm86_set_seg(cpu, VM86_CS, VM86_BIOS_LOAD_SEGMENT);
-    vm86_set_seg(cpu, VM86_DS, VM86_BIOS_LOAD_SEGMENT);
-    vm86_set_seg(cpu, VM86_ES, VM86_BIOS_LOAD_SEGMENT);
-    vm86_set_seg(cpu, VM86_SS, VM86_BIOS_LOAD_SEGMENT);
-    vm86_flush_segments(cpu);
-
-    cpu->ip    = VM86_BIOS_LOAD_OFFSET;
-    cpu->sp    = VM86_BIOS_STACK_TOP;
-    cpu->flags = VM86_BIOS_INITIAL_FLAGS;
 
     memset(&machine->screen, 0, sizeof machine->screen);
     machine->key_delivered = false;
 
-    /*
-     * The services after the firmware, so that the two the firmware owns
-     * itself -- equipment and memory size -- are not unregistered by a
-     * clear. The registry is process-wide (see trap.c), so a load is also
-     * what makes sure the entries belong to THIS machine's devices and
-     * not to a previous case's.
-     */
     bios10_reset(&machine->video);
     bios16_reset(&machine->keyboard);
     bios1a_reset(&machine->clock);
@@ -205,6 +192,40 @@ void vm86_bios_load(struct vm86_bios_machine *machine,
                           &machine->clock);
     vm86_register_service(VM86_INT_DISK,          bios13_service,
                           &machine->disk_device);
+}
+
+void vm86_bios_load(struct vm86_bios_machine *machine,
+                    const uint8_t *image, uint16_t image_size)
+{
+    struct vm86_cpu *cpu = &machine->cpu;
+
+    power_on(machine);
+
+    for (uint16_t i = 0; i < image_size; i++)
+        vm86_mem_write8(&machine->mem,
+                        VM86_BIOS_LOAD_LINEAR + VM86_BIOS_LOAD_OFFSET + i,
+                        image[i]);
+
+    vm86_set_seg(cpu, VM86_CS, VM86_BIOS_LOAD_SEGMENT);
+    vm86_set_seg(cpu, VM86_DS, VM86_BIOS_LOAD_SEGMENT);
+    vm86_set_seg(cpu, VM86_ES, VM86_BIOS_LOAD_SEGMENT);
+    vm86_set_seg(cpu, VM86_SS, VM86_BIOS_LOAD_SEGMENT);
+    vm86_flush_segments(cpu);
+
+    cpu->ip    = VM86_BIOS_LOAD_OFFSET;
+    cpu->sp    = VM86_BIOS_STACK_TOP;
+    cpu->flags = VM86_BIOS_INITIAL_FLAGS;
+}
+
+enum vm86_dos_load_result
+vm86_bios_load_dos(struct vm86_bios_machine *machine,
+                   const struct vm86_dos_start *start,
+                   const uint8_t *image, uint32_t image_size,
+                   struct vm86_dos_psp *out)
+{
+    power_on(machine);
+
+    return vm86_dos_load(&machine->cpu, image, image_size, start, out);
 }
 
 /* ------------------------------------------------------------------ */
@@ -338,6 +359,27 @@ void vm86_bios_load(struct vm86_bios_machine *machine,
     (void)machine;
     (void)image;
     (void)image_size;
+}
+
+enum vm86_dos_load_result
+vm86_bios_load_dos(struct vm86_bios_machine *machine,
+                   const struct vm86_dos_start *start,
+                   const uint8_t *image, uint32_t image_size,
+                   struct vm86_dos_psp *out)
+{
+    (void)machine;
+    (void)start;
+    (void)image;
+    (void)image_size;
+    (void)out;
+
+    /* The DOS loader itself is always there -- dos/dos/psp.c is in the
+     * core, not behind the firmware check -- so this refusal is not about
+     * the loader. It is that a DOS program with no firmware behind it
+     * cannot print, which is the whole of what W3's acceptance asks for.
+     * Saying so here is better than letting the suite run and fail on an
+     * empty screen. */
+    return VM86_DOS_NO_SUCH_SEGMENT;
 }
 
 enum vm86_bios_stop vm86_bios_run(struct vm86_bios_machine *machine,

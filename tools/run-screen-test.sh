@@ -9,19 +9,34 @@
 # this one boots a machine with a display, waits for a program to put its
 # page up and hold it there, and takes a photograph of the result.
 #
-# The hold is what makes the photograph possible. The interpreter's
-# self-test gives the screen back as soon as it is done, so there is no
-# moment a screendump could be taken at; `vm=screen` runs the acceptance
-# case and then waits for a key that this test never sends. The screen
-# therefore does not change, and the capture can happen whenever this
-# script gets around to it -- there is no sleep long enough or short
-# enough to get right, because there is nothing to race.
+# The hold is what makes the photograph possible. A run that finishes gives
+# the screen back, so there would be no moment to take a screendump at; the
+# two modes used here -- `vm=screen` and `vm=psp` -- run their program and
+# then wait for a key that this test never sends. The screen therefore does
+# not change and the capture can happen whenever this script gets around to
+# it: there is no sleep long enough or short enough to get right, because
+# there is nothing to race.
+#
+# Two programs rather than one, because they are two different claims:
+#
+#   vm=screen   a .COM through the BIOS, appearing on a display. This is
+#               M4's acceptance sentence, and since W2 it is also the
+#               point where the page goes over the system call interface
+#               into the kernel's screen rather than into a log.
+#
+#   vm=psp      a .COM loaded the way DOS loads one -- behind a Program
+#               Segment Prefix, with the four segment registers pointed at
+#               it and interrupts on -- printing the PSP back out. This is
+#               W3's, and what it adds is that the loader works in the
+#               address space it will be used in and that what it loaded is
+#               visible, rather than only correct in a host suite's
+#               comparison.
 #
 # The pixels are judged by tools/check-screen-pixels.py, which locates the
-# page from the serial log, measures the two colours off the screen rather
-# than assuming a palette, and compares every scan line of every cell
-# against the glyph the kernel's font gives for the character the guest
-# left in its memory. What it does not check is in its own header.
+# page from the serial log, takes the expected characters from the rows the
+# interpreter reports, measures the two colours off the screen rather than
+# assuming a palette, and compares every scan line of every cell against the
+# glyph the kernel's font gives. What it does not check is in its header.
 #
 # Usage: bash tools/run-screen-test.sh [ISO path]
 #
@@ -33,14 +48,13 @@ ISO="${1:-$BUILD_DIR/funyos.iso}"
 WORK="$BUILD_DIR/screen-test"
 
 # Long enough for a boot, the acceptance case and the hold, with room for
-# software emulation on a machine with no KVM. It is a guard against a
-# hang rather than a schedule: the marker below is what the wait is really
-# for, and this is what stops the wait when something is wrong.
+# software emulation on a machine with no KVM. It is a guard against a hang
+# rather than a schedule: the marker below is what the wait is really for,
+# and this is what stops the wait when something is wrong.
 TIMEOUT_SECS="${QEMU_TIMEOUT:-90}"
 MARKER_WAIT="${SCREEN_MARKER_WAIT:-30}"
 
 FAILED=0
-CHECKS=0
 
 if [ ! -f "$ISO" ]; then
     echo "ERROR: ISO not found: $ISO" >&2
@@ -63,14 +77,11 @@ else
     echo "  Acceleration : TCG (software emulation, slow)"
 fi
 
-FIRMWARE_ARGS=""
-BOOT_ARGS="-boot d"
-
 # ---------------------------------------------------------------- image
 #
-# An image whose kernel command line starts the interpreter in its "leave
-# the page up" mode, built here rather than through the Makefile for the
-# same reason the other tests do it: the shipping image should not start
+# An image whose kernel command line starts the interpreter in one of its
+# "leave the page up" modes, built here rather than through the Makefile for
+# the same reason the other tests do it: the shipping image should not start
 # anything instead of the shell.
 
 build_image() {
@@ -101,66 +112,11 @@ EOF
         "$WORK/root" -o "$output" >/dev/null 2>&1
 }
 
-SCREEN_ISO="$WORK/funyos-screen.iso"
-build_image "vm=screen" "$SCREEN_ISO"
-
 # ---------------------------------------------------------------- capture
-
-LOG="$WORK/serial.log"
-PPM="$WORK/screen.ppm"
-
-echo "  Boot: the acceptance case, held on screen"
-rm -f "$LOG" "$PPM"
-
-# The monitor is driven on stdin, so the command sequence has to be a
-# process rather than a script: it waits for the marker in the serial log,
-# waits one more second for the grid to be the last thing written, takes
-# the screendump, and quits. The marker is what is being waited for -- the
-# timeout around QEMU is only there so a machine that never reaches the
-# hold still produces a log and a picture to judge.
-(
-    waited=0
-
-    while [ "$waited" -lt "$((MARKER_WAIT * 5))" ]; do
-        # Out of the wait as soon as the program has said how it went, one
-        # way or the other. A run that fails never reaches the hold, and
-        # sitting out the whole budget to photograph a screen the program
-        # has already given back is thirty seconds of nothing in front of
-        # a failure message.
-        if grep -qF "the page stays up until a key arrives" "$LOG" 2>/dev/null
-        then
-            break
-        fi
-
-        if grep -qF "VM: RESULT" "$LOG" 2>/dev/null; then
-            echo "  The interpreter finished without holding the page;" >&2
-            echo "  capturing what it left." >&2
-            break
-        fi
-
-        sleep 0.2
-        waited=$((waited + 1))
-    done
-
-    if [ "$waited" -ge "$((MARKER_WAIT * 5))" ]; then
-        echo "  The page never went up; capturing whatever is there." >&2
-    fi
-
-    sleep 1
-    echo "screendump $PPM"
-    sleep 2
-    echo "quit"
-) | timeout "$((TIMEOUT_SECS))" qemu-system-x86_64 \
-    -m 512 -cdrom "$SCREEN_ISO" $BOOT_ARGS \
-    -serial "file:$LOG" -display none -vga std -monitor stdio \
-    -no-reboot $FIRMWARE_ARGS $ACCEL >/dev/null 2>&1
-
-printf '\n=================== the screen ===================\n'
-sed -n '/\[vm86 screen\]/,$p' "$LOG" 2>/dev/null | cat -s
-printf '==================================================\n\n'
 
 expect_present() {
     CHECKS=$((CHECKS + 1))
+
     if grep -qF "$1" "$LOG" 2>/dev/null; then
         printf '  [ok]   %s\n' "$2"
     else
@@ -171,6 +127,7 @@ expect_present() {
 
 expect_absent() {
     CHECKS=$((CHECKS + 1))
+
     if grep -qF "$1" "$LOG" 2>/dev/null; then
         printf '  [FAIL] %s\n' "$2"
         FAILED=1
@@ -179,66 +136,159 @@ expect_absent() {
     fi
 }
 
-echo "Assertions:"
+# Boot `cmdline`, wait for the page to go up, photograph it, and judge the
+# pixels. Leaves the log and the screendump in $LOG and $PPM.
+capture() {
+    local cmdline="$1" tag="$2"
+    local iso="$WORK/funyos-$tag.iso"
 
-# The program took the screen, and the machine had one to give.
-expect_present "screen : the console screen is this program's" \
-    "the interpreter took the console's screen"                       "$LOG"
-expect_absent  "the console is NOT AVAILABLE" \
-    "and the machine had one to give"                                 "$LOG"
+    LOG="$WORK/serial-$tag.log"
+    PPM="$WORK/screen-$tag.ppm"
 
-# The guest ran, and its page is the one hello.asm's header describes.
+    build_image "$cmdline" "$iso"
+    rm -f "$LOG" "$PPM"
+
+    # The monitor is driven on stdin, so the command sequence has to be a
+    # process rather than a script: it waits for the marker in the serial
+    # log, waits one more second for the grid to be the last thing written,
+    # takes the screendump, and quits. The marker is what is being waited
+    # for -- the timeout around QEMU is only there so a machine that never
+    # reaches the hold still produces a log and a picture to judge.
+    #
+    # The wait ends early if the program says how it went, one way or the
+    # other: a run that fails never reaches the hold, and sitting out the
+    # whole budget to photograph a screen the program has already given
+    # back is thirty seconds of nothing in front of a failure message.
+    (
+        waited=0
+
+        while [ "$waited" -lt "$((MARKER_WAIT * 5))" ]; do
+            if grep -qF "the page stays up until a key arrives" \
+                    "$LOG" 2>/dev/null; then
+                break
+            fi
+
+            if grep -qF "VM: RESULT" "$LOG" 2>/dev/null; then
+                echo "  The program finished without holding the page;" >&2
+                echo "  capturing what it left." >&2
+                break
+            fi
+
+            sleep 0.2
+            waited=$((waited + 1))
+        done
+
+        if [ "$waited" -ge "$((MARKER_WAIT * 5))" ]; then
+            echo "  The page never went up; capturing whatever is there." >&2
+        fi
+
+        sleep 1
+        echo "screendump $PPM"
+        sleep 2
+        echo "quit"
+    ) | timeout "$((TIMEOUT_SECS))" qemu-system-x86_64 \
+        -m 512 -cdrom "$iso" -boot d \
+        -serial "file:$LOG" -display none -vga std -monitor stdio \
+        -no-reboot $ACCEL >/dev/null 2>&1
+
+    printf '\n=================== %s ===================\n' "$tag"
+    sed -n '/\[vm86/,$p' "$LOG" 2>/dev/null | cat -s
+    printf '==================================================\n\n'
+
+    echo "Assertions ($cmdline):"
+
+    # The program took the screen, and the machine had one to give.
+    expect_present "screen : the console screen is this program's" \
+        "the interpreter took the console's screen"
+    expect_absent  "the console is NOT AVAILABLE" \
+        "and the machine had one to give"
+
+    # Where the kernel put it. This is the line the pixel check is anchored
+    # to, so it has to be there or nothing about the screen can be judged.
+    expect_present "Screen         : a program has the screen, 80 columns at" \
+        "the kernel said where the page went on the screen"
+
+    # The count of pages is deliberately NOT asserted. It is one per slice
+    # in which the guest executed something, so it moves with the
+    # interpreter's slice size -- a number this test has no business
+    # knowing. What matters is that something was presented and that none
+    # of it was refused, and both of those are said in words.
+    expect_absent  "NOTHING WAS PRESENTED" \
+        "the page was handed to the kernel"
+    expect_absent  "the kernel refused" \
+        "and the kernel refused none of it"
+
+    # The hold, which is the only reason a photograph can be taken at all.
+    expect_present "screen : the page stays up until a key arrives" \
+        "the page was left up for the capture"
+
+    expect_absent  "PANIC"            "no kernel panic"
+    expect_absent  "CPU EXCEPTION"    "no host exception"
+    expect_absent  "program fault"    "nothing faulted"
+
+    echo
+    echo "The framebuffer:"
+
+    # Counted with the rest. The checker does its own reporting and returns
+    # its own verdict, but it is an assertion this script made, and a
+    # summary that left it out would be a summary that undercounts what was
+    # run.
+    CHECKS=$((CHECKS + 1))
+
+    if [ ! -s "$PPM" ]; then
+        echo "  [FAIL] no screendump was produced ($PPM)"
+        FAILED=1
+    else
+        python3 tools/check-screen-pixels.py \
+            "$PPM" "$LOG" kernel/console/font8x16.c || FAILED=1
+    fi
+
+    echo
+}
+
+CHECKS=0
+
+# ------------------------------------------------------------- the two runs
+
+capture "vm=screen" "hello"
+
 expect_present "VM: case hello: PASS" \
-    "the guest ran and left the page the manual says"                 "$LOG"
+    "the guest ran and left the page the manual says"
+expect_present "screen : hello 80x25" \
+    "the interpreter reported the page's shape"
+expect_present "screen : hello row 0 = \"M4 hello from the BIOS" \
+    "and row 0 is the guest's line"
+expect_present "screen : hello has 1 row(s) with something on them" \
+    "one row of that page has anything on it"
 
-# What the page held, read by the interpreter out of the guest's own
-# memory. This is the text the pixel check below will look for on the
-# screen, so it is a fragment and not the whole padded row: the padding is
-# as wide as the page and putting it here would be reproducing a constant
-# from the kernel.
-expect_present "screen : hello 80x25, row 0 = \"M4 hello from the BIOS" \
-    "and row 0 of the page holds the guest's line"                    "$LOG"
+capture "vm=psp" "psp"
 
-# The count of pages is deliberately NOT asserted. It is one per slice in
-# which the guest executed something, so it moves with the interpreter's
-# slice size -- a number this test has no business knowing. What matters
-# is that something was presented and that none of it was refused, and
-# both of those are said in words.
-expect_absent  "NOTHING WAS PRESENTED" \
-    "the page was handed to the kernel"                               "$LOG"
-expect_absent  "the kernel refused" \
-    "and the kernel refused none of it"                               "$LOG"
+# The loader accepted the program, and said what it built. These three
+# values are the loader's account of itself; the host suite
+# (dos/tests/test_dos.c) is where the bytes behind them are checked against
+# docs/dos-refs-dos.md.
+expect_present "PSP at 1000, memory top A000, environment 0F00" \
+    "the loader placed the PSP, the memory top and the environment"
+expect_present "entry  : CS=1000 IP=0100 SP=FFFE FLAGS=F202" \
+    "and entered it in DOS's state with interrupts on"
+expect_present "VM: case psp: PASS" \
+    "the program ran and halted"
 
-# Where the kernel put it. This is the line the pixel check is anchored
-# to, so it has to be there or nothing below can be judged.
-expect_present "Screen         : a program has the screen, 80 columns at" \
-    "the kernel said where the page went on the screen"               "$LOG"
-
-# The hold, which is the only reason a photograph can be taken at all.
-expect_present "screen : the page stays up until a key arrives" \
-    "the page was left up for the capture"                            "$LOG"
-
-expect_absent  "PANIC"            "no kernel panic"                   "$LOG"
-expect_absent  "CPU EXCEPTION"    "no host exception"                 "$LOG"
-expect_absent  "program fault"    "nothing faulted"                   "$LOG"
-
-# ---- And then the pixels ---------------------------------------------
-
-echo
-echo "The framebuffer:"
-
-# Counted with the rest. The checker does its own reporting and returns
-# its own verdict, but it is an assertion this script made, and a summary
-# that left it out would be a summary that undercounts what was run.
-CHECKS=$((CHECKS + 1))
-
-if [ ! -s "$PPM" ]; then
-    echo "  [FAIL] no screendump was produced ($PPM)"
-    FAILED=1
-else
-    python3 tools/check-screen-pixels.py \
-        "$PPM" "$LOG" kernel/console/font8x16.c || FAILED=1
-fi
+# The first program in the project loaded the way DOS loads one, printing
+# what it found. The whole list of rows is in the log; these are the ones a
+# person checking it by eye would look at first.
+expect_present "screen : psp row 0 = \"CS       = 1000\"" \
+    "the program read its own CS out of the PSP"
+expect_present "screen : psp row 6 = \"PSP:0002 = A000\"" \
+    "and the memory top at 02h, which is the machine's 640 KiB"
+expect_present "screen : psp row 15 = \"PSP:0040 = 1E03\"" \
+    "and the DOS version it is told to report"
+# The command tail, blank and all. The doubled quotes are the program's --
+# it prints the tail between quotes so that the leading blank is visible --
+# wrapped in the interpreter's own, which is why this literal looks the way
+# it does. The match stops before the trailing pair.
+expect_present 'screen : psp row 21 = "TAIL     = " A:FILE.EXE' \
+    "and the command tail it was given, blank and all"
 
 echo
 if [ "$FAILED" -eq 0 ]; then

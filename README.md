@@ -14,7 +14,7 @@ DOS 在这里扮演两重角色：**设计参照系**（继承小内核、直白
 
 **M0 到 M4 已完成并通过验证**——引导闭环、内核基础设施、控制台与 Shell、纯软件 8086 解释器、以及 IBM PC 兼容机的固件。最新一版作为 **Pre-release** 发布在 [Releases](../../releases) 页，ISO 可以直接下载运行。
 
-**M5 正在进行，还没有发布**：进程模型已经可重入、一个程序能启动另一个程序（W1），以及**一个 guest 程序的文本页现在由解释器进程自己画到真实屏幕上**（W2，见下面第四节）。`make check` 现在跑七条路径。
+**M5 正在进行，还没有发布**：进程模型已经可重入、一个程序能启动另一个程序（W1）；**一个 guest 程序的文本页现在由解释器进程自己画到真实屏幕上**（W2）；以及 **`.COM` 装载器**——一个程序现在可以被按 DOS 的方式装起来，带自己的 256 字节 PSP、环境块，和 `SP` 上那个让裸 `RET` 成为退出的零字（W3，见下面第四节）。`make check` 现在跑七条路径。
 
 开机进入一个**交互式命令行**。Shell（FunnyCOM）是一个 **Ring 3 用户态进程**，跑在自己的地址空间里，所有能力都通过系统调用取得——它自己没有任何特权。
 
@@ -26,6 +26,7 @@ DOS 在这里扮演两重角色：**设计参照系**（继承小内核、直白
 - **输入**——PS/2 键盘驱动，以及带回显与退格的行编辑。
 - **进程**——Ring 3 执行、私有地址空间、`int 0x80` 系统调用、故障隔离、**浮点（x87 与 SSE）**；可重入的运行（一个程序能启动另一个并拿回它的退出码）。
 - **屏幕**——内核的日志和一个程序自己的文本页**共用同一块屏幕**，一次只有一个持有者；拿走它的程序可以画一整页 80×25 的字符与属性，还回来时日志自动重画。**panic 任何时候都能把屏幕抢回来**。
+- **DOS 装载器**——一个 `.COM` 可以被按 DOS 的方式装起来：256 字节的 **PSP** 在程序段偏移 0 处、程序在 `0100h`、四个段寄存器都指向 PSP、环境块在另一段、栈顶压着那个让裸 `RET` 跳到 `PSP:0000` 上 `INT 20h` 的零字，命令行的参数已经解析进两个默认 FCB。
 - **文件**——一个只读的内存文件系统，文件内容就是编译进内核的字符串。
 - **Shell**——`dir` / `type` / `echo` / `help` / `ver` / `uptime` / `cls` / `exit`。
 
@@ -51,7 +52,11 @@ DOS 在这里扮演两重角色：**设计参照系**（继承小内核、直白
 
 **M5 进行中。** W1 是进程模型可重入（DESIGN §7.2 点名它是 M4 之后的第一件事，也是**唯一一件越晚做越贵的事**）：进出一个进程要保存还原的不是计划里写的两样而是**四样**——当前进程、当前 PML4、TSS 的内核栈指针、向量寄存器。验收是一条**可观测的不变量**而不是一句声明：内核在每次从 Ring 3 进来的定时器中断上检查那个帧落在**当前进程**的栈上，并报告三种结果（全对／有落错／**一个都没观测到**），因为"没有中断"会满足"没有落错"却什么都没检查；注入验证过它真的会红。W2 是**程序看得见**：屏幕成了可以被持有的东西，VM 进程自己把 guest 的文本页画到真实屏幕上，"并且看得见"这半句验收才第一次成立。
 
+W3 是**装载器**：一个 `.COM` 现在可以被按 DOS 的方式装起来——256 字节 PSP、环境块、四个段寄存器指向 PSP、`SP` 上那个让裸 `RET` 成为退出的零字。**这一版的第一个产物不是代码，是依据**：计划说"期望值从规范抄"，而树里当时没有 DOS 层的规范可抄（`dos-refs.md` 第九节把这一层明确记成未覆盖），所以先写了 [`docs/dos-refs-dos.md`](docs/dos-refs-dos.md)，每条带来源。**没有它，装载器和测试会一致地错。** 套件 212 条断言，期望值全部从那份文件抄、装载器的自述一次都不读；五个注入各自指向不同的断言；而套件在装载器的第一版里找出了一个真 bug——无参数时两个默认 FCB 的名字位应当是**空格**，不是零。
+
 **W2 长出了这一版唯一能看见屏幕的工具。** 串口日志能说的每一句话——guest 的页对、内核收到了、内核说它画在哪——**都和一个从没被写过的 framebuffer 相容**。所以 `make test-screen` 走了一条别的测试走不了的路：让程序把页留在屏幕上等一个按键，用 QEMU monitor 截屏，再由一个脚本**逐扫描线**比对每一个格子是不是内核那张字体里该有的形状、区块外有没有被动过、光标在不在 guest 的光标格上。它刻意**不假设调色板**——颜色是从屏幕上读出来的——代价是这个脚本的文件头写明了它**不检查调色板本身**。它的五种失败方式是**注入验证**的，各自报出不同的诊断，其中"每个字左移一个像素"那一条单独测过，因为其余四种都被别的检查先拦住了。
+
+W3 把这个工具从"一行"推广到了"若干行"（那个 PSP 程序打二十二行），**而推广后第一次注入就暴露了它自己的一个毛病**：一个"只画第一行"的注入被报成"用了控制台自己的颜色"——两个不同的错法产生同一个测量、同一句消息，而消息说的是没发生的那个。改成从报告说有文字的那一行取色、并把颜色那条挪到字形比对之后，同一个注入直指绘制。**注入的价值不只是证明断言会红，还包括证明它红的时候说的话是对的。**
 
 操作码与内存模型的那四百多个用例**在宿主上跑**，不在 QEMU 里：解释器是纯逻辑，给它一块内存和几个字节它就能执行，所以 `cd dos && make test` 是毫秒级的。但**绿灯不算证据，除非证明它会红**——所以每一层都做过**变异测试**：往实现里种一个缺陷，看对应用例变不变红。三处独立活动共种了一百二十多处，每一条用例都被至少一个变异体弄红过。M4 之后这套做法有了工具：[`tools/verify-mutations.py`](tools/verify-mutations.py) 现在覆盖整个 8086 子系统，表里 **186 个变异体**。它防在三处关键的地方——基线不全绿就拒绝报告；**跑了却解析不到的套件也拒绝报告**（一个从报告里消失的套件和一个无话可说的套件长得一模一样）；以及一个**"变异体根本没改变二进制"的探针**，同一份源码编译两次必须字节一致，否则"二进制变了"什么都证明不了。**整场战役还没有跑完**，所以这里不声称任何覆盖结论。
 
@@ -144,11 +149,16 @@ FunnyOS/
 │   ├── include/vm86/            CPU 状态、内存、解码、分发契约（已冻结）
 │   ├── cpu/                     解释器核心与各操作码组
 │   ├── mem/                     guest 内存模型
+│   ├── intr/  bios/             中断投递与六个 BIOS 服务
+│   ├── dos/                     DOS 层：PSP、环境块、`.COM` 装载器
+│   ├── corpus/                  手写汇编的样本（bios/ 与 dos/ 两套进入约定）
 │   └── tests/                   宿主上跑的测试与骨架
 ├── libk/                        内核基础库（内核与用户态各编译一次）
 ├── docs/
 │   ├── DESIGN.md                架构设计文档
-│   ├── tasks/                   M3 的任务书（每个操作码组一份）
+│   ├── dos-refs.md              固件行为的依据（带来源）
+│   ├── dos-refs-dos.md          DOS 层行为的依据（PSP、环境块、装载）
+│   ├── tasks/                   M3/M4/M5 的任务书
 │   └── limine-*.md              Limine 协议、配置、用法文档（由脚本获取）
 ├── tools/
 │   ├── setup-limine.sh          获取 Limine（幂等）
@@ -265,7 +275,7 @@ See [docs/DESIGN.md](docs/DESIGN.md) for the full architecture (written in Chine
 
 **M0 through M4 are complete and verified** -- the boot chain, the kernel infrastructure, the console and shell, the software 8086 interpreter, and the firmware of an IBM PC compatible. The latest one is published as a **pre-release** on the [Releases](../../releases) page, with an ISO you can boot.
 
-**M5 is under way and not yet released.** Two pieces are done: the process model is re-entrant and a program can start another one (W1), and **a guest program's text page is now drawn onto the real screen by the interpreter process itself** (W2; section 4 below). `make check` runs seven paths.
+**M5 is under way and not yet released.** Three pieces are done: the process model is re-entrant and a program can start another one (W1); **a guest program's text page is now drawn onto the real screen by the interpreter process itself** (W2); and a **`.COM` loader** -- a program can now be loaded the way DOS loads one, with its own 256-byte PSP, an environment block, and the zero word on the stack that turns a bare `RET` into an exit (W3; section 4 below). `make check` runs seven paths.
 
 The machine boots into an **interactive command line**. The shell, FunnyCOM, is a **Ring 3 user-space process** with its own address space and no privileges of its own -- everything it does goes through a system call.
 
@@ -277,6 +287,7 @@ What works:
 - **Input** -- a PS/2 keyboard driver, and a line discipline with echo and backspace.
 - **Processes** -- Ring 3 execution, private address spaces, `int 0x80` system calls, fault isolation, **floating point** (x87 and SSE), and a re-entrant run loop that lets one program start another and get its exit code back.
 - **The screen** -- the kernel's log and a program's own text page **share one screen**, held by one of them at a time: a program that takes it can draw a whole 80x25 page of characters and attributes, and giving it back repaints the log. **A panic can take the screen back at any moment.**
+- **A DOS loader** -- a `.COM` can be loaded the way DOS loads one: a 256-byte **PSP** at offset zero of the program's segment, the program behind it at `0100h`, all four segment registers pointed at the PSP, an environment block in a segment of its own, the zero word on the stack that makes a bare `RET` land on the `INT 20h` at `PSP:0000`, and the command line's parameters already parsed into the two default FCBs.
 - **Files** -- a read-only in-memory filesystem whose contents are string literals compiled into the kernel.
 - **Shell** -- `dir`, `type`, `echo`, `help`, `ver`, `uptime`, `cls`, `exit`.
 
@@ -302,7 +313,11 @@ The same ISO in **VMware Workstation** (BIOS path, not QEMU):
 
 **M5 is under way.** W1 made the process model re-entrant -- DESIGN 7.2 named it as the first job after M4 and as **the one thing that only gets more expensive to put off** -- and it turned out to be four pieces of machine state to save and restore rather than the two the plan named: the current process, the current PML4, the TSS kernel stack pointer, and the vector registers. Its acceptance is an **observable invariant** rather than a declaration: on every timer interrupt that arrives from Ring 3 the kernel asks whether the frame landed on the *running* process's kernel stack, and reports one of three things -- all of them did, some did not, or **none were seen**. The third is its own outcome because "no interrupt arrived" satisfies "none landed in the wrong place" without anything having been checked, and the assertion was verified by injection to actually go red. W2 is **a program becoming visible**: the screen is now a thing that can be held, and the interpreter process draws a guest's text page onto the real display itself -- which is the first time the "and appears" half of the acceptance sentence is true.
 
+W3 is **the loader**: a `.COM` can now be loaded the way DOS loads one -- a 256-byte PSP, an environment block, the four segment registers pointed at the PSP, and the zero word on the stack that turns a bare `RET` into an exit. **The first thing this produced was not code but a reference document.** The plan said to transcribe expectations from the specification rather than from the loader, and there was no specification for the DOS layer to transcribe from -- `docs/dos-refs.md` section 9 recorded that layer as uncovered. So [`docs/dos-refs-dos.md`](docs/dos-refs-dos.md) came first, with a source for every offset. **Without it the loader and the tests would have been wrong together.** The suite makes 212 assertions, every expected value transcribed from that document and the loader's own account of itself never read; five injections each aimed at a different assertion; and the suite found a real bug in the loader's first draft -- with no arguments the two default FCBs must hold *blanks* in their name fields, not zeroes.
+
 **W2 grew the only instrument in this project that can see the screen.** Every sentence a serial log can say -- the guest's page is right, the kernel was handed it, the kernel says where it put it -- **is consistent with a framebuffer nobody ever wrote to.** So `make test-screen` takes a road no other test here can: it has the program leave its page up and wait for a key, captures a screendump through the QEMU monitor, and compares **scan line by scan line** whether each cell holds the shape the kernel's font has for it, whether anything outside the block was disturbed, and whether the cursor is on the guest's cursor cell. It deliberately **does not assume a palette** -- the colours are read off the screen -- and the price, stated in that script's own header, is that it **does not check the palette itself**. Its five failure modes were established by injection, each reporting a different diagnosis; the one where every glyph moves a single pixel was tested on its own, because the other four were all caught by a different check first.
+
+W3 took that instrument from one row to many -- the PSP program prints twenty-two -- and **the first injection afterwards found a fault in the instrument itself**: a change that drew only the first row was reported as "the attribute byte was not used", because the two faults produce the same measurement from a blank cell and the message named the one that had not happened. The checker now takes its colours from the first row the interpreter reports as having text on it, and the colour check comes after the glyph comparison, so the same injection now points straight at the drawing. **The value of an injection is not only proving an assertion can go red; it is proving that what it says when it goes red is true.**
 
 The four hundred-odd cases covering the opcodes and the memory model **run on the host**, not in QEMU: the interpreter is pure logic, and given a block of memory and some bytes it executes, so `cd dos && make test` answers in milliseconds. But **a green light is not evidence unless it can be shown to go red** -- so every layer was put through **mutation testing**: inject one defect, watch which case turns red. Three independent campaigns injected well over a hundred, and every case was turned red by at least one of them. Since M4 that practice has a tool: [`tools/verify-mutations.py`](tools/verify-mutations.py) now covers the whole 8086 subsystem, with **186 mutants** in its table. It guards three places that matter -- it refuses to report unless the pristine tree is green; it refuses if a suite ran whose output it could not parse, because a suite missing from the report looks exactly like a suite with nothing to say; and it probes whether the mutant changed the compiled code at all, since the same source built twice has to come out byte-identical and "the binary changed" otherwise says nothing. **The campaign has not been run to completion**, so no coverage claim is made here.
 
@@ -395,11 +410,16 @@ FunnyOS/
 │   ├── include/vm86/            CPU state, memory, decoding, dispatch (frozen)
 │   ├── cpu/                     The interpreter core and the opcode groups
 │   ├── mem/                     The guest memory model
+│   ├── intr/  bios/             Interrupt delivery and the six BIOS services
+│   ├── dos/                     The DOS layer: PSP, environment, .COM loader
+│   ├── corpus/                  Hand-written samples, under both entry conventions
 │   └── tests/                   A harness that runs on the host, not in QEMU
 ├── libk/                        Kernel support library (compiled for both sides)
 ├── docs/
 │   ├── DESIGN.md                Architecture and design decisions
-│   ├── tasks/                   M3 task assignments, one per opcode group
+│   ├── dos-refs.md              What the firmware does, with sources
+│   ├── dos-refs-dos.md          What the DOS layer does: PSP, environment, loading
+│   ├── tasks/                   M3, M4 and M5 task documents
 │   └── limine-*.md              Limine protocol, config and usage docs (fetched, not committed)
 ├── tools/
 │   ├── setup-limine.sh          Fetch Limine (idempotent)
