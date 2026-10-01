@@ -17,7 +17,7 @@
 ;
 ; The second read asks for cylinder 80 of an eighty-cylinder disk. Every
 ; byte of it is out of range, so it must come back with CF set, AH=04h, and
-; must leave the buffer at 0000:0900 alone. Two words are planted there
+; must leave the buffer at 1000:0900 alone. Two words are planted there
 ; first and the suite asserts them afterwards: a failed read that
 ; half-filled the buffer is worse than one that failed loudly, because the
 ; caller cannot tell stale data from real data.
@@ -41,7 +41,8 @@
 ; test on.
 ;
 ; Entry convention: the corpus convention, from replay.h -- a flat binary
-; at 0x100, CS=DS=ES=SS=0, SP=0xFFFE, FLAGS=0xF002. IF is clear; INT 13h
+; at 0x100 of its own segment, CS=DS=ES=SS=0x1000, SP=0xFFFE, FLAGS=0xF002.
+; IF is clear; INT 13h
 ; does not need interrupts and this program never enables them.
 ;
 ; Expected at HLT:
@@ -51,8 +52,8 @@
 ;   attribute byte, so the 0x0F in BL is ignored -- and set to a value the
 ;   cells do not have, so a machine that writes BL fails here rather than
 ;   passing by luck
-;   the buffer at 0000:0600 = 4D 34 0D 0A, then the rest of the sector
-;   the buffer at 0000:0900 = CD AB 34 12, exactly as it was planted
+;   the buffer at 1000:0600 = 4D 34 0D 0A, then the rest of the sector
+;   the buffer at 1000:0900 = CD AB 34 12, exactly as it was planted
 
         bits 16
         org 0x100
@@ -63,7 +64,7 @@
         mov     ax, 0x0003
         int     0x10
 
-        ; 1. read the first sector of the disk into 0000:0600
+        ; 1. read the first sector of the disk into 1000:0600
         mov     ax, 0x0201              ; AH=02h read, AL=1 sector
         mov     cx, 0x0001              ; CH=0 cylinder, CL=1 -> sector 1
         mov     dx, 0x0000              ; DH=0 head, DL=0 drive A

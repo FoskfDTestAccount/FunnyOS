@@ -108,9 +108,20 @@
 #define GUEST_RAM_BYTES (16u * 1024u * 1024u)
 
 /*
- * Where a guest program is loaded, and where its stack starts. Both come
- * from the convention; neither is a decision this file makes.
+ * Where a guest program is loaded and where its stack starts.
+ *
+ * A .COM gets a segment of its own -- CS, DS, ES and SS all pointing at
+ * it -- and this is the convention dos/corpus/bios/replay.h froze for the
+ * host suite, so the same bytes run in both places with nothing kept in
+ * step by hand.
+ *
+ * The segment is not decoration. Loading at linear 0x100 with CS = 0 puts
+ * the program inside the interrupt vector table at 0x0000-0x03FF: its
+ * first 768 bytes become vector entries 64 and up, which works only until
+ * a program hooks a vector above 0x60 -- where TSRs conventionally live --
+ * and finds its own handler buried under its own code.
  */
+#define GUEST_SEGMENT      0x1000u
 #define GUEST_LOAD_ADDRESS 0x0100u
 #define GUEST_STACK_TOP    0xFFFEu
 
@@ -534,11 +545,12 @@ static void present(const struct vm86_cpu *cpu)
 /*
  * Power the machine on and load one program into it.
  *
- * The firmware goes in BEFORE the program, and that is not cosmetic: it
- * builds the interrupt vector table at 0x0000-0x03FF, and the corpus
- * convention loads a program at linear 0x100 with CS = 0. Loading first
- * buries the program's own first bytes under the table, and the symptom is
- * a machine executing vector-table bytes.
+ * The firmware goes in before the program, which is the order the real
+ * machine does it in and which used to be load-bearing: the table is built
+ * at 0x0000-0x03FF, and under the old convention a program went to linear
+ * 0x100 with CS = 0 and landed inside it. The program has a segment of its
+ * own now -- see GUEST_SEGMENT -- so the two cannot collide, and the order
+ * stays because it is the honest one.
  *
  * The disk is registered with a NULL context, which is what bios13.h calls
  * a machine with no disk: every function answers with the status that says
@@ -555,12 +567,15 @@ static void machine_build(struct vm86_mem *mem, struct vm86_cpu *cpu,
     vm86_install_firmware(cpu);
 
     for (uint32_t i = 0; i < size; i++)
-        vm86_mem_write8(mem, GUEST_LOAD_ADDRESS + i, image[i]);
+        vm86_mem_write8(mem,
+                        ((uint32_t)GUEST_SEGMENT << 4) +
+                            GUEST_LOAD_ADDRESS + i,
+                        image[i]);
 
-    vm86_set_seg(cpu, VM86_CS, 0);
-    vm86_set_seg(cpu, VM86_DS, 0);
-    vm86_set_seg(cpu, VM86_ES, 0);
-    vm86_set_seg(cpu, VM86_SS, 0);
+    vm86_set_seg(cpu, VM86_CS, GUEST_SEGMENT);
+    vm86_set_seg(cpu, VM86_DS, GUEST_SEGMENT);
+    vm86_set_seg(cpu, VM86_ES, GUEST_SEGMENT);
+    vm86_set_seg(cpu, VM86_SS, GUEST_SEGMENT);
     vm86_flush_segments(cpu);
 
     cpu->ip = GUEST_LOAD_ADDRESS;

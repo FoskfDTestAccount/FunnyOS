@@ -35,7 +35,8 @@
 ; and hello.asm leaves it at cell 22, and the two screens still match.
 ;
 ; Entry convention: the corpus convention, from replay.h -- a flat binary
-; at 0x100, CS=DS=ES=SS=0, SP=0xFFFE, FLAGS=0xF002. IF is clear and this
+; at 0x100 of its own segment, CS=DS=ES=SS=0x1000, SP=0xFFFE, FLAGS=0xF002.
+; IF is clear and this
 ; program never needs it: no interrupt is involved anywhere in it.
 ;
 ; Expected at HLT:

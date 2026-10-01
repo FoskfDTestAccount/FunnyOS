@@ -150,24 +150,22 @@ void vm86_bios_load(struct vm86_bios_machine *machine,
     vm86_reset(cpu, &machine->mem);
 
     /*
-     * The firmware FIRST, then the program, and the order is not
-     * cosmetic. vm86_install_firmware() builds the vector table, which
-     * lives at 0x0000-0x03FF, and the corpus convention puts the program
-     * at linear 0x100 with CS = 0 -- so the two overlap. Loading the
-     * program first buries its own first 768 bytes under the table, and
-     * the symptom is a machine that executes vector-table bytes.
-     *
-     * The overlap is the convention's and not this file's, and it has a
-     * second consequence worth knowing: a corpus program's image *does*
-     * overwrite vector entries 64 and up, because that is where it is
-     * loaded. Nothing here uses a vector that high, and a real .COM does
-     * not have the problem because DOS loads it at a segment of its own.
+     * The firmware first and the program second, which is the order the
+     * real machine does it in -- POST builds the table, then something
+     * loads a program -- and which used to be load-bearing. Under the old
+     * convention a program went to linear 0x100 with CS = 0, which is
+     * inside the table at 0x0000-0x03FF, so installing the firmware second
+     * buried the program's own first bytes under its own vector entries.
+     * The program has a segment of its own now; see the note on
+     * VM86_BIOS_LOAD_SEGMENT. The order stays because it is the honest one.
      */
     vm86_clear_services();
     vm86_install_firmware(cpu);
 
     for (uint16_t i = 0; i < image_size; i++)
-        vm86_mem_write8(&machine->mem, VM86_BIOS_LOAD_OFFSET + i, image[i]);
+        vm86_mem_write8(&machine->mem,
+                        VM86_BIOS_LOAD_LINEAR + VM86_BIOS_LOAD_OFFSET + i,
+                        image[i]);
 
     vm86_set_seg(cpu, VM86_CS, VM86_BIOS_LOAD_SEGMENT);
     vm86_set_seg(cpu, VM86_DS, VM86_BIOS_LOAD_SEGMENT);

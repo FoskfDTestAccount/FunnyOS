@@ -38,7 +38,8 @@
 ;     kind of portability, because it is invisible until it is not.
 ;
 ; Entry convention: the corpus convention, from replay.h -- a flat binary
-; at 0x100, CS=DS=ES=SS=0, SP=0xFFFE, FLAGS=0xF002. IF is CLEAR, unlike
+; at 0x100 of its own segment, CS=DS=ES=SS=0x1000, SP=0xFFFE, FLAGS=0xF002.
+; IF is CLEAR, unlike
 ; real DOS, so a sample that wants to be interrupted has to say `sti`
 ; itself. This one never enables interrupts and never needs them.
 ;
