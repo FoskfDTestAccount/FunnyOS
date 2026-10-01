@@ -200,6 +200,16 @@ enum vm86_result vm86_host_trap(struct vm86_cpu *cpu, uint8_t opcode);
  * Only a service reached through the trap can use this. A service called
  * directly from a test has no instruction to go back to, and vm86_host_trap
  * is what records where the trap was.
+ *
+ * It also turns interrupts back on, and that is not a detail. The INT
+ * that reached the stub cleared IF, which is what entering a handler
+ * does, and the run loop will not deliver while IF is clear -- so a
+ * retry that did not turn them back on would wait forever for the very
+ * interrupt that would make the answer possible. A real BIOS routine runs
+ * `sti` before it waits for the same reason. Interrupts therefore end up
+ * enabled even if the guest had them off, which is deliberate: what is
+ * happening is a handler deciding to wait, not the guest's instruction
+ * resuming.
  */
 void vm86_service_retry(struct vm86_cpu *cpu);
 

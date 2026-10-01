@@ -98,4 +98,27 @@ void vm86_service_retry(struct vm86_cpu *cpu)
      * far call rather than by an INT.
      */
     cpu->ip = cpu->insn_ip;
+
+    /*
+     * And interrupts go back on.
+     *
+     * This line is the difference between a working blocking call and a
+     * deadlock, and it is not obvious. The INT that got us here cleared
+     * IF -- correctly, that is what entering a handler does -- and the
+     * run loop refuses to deliver anything while IF is clear. So a
+     * service that retries without turning them back on is waiting for a
+     * keyboard interrupt the machine is now forbidden to deliver: the
+     * buffer stays empty, the guest spins, and nothing ever reports an
+     * error. It took a probe that ran the run loop's boundary logic by
+     * hand to see it, because reading the two files separately shows
+     * nothing wrong with either.
+     *
+     * Turning them on is what the handler would have done. A real BIOS
+     * keyboard routine runs `sti` before it waits, for this exact reason.
+     * So this is deliberately not "restore the guest's IF" -- it is a
+     * handler deciding to wait with interrupts live, which is a thing a
+     * handler may decide, and it overrides a guest that called a blocking
+     * read with interrupts disabled.
+     */
+    vm86_flag_set(cpu, VM86_IF, true);
 }
