@@ -172,6 +172,22 @@ enum vm86_result vm86_step(struct vm86_cpu *cpu)
      */
     cpu->fault = VM86_NO_FAULT;
 
+    /*
+     * Where this instruction began, before any of its prefixes.
+     *
+     * A repeated string instruction abandoned between iterations is
+     * re-executed from here, so what is recorded has to be the start of
+     * the whole instruction -- prefixes included -- rather than the
+     * opcode. Rewinding to the opcode instead turns `rep movsb` into
+     * `movsb`: one byte copied instead of a buffer, on a machine that
+     * looks like it is working. See struct vm86_cpu.
+     *
+     * Recorded before the prefix loop rather than after it because the
+     * loop consumes bytes: by the time the opcode is in hand, the address
+     * this is supposed to hold has already been walked past.
+     */
+    cpu->insn_ip = cpu->ip;
+
     uint8_t opcode;
 
     for (;;) {

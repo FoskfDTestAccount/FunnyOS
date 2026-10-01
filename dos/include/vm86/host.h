@@ -200,6 +200,23 @@ enum vm86_result vm86_host_trap(struct vm86_cpu *cpu, uint8_t opcode);
  * Only a service reached through the trap can use this. A service called
  * directly from a test has no instruction to go back to, and vm86_host_trap
  * is what records where the trap was.
+ *
+ * It also turns interrupts back on, and that is not a detail. The INT
+ * that reached the stub cleared IF, which is what entering a handler
+ * does, and the run loop will not deliver while IF is clear -- so a
+ * retry that did not turn them back on would wait forever for the very
+ * interrupt that would make the answer possible. A real BIOS routine runs
+ * `sti` before it waits for the same reason. Interrupts therefore end up
+ * enabled even if the guest had them off, which is deliberate: what is
+ * happening is a handler deciding to wait, not the guest's instruction
+ * resuming.
+ *
+ * It does not touch the interrupt shadow, and a service must not either.
+ * Setting intr_shadow on the way into a retry would re-arm the grace
+ * period every time the service was re-entered -- and the retry is
+ * re-entered by re-running the trap, so the period would never expire and
+ * the machine would stop delivering anything at all. The boundary the run
+ * loop already gave up is the delay; there is nothing to add to it.
  */
 void vm86_service_retry(struct vm86_cpu *cpu);
 
@@ -281,11 +298,25 @@ void vm86_interrupt(struct vm86_cpu *cpu, uint8_t vector);
  * Raise a hardware interrupt. Set it pending; it is delivered at the next
  * instruction boundary at which the guest can take it.
  *
- * Raising a vector that is already pending does nothing: a line that is
- * asserted while its previous interrupt has not been taken yet is one
- * interrupt, not two. That is how the 8259 works and is what keeps a
- * device that is flooded from building an unbounded backlog the guest can
- * never catch up with.
+ * Raising a vector that is already pending does nothing. For the
+ * interrupt controller that is right: an edge that arrives while the
+ * previous one has not been taken is one interrupt, not two, and it is
+ * what keeps a device the guest cannot keep up with from building a
+ * backlog that never drains.
+ *
+ * That is only half of it, and the other half belongs to the device
+ * rather than here. On real hardware a burst of keystrokes becomes a
+ * burst of interrupts because the keyboard controller holds one scan code
+ * and only re-asserts its line once that one has been read. A device
+ * modelled as "here is a queue, wake the guest when it fills" therefore
+ * loses events -- the handler runs once for a handful of keys, and it
+ * loses them only when the guest is busy, which is the worst way for a
+ * fault to behave because it looks like the guest is slow.
+ *
+ * So a device that can produce several events between two deliveries must
+ * either keep them all until the guest has taken the last, or be drained
+ * completely by the handler that runs for it. Either works. Not choosing
+ * is a machine that drops input under load.
  */
 void vm86_raise(struct vm86_cpu *cpu, uint8_t vector);
 

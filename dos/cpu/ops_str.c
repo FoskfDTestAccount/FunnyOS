@@ -78,6 +78,8 @@
  */
 #include <vm86/ops.h>
 
+#include <vm86/host.h>
+
 /* ------------------------------------------------------------------ */
 /* The one loop                                                        */
 /* ------------------------------------------------------------------ */
@@ -180,6 +182,38 @@ enum vm86_result vm86_str_repeat(struct vm86_cpu *cpu, uint8_t bits,
 
         if (conditional && vm86_flag_test(cpu, VM86_ZF) == stop_when_zf_set)
             break;
+
+        /*
+         * Between iterations, the hardware looks to see whether an
+         * interrupt is waiting. This is what makes a long `rep movsb`
+         * interruptible at all, and where the check sits in the loop is
+         * the whole of it.
+         *
+         * After the body, not before it. The hardware finishes the
+         * element it is on and then looks, so the first element always
+         * moves; a check ahead of the body would let an interrupt that
+         * is already pending stop the instruction before it had done
+         * anything. There is a duller reason too: the run loop only
+         * reaches an instruction when it could not deliver anything at
+         * that boundary, so a check made before the first element would
+         * be asking a question the run loop had just answered.
+         *
+         * The rewind goes to cpu->insn_ip -- the start of the whole
+         * instruction, prefixes included -- because that is the address
+         * the hardware records in the frame. CX, SI and DI are left
+         * exactly where the iterations left them, so the replay after
+         * the handler returns copies the *remaining* elements rather
+         * than starting over: that is what makes the recorded address
+         * the start of the instruction rather than a restart of it.
+         *
+         * Rewinding to just past the F3 instead would drop the prefix,
+         * turn `rep movsb` into `movsb`, and copy one byte of a buffer
+         * on a machine that looks like it is working.
+         */
+        if (vm86_interruptible(cpu)) {
+            cpu->ip = cpu->insn_ip;
+            return VM86_CONTINUE;
+        }
     }
 
     return VM86_CONTINUE;
