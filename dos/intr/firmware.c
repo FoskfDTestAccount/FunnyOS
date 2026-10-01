@@ -8,18 +8,44 @@
  * the vector table is.
  *
  * ---------------------------------------------------------------------
- * These two are the exception to who-writes-what
+ * What this file writes, and the two exceptions it makes
  *
  * firmware.h says each field of the data area belongs to whichever
- * service owns it, and that nothing else may write across the area. These
- * two fields have no owning service: nothing maintains them, nothing
- * updates them, and no device is behind them. They are written once, at
- * power-on, and read for the rest of the machine's life.
+ * service owns it, and that nothing else may write across the area. That
+ * rule holds for most of it, and this file is where it is broken -- twice,
+ * on purpose, and for the same reason both times: the state has to exist
+ * before any service has been asked for anything.
  *
- * So this file writes exactly those two, and only those two. The mode
- * word, the cursor, the tick count and the keyboard queue are the video,
- * time and keyboard services' -- their resets fill them, and a copy here
- * would be a second writer of the same bytes for no benefit.
+ * The first is the two fields that describe the machine to itself: how
+ * much memory there is and what is attached. Nothing maintains them and no
+ * device is behind them; they are written once and read for the rest of
+ * the machine's life. INT 11h and INT 12h below are readers.
+ *
+ * The second is the video half of the area -- mode, columns, page stride,
+ * active page, cursor. Those are the video service's, and its reset()
+ * cannot publish them because it has no CPU to write with. So for a while
+ * nothing wrote them, and a machine that had been reset but not yet asked
+ * a question reported a video mode of 0 and a page stride of 0 -- and a
+ * program that reads the stride out of 0040:004C to work out where a page
+ * is divides by zero. POST is what fills these on a real machine, which
+ * makes this the firmware's job by the same argument as the first.
+ *
+ * It stays correct afterwards by itself: the video service publishes its
+ * whole state on every call, so the first INT 10h overwrites every byte
+ * here with the same values or with better ones.
+ *
+ * The tick count and the keyboard queue are *not* written here. Those have
+ * owning services whose resets can fill them, and a copy would be a second
+ * writer of the same bytes for no benefit.
+ *
+ * This paragraph exists because it once said the opposite. It listed the
+ * video fields among the ones this file leaves alone, and when the code
+ * below was changed to write them the header was not, so for a while the
+ * file argued both ways and a reader who trusted the top of it concluded
+ * that a just-reset machine reported nothing about its display. It did
+ * not; the comment was what was wrong. A header that describes a
+ * different program from the one underneath it is worse than no header,
+ * because it is read instead of the code.
  *
  * ---------------------------------------------------------------------
  * Where these values come from
