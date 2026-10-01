@@ -462,39 +462,48 @@ static void test_a_displacement_between_the_trap_and_its_service_byte(
 }
 
 /*
- * *** PINS A KNOWN GAP ***  -- see M4-intr-audit-report.md
+ * *** WAS A KNOWN GAP, FIXED ON MAIN@3a540d8 ***
  *
- * The dispatcher does not record insn_ip. M4-README assigns that to the
- * run loop, which is not in the tree yet, so today the field's only
- * writer is the trap -- and its value therefore means "the last host
- * trap" rather than "the instruction being executed".
+ * In the first audit this case asserted that nothing wrote insn_ip at
+ * all: `vm86_step` cleared its prefixes and dispatched without recording
+ * where the instruction began, so the trap's own store was the field's
+ * only writer and the value meant "the last host trap" rather than "the
+ * instruction being executed". A REP wired to it would have rewound into
+ * the middle of the stub.
  *
- * That is not a defect in anything that exists. It is a sequencing
- * hazard: the string instructions will rewind to this field, and wiring
- * them up before the run loop records it would make `rep movsb` after
- * any INT rewind into the middle of the stub. This case makes the gap
- * visible so the order of that work is a decision.
+ * The dispatcher records it now, before the prefix loop. The assertion
+ * below is the one that would have caught the omission, and it uses a
+ * prefixed instruction so that "before the prefixes" is a different
+ * address from "at the opcode" -- the property the comment in step.c
+ * claims and which no unprefixed case can tell apart.
  */
-static void test_nothing_but_the_trap_writes_the_instruction_pointer_record(
+static void test_the_dispatcher_records_the_instruction_start(
         struct vm86_cpu *cpu)
 {
     vm86_clear_services();
 
-    static const uint8_t code[] = { 0xB8, 0x01, 0x00,   /* mov ax, 1 */
-                                    0x40,               /* inc ax    */
-                                    0xF4 };
+    /* `cs: mov ax, 1`, so the prefix byte and the opcode are different
+     * addresses. */
+    static const uint8_t code[] = { 0x2E, 0xB8, 0x01, 0x00, 0xF4 };
 
     vm86_test_load(cpu, code, sizeof(code));
 
-    /* Anything the trap would have left behind, standing in for the run
-     * loop's recording and for a stale trap both. */
+    /* Something the trap would have left behind, to prove this is a
+     * record and not a leftover. */
     cpu->insn_ip = 0xDEADu;
 
-    for (unsigned i = 0; i < 3; i++)
-        vm86_step(cpu);
+    vm86_step(cpu);
 
-    vm86_expect_u16("three instructions left it exactly where it was",
-                    cpu->insn_ip, 0xDEADu);
+    vm86_expect_u16("the start is the prefix byte, not the opcode",
+                    cpu->insn_ip, 0x0100u);
+    vm86_expect_u16("and the opcode really is one byte further on",
+                    (uint16_t)(cpu->insn_ip + 1u), 0x0101u);
+
+    /* And it follows the machine rather than sticking at the first
+     * instruction. */
+    vm86_step(cpu);
+    vm86_expect_u16("the next instruction has its own start",
+                    cpu->insn_ip, 0x0104u);
 }
 
 /* ------------------------------------------------------------------ */
@@ -827,10 +836,503 @@ static void test_interruptible_needs_all_three_conditions(struct vm86_cpu *cpu)
 }
 
 /* ------------------------------------------------------------------ */
+/* The run loop                                                        */
+/* ------------------------------------------------------------------ */
+
+/*
+ * A guest handler, at 0x0500, pointed at from a vector.
+ *
+ * 0x0500 rather than somewhere nearer the program, because in this
+ * harness everything below 0x0400 is the vector table and a handler
+ * parked inside it would be overwritten by the next one -- see the case
+ * on that at the end of this section.
+ *
+ * Two handlers, because two different things are worth observing. One
+ * records that it ran. The other records *where it was entered from*,
+ * which is how the grace period after STI is measured: an interrupt
+ * delivered one instruction too early says so in that number.
+ */
+static const uint8_t HANDLER_MARKS[] = {
+    0xC6, 0x06, 0x00, 0x06, 0x5A,   /* mov byte [0x0600], 0x5A */
+    0xCF,                           /* iret */
+};
+
+static const uint8_t HANDLER_RECORDS_IP[] = {
+    0x89, 0xE5,                     /* mov bp, sp        */
+    0x8B, 0x46, 0x00,               /* mov ax, [bp+0]    */
+    0xA3, 0x00, 0x06,               /* mov [0x0600], ax  */
+    0xCF,                           /* iret              */
+};
+
+#define HANDLER_BASE 0x0500u
+#define RECORD_AT    0x0600u
+
+static void hook(struct vm86_cpu *cpu, uint8_t vector,
+                 const uint8_t *code, size_t size)
+{
+    for (size_t i = 0; i < size; i++)
+        vm86_mem_write8(cpu->mem, HANDLER_BASE + (uint32_t)i, code[i]);
+
+    vm86_mem_write16(cpu->mem, (uint32_t)vector * 4u,     HANDLER_BASE);
+    vm86_mem_write16(cpu->mem, (uint32_t)vector * 4u + 2u, 0x0000u);
+}
+
+/*
+ * The instruction after STI runs before any interrupt is delivered.
+ *
+ * That is the whole of what the shadow is for, and it is the one piece
+ * of the run loop whose failure is invisible in a program that does not
+ * depend on it: an interrupt delivered one instruction early runs a
+ * handler that then returns, and the program carries on with the same
+ * registers it would have had. The handler records the IP it was entered
+ * from, so "one instruction early" is a number and not a shrug.
+ *
+ * The program is `sti ; nop ; nop ; hlt`, at 0x0100. Everything after
+ * the STI is at 0x0101, so an interrupt taken after the grace expired
+ * records 0x0102 -- the address of the second nop -- and one taken a
+ * boundary too early records 0x0101.
+ */
+static void test_the_instruction_after_sti_is_not_interrupted(
+        struct vm86_cpu *cpu)
+{
+    vm86_clear_services();
+    vm86_install_ivt(cpu);
+    hook(cpu, 0x08, HANDLER_RECORDS_IP, sizeof(HANDLER_RECORDS_IP));
+
+    static const uint8_t code[] = { 0xFB, 0x90, 0x90, 0xF4 };
+
+    vm86_test_load(cpu, code, sizeof(code));
+
+    vm86_raise(cpu, 0x08);
+
+    vm86_run(cpu, 20);
+
+    vm86_expect_mem16("the interrupt was taken after the instruction "
+                      "following STI, not before it", cpu, RECORD_AT, 0x0102u);
+}
+
+/*
+ * And the grace survives a slice that ends while it is armed.
+ *
+ * This is the case for the one place run.c departs from the obvious
+ * order: the shadow is decremented immediately before the instruction,
+ * after the budget check, rather than at the top with the delivery
+ * check. Decrementing it at the top (or before the budget check) means a
+ * slice that ends between the two eats the grace without running
+ * anything, and the *next* call delivers an interrupt inside the window
+ * the grace exists to protect.
+ *
+ * That failure needs a slice to end exactly on the STI, which is why the
+ * budget here is one instruction. The recorded IP is the same number as
+ * in the case above, and the two differ only in where the slice ended --
+ * which is the point.
+ */
+static void test_the_grace_survives_a_slice_that_ends_in_it(
+        struct vm86_cpu *cpu)
+{
+    vm86_clear_services();
+    vm86_install_ivt(cpu);
+    hook(cpu, 0x08, HANDLER_RECORDS_IP, sizeof(HANDLER_RECORDS_IP));
+
+    static const uint8_t code[] = { 0xFB, 0x90, 0x90, 0xF4 };
+
+    vm86_test_load(cpu, code, sizeof(code));
+
+    vm86_raise(cpu, 0x08);
+
+    enum vm86_stop first = vm86_run(cpu, 1);   /* exactly the STI */
+
+    vm86_expect_bool("the slice ended on the STI", first == VM86_STOP_STEPS,
+                     true);
+    vm86_expect_u16("and the grace is still armed", cpu->intr_shadow, 1);
+
+    vm86_run(cpu, 20);
+
+    vm86_expect_mem16("the next slice did not interrupt inside the window "
+                      "either", cpu, RECORD_AT, 0x0102u);
+    vm86_expect_u16("and the grace was spent by the instruction it "
+                    "belongs to", cpu->intr_shadow, 0);
+}
+
+/*
+ * A budget of zero still delivers.
+ *
+ * `steps` of zero is documented as "is anything waiting that should run,
+ * without executing anything", and the order of the loop is what makes
+ * that true: delivery comes before the budget check, so a caller polling
+ * with a zero budget gets the interrupt taken and no instruction
+ * retired. What it means in practice is that the machine is vectored
+ * into the handler and stopped there.
+ */
+static void test_a_zero_budget_still_delivers(struct vm86_cpu *cpu)
+{
+    vm86_clear_services();
+    vm86_install_ivt(cpu);
+    hook(cpu, 0x08, HANDLER_MARKS, sizeof(HANDLER_MARKS));
+
+    static const uint8_t code[] = { 0xF4 };
+
+    vm86_test_load(cpu, code, sizeof(code));
+
+    cpu->flags = VM86_FLAG_ALWAYS_SET | VM86_IF;
+
+    vm86_raise(cpu, 0x08);
+
+    enum vm86_stop result = vm86_run(cpu, 0);
+
+    vm86_expect_bool("nothing was executed", result == VM86_STOP_STEPS, true);
+    vm86_expect_u16("but the machine is in the handler", cpu->ip, HANDLER_BASE);
+    vm86_expect_bool("in the guest's own segment", cpu->cs == 0, true);
+    vm86_expect_mem8("and the handler has not run yet", cpu, RECORD_AT, 0x00);
+}
+
+/*
+ * `cli ; hlt` is the end of the program, and it is the end this milestone
+ * decides programs with.
+ *
+ * A maskable interrupt cannot wake a machine with IF clear, so there is
+ * nothing left that could make progress and the loop says so rather than
+ * spinning. This is the case the acceptance path depends on: a program
+ * that ends by halting looks identical to one that ended by hanging
+ * unless the machine reports which happened.
+ */
+static void test_cli_then_hlt_is_terminal(struct vm86_cpu *cpu)
+{
+    vm86_clear_services();
+    vm86_install_ivt(cpu);
+    hook(cpu, 0x08, HANDLER_MARKS, sizeof(HANDLER_MARKS));
+
+    static const uint8_t code[] = { 0xFA, 0xF4 };   /* cli ; hlt */
+
+    vm86_test_load(cpu, code, sizeof(code));
+
+    /* Something is waiting, and it does not matter: IF is clear. */
+    vm86_raise(cpu, 0x08);
+
+    enum vm86_stop result = vm86_run(cpu, 100);
+
+    vm86_expect_bool("the machine stopped rather than spun",
+                     result == VM86_STOP_HALT, true);
+    vm86_expect_bool("and says it is halted", cpu->halted, true);
+    vm86_expect_mem8("with the interrupt undelivered", cpu, RECORD_AT, 0x00);
+}
+
+/*
+ * `sti ; hlt` is not the end of anything -- it is a machine waiting, and
+ * an interrupt wakes it.
+ *
+ * This is the other half of the `cli ; hlt` case and the reason the loop
+ * checks delivery before it checks the halted flag. Getting the order
+ * wrong loses every wake-up, and the program it loses it for is an idle
+ * loop, which is to say an operating system rather than a test.
+ */
+static void test_sti_then_hlt_is_woken(struct vm86_cpu *cpu)
+{
+    vm86_clear_services();
+    vm86_install_ivt(cpu);
+    hook(cpu, 0x08, HANDLER_MARKS, sizeof(HANDLER_MARKS));
+
+    static const uint8_t code[] = { 0xFB, 0xF4 };   /* sti ; hlt */
+
+    vm86_test_load(cpu, code, sizeof(code));
+
+    vm86_raise(cpu, 0x08);
+
+    enum vm86_stop result = vm86_run(cpu, 4);
+
+    vm86_expect_bool("the machine was not reported as stopped",
+                     result == VM86_STOP_STEPS, true);
+    vm86_expect_mem8("the handler ran", cpu, RECORD_AT, 0x5A);
+    vm86_expect_bool("and the halt was cleared", cpu->halted, false);
+}
+
+/*
+ * The same program with nothing waiting is a machine that has stopped,
+ * which is what makes the wake-up above a property of the interrupt
+ * rather than of the HLT.
+ */
+static void test_a_halted_machine_with_nothing_to_wake_it_stops(
+        struct vm86_cpu *cpu)
+{
+    vm86_clear_services();
+    vm86_install_ivt(cpu);
+
+    static const uint8_t code[] = { 0xFB, 0xF4 };
+
+    vm86_test_load(cpu, code, sizeof(code));
+
+    enum vm86_stop result = vm86_run(cpu, 100);
+
+    vm86_expect_bool("the machine stopped", result == VM86_STOP_HALT, true);
+}
+
+static void test_the_budget_ends_the_slice(struct vm86_cpu *cpu)
+{
+    vm86_clear_services();
+
+    static const uint8_t code[] = { 0x90, 0x90, 0x90, 0x90, 0xF4 };
+
+    vm86_test_load(cpu, code, sizeof(code));
+
+    enum vm86_stop result = vm86_run(cpu, 2);
+
+    vm86_expect_bool("the slice ended", result == VM86_STOP_STEPS, true);
+    vm86_expect_u16("after exactly two instructions", cpu->ip, 0x0102u);
+}
+
+/* ------------------------------------------------------------------ */
+/* Exceptions                                                          */
+/* ------------------------------------------------------------------ */
+
+/* `div bl` with BL = 0, which is the machine's own divide error. */
+static const uint8_t DIVIDE_BY_ZERO[] = { 0xF6, 0xF3, 0xF4 };
+
+/*
+ * An exception on a vector the guest never hooked stops the machine.
+ *
+ * There is nobody to run, so spinning would be a machine that looks busy
+ * and does nothing; stopping and leaving the vector in cpu->fault is
+ * what M3 did with every fault and what the existing divide-error cases
+ * expect.
+ */
+static void test_an_unhooked_fault_stops_the_machine(struct vm86_cpu *cpu)
+{
+    vm86_clear_services();
+    vm86_install_ivt(cpu);
+
+    vm86_test_load(cpu, DIVIDE_BY_ZERO, sizeof(DIVIDE_BY_ZERO));
+    cpu->bl = 0;
+
+    enum vm86_stop result = vm86_run(cpu, 20);
+
+    vm86_expect_bool("the machine stopped", result == VM86_STOP_FAULT, true);
+    vm86_expect_u16("with the vector left for the caller", cpu->fault, 0x00u);
+}
+
+/*
+ * And on a vector the guest did hook, it is delivered like any other
+ * interrupt -- which is the rule that tells the machine's own exceptions
+ * from the ones a program has taken over, without a table of either.
+ */
+static void test_a_hooked_fault_is_delivered_to_the_guest(struct vm86_cpu *cpu)
+{
+    vm86_clear_services();
+    vm86_install_ivt(cpu);
+    hook(cpu, 0x00, HANDLER_MARKS, sizeof(HANDLER_MARKS));
+
+    vm86_test_load(cpu, DIVIDE_BY_ZERO, sizeof(DIVIDE_BY_ZERO));
+    cpu->bl = 0;
+
+    enum vm86_stop result = vm86_run(cpu, 20);
+
+    vm86_expect_mem8("the guest's handler ran", cpu, RECORD_AT, 0x5A);
+    vm86_expect_bool("and the machine carried on to the halt",
+                     result == VM86_STOP_HALT, true);
+}
+
+/*
+ * An exception is not maskable, so IF has nothing to do with it.
+ *
+ * The instruction is `cli ; div bl`, with the vector hooked: the fault
+ * still reaches the handler. Gating exceptions on IF would make a
+ * program that disabled interrupts unable to be told it had divided by
+ * zero, and it would be told so by running whatever came next instead.
+ */
+static void test_an_exception_is_delivered_with_interrupts_off(
+        struct vm86_cpu *cpu)
+{
+    vm86_clear_services();
+    vm86_install_ivt(cpu);
+    hook(cpu, 0x00, HANDLER_MARKS, sizeof(HANDLER_MARKS));
+
+    static const uint8_t code[] = { 0xFA, 0xF6, 0xF3, 0xF4 };  /* cli; div bl; hlt */
+
+    vm86_test_load(cpu, code, sizeof(code));
+    cpu->bl = 0;
+
+    vm86_run(cpu, 20);
+
+    vm86_expect_mem8("the handler ran with interrupts disabled",
+                     cpu, RECORD_AT, 0x5A);
+}
+
+/* ------------------------------------------------------------------ */
+/* Flags coming back out of a service                                  */
+/* ------------------------------------------------------------------ */
+
+static void service_sets_carry(struct vm86_cpu *cpu, void *ctx)
+{
+    (void)ctx;
+
+    vm86_flag_set(cpu, VM86_CF, true);
+}
+
+static void service_clears_interrupts(struct vm86_cpu *cpu, void *ctx)
+{
+    (void)ctx;
+
+    vm86_flag_set(cpu, VM86_IF, false);
+}
+
+/*
+ * A service can hand a flag back to the guest, and that is new.
+ *
+ * The stub ends in a real IRET, which reloads FLAGS off the frame -- so
+ * before this, a service that set carry had it silently overwritten on
+ * the way out, and INT 13h's entire error protocol (carry set, code in
+ * AH) could not be implemented. Every service's own suite calls the
+ * service directly and would not have noticed; it took a guest that
+ * branched on the carry.
+ */
+static void test_a_service_can_hand_a_flag_to_the_guest(struct vm86_cpu *cpu)
+{
+    vm86_clear_services();
+    vm86_install_ivt(cpu);
+    vm86_register_service(0x21, service_sets_carry, NULL);
+
+    static const uint8_t code[] = { 0xCD, 0x21, 0xF4 };
+
+    vm86_test_load(cpu, code, sizeof(code));
+
+    vm86_run(cpu, 20);
+
+    vm86_expect_bool("the carry the service set reached the guest",
+                     (cpu->flags & VM86_CF) != 0, true);
+}
+
+/*
+ * And it still cannot use that channel to change IF or TF.
+ *
+ * Those two come from the frame rather than from the register, which is
+ * what makes the mechanism a return value instead of a bypass: a service
+ * cannot leave interrupts disabled on the way out, and it cannot arm the
+ * single-step trap on a guest that did not ask for one.
+ */
+static void test_a_service_cannot_leave_interrupts_off(struct vm86_cpu *cpu)
+{
+    vm86_clear_services();
+    vm86_install_ivt(cpu);
+    vm86_register_service(0x21, service_clears_interrupts, NULL);
+
+    static const uint8_t code[] = { 0xCD, 0x21, 0xF4 };
+
+    vm86_test_load(cpu, code, sizeof(code));
+    cpu->flags = VM86_FLAG_ALWAYS_SET | VM86_IF;
+
+    vm86_run(cpu, 20);
+
+    vm86_expect_bool("the guest still has interrupts enabled",
+                     (cpu->flags & VM86_IF) != 0, true);
+}
+
+/*
+ * *** PINS A KNOWN DEFECT ***  -- see M4-intr-audit-report.md
+ *
+ * The trap writes the service's flags back into the frame at SS:SP+4,
+ * because that is where an INT's three words put FLAGS. A far call
+ * pushes two words, not three, so a handler that chains to the previous
+ * one with `call far` leaves its own saved CS at SP+2 and whatever was
+ * on the stack before that at SP+4 -- and the trap rewrites the second
+ * of those.
+ *
+ * The two paths the firmware installs are both safe: an INT pushes the
+ * three words, and a guest executing the trap bytes itself has to build
+ * the same frame. Only chaining by far call is exposed, and it is the
+ * one path host.h lists as the reason a service must not retry -- so the
+ * case exists and was not considered for this.
+ *
+ * The frame below is what a far call leaves: the return offset at SP,
+ * the return segment at SP+2, and a marker where the caller's own data
+ * would be. The marker is not a flags word, and the assertion is that it
+ * survives. When this is fixed -- by checking that the frame is really
+ * an interrupt frame, or by having the trap record where it pushed --
+ * the expected value becomes 0xBEEF.
+ */
+static void test_a_chained_far_call_gets_its_stack_rewritten(
+        struct vm86_cpu *cpu)
+{
+    vm86_clear_services();
+
+    /* FE 38 10 CF at CS:0x0100, which is the trap calling vector 10h. */
+    static const uint8_t stub[] = { 0xFE, 0x38, 0x10, 0xCF };
+
+    for (unsigned i = 0; i < sizeof(stub); i++)
+        vm86_mem_write8(cpu->mem, 0x0100u + i, stub[i]);
+
+    cpu->sp    = 0xFFF0u;
+    cpu->flags = VM86_FLAG_ALWAYS_SET;
+
+    vm86_mem_write16(cpu->mem, 0xFFF0u, 0x0104u);   /* a far call's IP  */
+    vm86_mem_write16(cpu->mem, 0xFFF2u, 0x0000u);   /* a far call's CS  */
+    vm86_mem_write16(cpu->mem, 0xFFF4u, 0xBEEF);    /* the caller's own */
+
+    vm86_set_seg(cpu, VM86_CS, 0x0000u);
+    cpu->ip = 0x0100u;
+
+    vm86_step(cpu);
+
+    vm86_expect_mem16("the caller's word past the frame, rewritten as a flags "
+                      "merge", cpu, 0xFFF4u, 0xF202u);
+}
+
+/*
+ * The harness's program address is inside the vector table.
+ *
+ * Not a fault in anything this audit was asked to look at -- it is
+ * `VM86_TEST_CODE_BASE` in tests/harness.h -- but it changes what every
+ * case in this file, and in test_intr.c, actually tests.
+ *
+ * A .COM program really loads at CS:0x100 with CS set to its own
+ * segment, which is never zero; the harness sets CS to zero, so the
+ * program's bytes land at linear 0x0100, which in a real machine is
+ * inside the interrupt vector table. Loading a program there overwrites
+ * the vectors from 0x40 upward, and the only reason the cases above work
+ * is that they use vectors below 0x40 and install the table before
+ * loading.
+ *
+ * The consequence for M5 is not small: a program that hooks a vector at
+ * 0x60 or above -- the conventional place for a TSR's private API --
+ * would have its own code overwrite the vector it just set, and the
+ * machine would jump into the middle of the program.
+ */
+static void test_the_harness_loads_the_program_inside_the_vector_table(
+        struct vm86_cpu *cpu)
+{
+    vm86_clear_services();
+    vm86_install_ivt(cpu);
+
+    vm86_expect_bool("vector 40h is a stub to begin with",
+                     vm86_vector_is_stub(cpu, 0x40), true);
+
+    /* Six bytes of program, the size of the smallest real one. */
+    static const uint8_t code[] = { 0x90, 0x90, 0x90, 0x90, 0x90, 0xF4 };
+
+    vm86_test_load(cpu, code, sizeof(code));
+
+    vm86_expect_bool("and loading the program at 0x0100 unhooked it",
+                     vm86_vector_is_stub(cpu, 0x40), false);
+    vm86_expect_u16("because the program's first bytes are the vector",
+                    vm86_mem_read16(cpu->mem, 0x40u * 4u), 0x9090u);
+}
+
+/* ------------------------------------------------------------------ */
 /* What the machine says about itself                                  */
 /* ------------------------------------------------------------------ */
 
-static void test_install_firmware_writes_the_table_and_two_words(
+/*
+ * *** WIDENED ON MAIN@3a540d8 ***
+ *
+ * The first audit found that this install wrote only two words of the
+ * data area, which left the video fields at zero -- a program that read
+ * the page stride out of 0040:004C before calling INT 10h divided by
+ * zero. The install now seeds the display as POST would, so the region
+ * this case allows has grown by exactly the bytes POST writes.
+ *
+ * The scan is unchanged and is the point of the case: memory is filled
+ * with a byte no stub or vector can produce, so this answers "these
+ * bytes and no others were written" rather than "the region looks right".
+ */
+static void test_install_firmware_writes_the_table_and_the_machine_description(
         struct vm86_cpu *cpu)
 {
     vm86_clear_services();
@@ -842,12 +1344,12 @@ static void test_install_firmware_writes_the_table_and_two_words(
     uint32_t bda = (uint32_t)VM86_BDA_SEGMENT << 4;
 
     vm86_expect_mem16("the equipment word", cpu, bda + VM86_BDA_EQUIPMENT,
-                      0x0021u);
+                      0x002Du);
     vm86_expect_mem16("the conventional memory size", cpu,
                       bda + VM86_BDA_MEMORY_KB, 640u);
 
     unsigned stray = 0;
-    uint32_t first_stray = 0;
+    unsigned in_display = 0;
 
     for (uint32_t a = 0; a < cpu->mem->size; a++) {
         if (cpu->mem->ram[a] == 0xA5)
@@ -857,33 +1359,47 @@ static void test_install_firmware_writes_the_table_and_two_words(
         bool in_stubs = a >= VM86_TRAP_LINEAR
                      && a <  VM86_TRAP_LINEAR + VM86_TRAP_BYTES;
 
-        /* The two words: 0040:0010 and 0040:0013, four bytes with the gap
-         * at 0012 between them. */
+        /* 0040:0010 and 0040:0013 -- four bytes with a gap at 0012 -- and
+         * the display half of the data area, 0040:0049 to 0040:0062. */
         bool in_the_two_words = a >= bda + 0x10u && a <= bda + 0x14u;
+        bool in_the_display   = a >= bda + 0x49u && a <= bda + 0x62u;
 
-        if (!in_ivt && !in_stubs && !in_the_two_words) {
-            if (stray == 0)
-                first_stray = a;
+        if (in_the_display)
+            in_display++;
+
+        if (!in_ivt && !in_stubs && !in_the_two_words && !in_the_display)
             stray++;
-        }
     }
 
-    vm86_expect_u16("bytes written outside the table and the two words",
+    vm86_expect_u16("bytes written outside the table and the data area",
                     stray, 0);
-    vm86_expect_u16("the first stray byte, if any",
-                    (uint16_t)first_stray, 0);
+
+    /*
+     * Twenty-four, and every one of them is a field a program can read:
+     * the mode, the column count, the page stride, the active page, the
+     * cursor shape, and eight cursor positions.
+     */
+    vm86_expect_u16("bytes written into the display half of the data area",
+                    in_display, 24u);
 }
 
 /*
  * The equipment word, bit by bit, against the table in docs/dos-refs.md
  * section 2.
  *
- * The decoding is asserted rather than the constant, so that changing
- * the word is a change somebody has to think about: the bits below say
- * what the number claims about the machine, and one of the claims is
- * false. Bits 2-3 are "motherboard RAM": 00 is a sixteen-kilobyte
- * machine, and this one reports 640 KiB of conventional memory two bytes
- * later. See the report.
+ * *** CHANGED ON MAIN@3a540d8 ***
+ *
+ * The first audit reported that bits 2-3 read 00 -- "16K of motherboard
+ * RAM" -- while the same install wrote 640 into 0040:0013 two bytes
+ * later, and that INT 11h is exactly the channel that hands the
+ * contradiction to a program. They now read 11.
+ *
+ * The assertion that matters is the arithmetic, not the constant: `11`
+ * in bits 2-3 is 0x0C, and the word is 0x21 | 0x0C = 0x2D. Writing 0x31
+ * -- which is what "set bits 2-3" looks like if you reach for a number
+ * that has 3 in it -- moves bits 4 and 5 as well and turns the display
+ * monochrome. The audit made that mistake once; the case is written so
+ * the next person does not.
  */
 static void test_the_equipment_word_decoded(struct vm86_cpu *cpu)
 {
@@ -893,10 +1409,11 @@ static void test_the_equipment_word_decoded(struct vm86_cpu *cpu)
     uint32_t bda = (uint32_t)VM86_BDA_SEGMENT << 4;
     uint16_t word = vm86_mem_read16(cpu->mem, bda + VM86_BDA_EQUIPMENT);
 
+    vm86_expect_u16("the whole word", word, 0x002Du);
     vm86_expect_u16("bit 0: a diskette drive is attached", word & 0x0001u, 1u);
     vm86_expect_u16("bit 1: no 8087", word & 0x0002u, 0u);
-    vm86_expect_u16("bits 2-3: motherboard RAM reads as 16K",
-                    (word >> 2) & 3u, 0u);
+    vm86_expect_u16("bits 2-3: motherboard RAM reads as 64K or more",
+                    (word >> 2) & 3u, 3u);
     vm86_expect_u16("bits 4-5: initial video is 80x25 colour",
                     (word >> 4) & 3u, 2u);
     vm86_expect_u16("bits 6-7: one diskette drive", (word >> 6) & 3u, 0u);
@@ -905,6 +1422,10 @@ static void test_the_equipment_word_decoded(struct vm86_cpu *cpu)
     vm86_expect_u16("bit 12: no game port", word & 0x1000u, 0u);
     vm86_expect_u16("bit 13: no serial printer", word & 0x2000u, 0u);
     vm86_expect_u16("bits 14-15: no parallel ports", (word >> 14) & 3u, 0u);
+
+    /* And the word agrees with the machine it describes. */
+    vm86_expect_u16("a 640K machine does not claim a 16K motherboard",
+                    (word >> 2) & 3u, 3u);
 }
 
 /*
@@ -923,7 +1444,7 @@ static void test_int_11h_and_12h_answer_from_the_data_area(struct vm86_cpu *cpu)
 
     vm86_test_load(cpu, ask_11, sizeof(ask_11));
     vm86_test_run(cpu, 100);
-    vm86_expect_u16("INT 11h answers the equipment word", cpu->ax, 0x0021u);
+    vm86_expect_u16("INT 11h answers the equipment word", cpu->ax, 0x002Du);
 
     vm86_test_load(cpu, ask_12, sizeof(ask_12));
     vm86_test_run(cpu, 100);
@@ -945,20 +1466,22 @@ static void test_int_11h_and_12h_answer_from_the_data_area(struct vm86_cpu *cpu)
 }
 
 /*
- * Installing the firmware leaves every video word at zero.
+ * *** WAS A KNOWN GAP, FIXED ON MAIN@3a540d8 ***
  *
- * That is by design -- firmware.c argues the video fields belong to the
- * video service and that a second writer would be a second answer -- but
- * the result is a machine whose data area says "mode 0, zero columns,
- * zero bytes per page" until something calls INT 10h. A program that
- * reads 0040:004C before setting a mode, which is a normal way to find
- * the page stride, divides by a page size of zero.
+ * The first audit found that this install left every video word at zero:
+ * a program that read 0040:004C for the page stride before calling
+ * INT 10h divided by zero, and one that read 0040:0049 thought the
+ * machine was in mode 0. That is the documented division of labour --
+ * the fields belong to the video service -- and it was also a window
+ * nothing covered.
  *
- * The case pins the consequence so that the question of who seeds it is
- * a decision with a test attached rather than a gap nobody looked at.
- * See the report.
+ * The install now writes what POST would. The assertions are not "these
+ * constants" but "this is a machine that describes itself coherently",
+ * which is the property the fix is for: a mode, a width and a stride
+ * that agree with each other and with a page of eighty by twenty-five
+ * cells.
  */
-static void test_install_firmware_leaves_the_video_words_at_zero(
+static void test_install_firmware_seeds_a_coherent_display(
         struct vm86_cpu *cpu)
 {
     vm86_clear_services();
@@ -966,15 +1489,29 @@ static void test_install_firmware_leaves_the_video_words_at_zero(
 
     uint32_t bda = (uint32_t)VM86_BDA_SEGMENT << 4;
 
-    vm86_expect_mem8 ("0040:0049 the mode", cpu, bda + VM86_BDA_VIDEO_MODE, 0);
-    vm86_expect_mem16("0040:004A the column count", cpu,
-                      bda + VM86_BDA_COLUMNS, 0);
-    vm86_expect_mem16("0040:004C the page stride", cpu,
-                      bda + VM86_BDA_PAGE_BYTES, 0);
-    vm86_expect_mem16("0040:0060 the cursor shape", cpu,
-                      bda + VM86_BDA_CURSOR_SHAPE, 0);
-    vm86_expect_mem8 ("0040:0062 the active page", cpu,
-                      bda + VM86_BDA_ACTIVE_PAGE, 0);
+    uint8_t  mode    = vm86_mem_read8 (cpu->mem, bda + VM86_BDA_VIDEO_MODE);
+    uint16_t columns = vm86_mem_read16(cpu->mem, bda + VM86_BDA_COLUMNS);
+    uint16_t stride  = vm86_mem_read16(cpu->mem, bda + VM86_BDA_PAGE_BYTES);
+
+    vm86_expect_u16("the mode is a text mode this machine has", mode, 0x03u);
+    vm86_expect_u16("eighty columns", columns, 80u);
+    vm86_expect_u16("a stride that is not zero", stride, 0x1000u);
+
+    /* The stride has to hold a page. It is not 80*25*2 = 4000 -- it is
+     * rounded up to 4096 -- so the check is "at least", not "equal". */
+    vm86_expect_bool("and the stride holds a whole page of that size",
+                     stride >= (uint16_t)(columns * 25u * 2u), true);
+
+    vm86_expect_mem8("page 0 is the page being displayed", cpu,
+                     bda + VM86_BDA_ACTIVE_PAGE, 0);
+    vm86_expect_mem16("with a cursor shape that draws", cpu,
+                      bda + VM86_BDA_CURSOR_SHAPE, 0x0607u);
+    vm86_expect_mem16("and the cursor at home", cpu,
+                      bda + VM86_BDA_CURSOR, 0);
+
+    for (uint16_t page = 1; page < 8; page++)
+        vm86_expect_mem16("every page's cursor starts at home", cpu,
+                          bda + VM86_BDA_CURSOR + page * 2u, 0);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1053,8 +1590,8 @@ static const struct vm86_test tests[] = {
       test_a_prefix_in_front_of_the_trap_is_not_accounted_for },
     { "KNOWN DEFECT: a displacement moves the recorded instruction start",
       test_a_displacement_between_the_trap_and_its_service_byte },
-    { "KNOWN GAP: nothing but the trap writes the instruction pointer record",
-      test_nothing_but_the_trap_writes_the_instruction_pointer_record },
+    { "the dispatcher records the instruction start",
+      test_the_dispatcher_records_the_instruction_start },
 
     { "a retry keeps the stack and gives the guest its flags back",
       test_a_retry_keeps_the_stack_and_gives_the_guest_its_flags_back },
@@ -1077,19 +1614,51 @@ static const struct vm86_test tests[] = {
     { "interruptible needs all three conditions",
       test_interruptible_needs_all_three_conditions },
 
-    { "install_firmware writes the table and two words",
-      test_install_firmware_writes_the_table_and_two_words },
+    { "the instruction after STI is not interrupted",
+      test_the_instruction_after_sti_is_not_interrupted },
+    { "the grace survives a slice that ends in it",
+      test_the_grace_survives_a_slice_that_ends_in_it },
+    { "a zero budget still delivers",
+      test_a_zero_budget_still_delivers },
+    { "cli then hlt is terminal",
+      test_cli_then_hlt_is_terminal },
+    { "sti then hlt is woken by an interrupt",
+      test_sti_then_hlt_is_woken },
+    { "a halted machine with nothing to wake it stops",
+      test_a_halted_machine_with_nothing_to_wake_it_stops },
+    { "the budget ends the slice",
+      test_the_budget_ends_the_slice },
+
+    { "an unhooked fault stops the machine",
+      test_an_unhooked_fault_stops_the_machine },
+    { "a hooked fault is delivered to the guest",
+      test_a_hooked_fault_is_delivered_to_the_guest },
+    { "an exception is delivered with interrupts off",
+      test_an_exception_is_delivered_with_interrupts_off },
+
+    { "a service can hand a flag to the guest",
+      test_a_service_can_hand_a_flag_to_the_guest },
+    { "a service cannot leave interrupts off",
+      test_a_service_cannot_leave_interrupts_off },
+    { "KNOWN DEFECT: a chained far call gets its stack rewritten",
+      test_a_chained_far_call_gets_its_stack_rewritten },
+
+    { "install_firmware writes the table and the machine description",
+      test_install_firmware_writes_the_table_and_the_machine_description },
     { "the equipment word decoded bit by bit",
       test_the_equipment_word_decoded },
     { "INT 11h and INT 12h answer from the data area",
       test_int_11h_and_12h_answer_from_the_data_area },
-    { "KNOWN GAP: install_firmware leaves the video words at zero",
-      test_install_firmware_leaves_the_video_words_at_zero },
+    { "install_firmware seeds a coherent display",
+      test_install_firmware_seeds_a_coherent_display },
 
     { "registering NULL removes a service",
       test_registering_null_removes_a_service },
     { "clear_services removes everything",
       test_clear_services_removes_everything },
+
+    { "KNOWN HARNESS: the program loads inside the vector table",
+      test_the_harness_loads_the_program_inside_the_vector_table },
 };
 
 VM86_TEST_MAIN("intr_audit", tests)
