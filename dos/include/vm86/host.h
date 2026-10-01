@@ -78,6 +78,15 @@
 #include <vm86/cpu.h>
 #include <vm86/mem.h>
 
+/*
+ * For enum vm86_result, which the trap returns. Included rather than
+ * forward-declared: an enum cannot be forward-declared in C before C23,
+ * and a translation unit that sees the declaration below without the
+ * definition gets "return type is an incomplete type" from a line it did
+ * not write.
+ */
+#include <vm86/ops.h>
+
 /* ------------------------------------------------------------------ */
 /* The trap                                                            */
 /* ------------------------------------------------------------------ */
@@ -168,28 +177,41 @@ enum vm86_result vm86_host_trap(struct vm86_cpu *cpu, uint8_t opcode);
  * For a service that cannot answer yet -- the keyboard buffer is empty,
  * so a blocking read has nothing to give back. Returning anyway would
  * tell the caller it got an answer, with whatever happened to be left in
- * the accumulator, and a program that waits for a keypress would carry on
+ * the accumulator, and a program waiting for a keypress would carry on
  * with a phantom one.
  *
- * So the interrupt is undone and the instruction is re-executed: the
- * frame the INT pushed is popped, and the instruction pointer is rewound
- * to the instruction itself. The guest then really does wait -- with
- * interrupts live -- and a keyboard interrupt arriving in the meantime
- * runs its handler between one attempt and the next, filling the buffer
- * that the next attempt reads.
+ * So the instruction is re-run: the pointer goes back to where it began
+ * and nothing else changes. The trap executes again, the service is asked
+ * again, and in between there is an instruction boundary at which the run
+ * loop can deliver whatever hardware interrupt would make the answer
+ * possible -- for a keyboard read, the keyboard's own.
  *
- * That is what a blocking BIOS call does on real hardware: it spins with
- * interrupts enabled. The only difference is that the spinning happens in
- * the run loop, where the host still gets a look in, instead of inside a
- * service that would never return.
+ * Nothing is popped, and that is the part worth being careful about. It
+ * is tempting to have this undo the interrupt frame as well, so that the
+ * retry is "as if the INT never ran" -- and that is wrong twice over. The
+ * frame the INT pushed holds the address *after* the INT, so popping it
+ * resumes past the read rather than re-running it; and un-pushing it
+ * would be balanced for an instruction reached through an INT and wrong
+ * for one reached by a chained far call, so the retry would have to know
+ * which it was. Leaving the stack alone avoids both: the frame stays
+ * exactly where the INT put it, and the stub's IRET unwinds it once, when
+ * the service finally succeeds, whichever way the stub was reached.
  *
- * Only correct for a service reached through an INT, which is what a
- * blocking read is. A service reached by a chained far call has a frame
- * on the stack that this did not put there, and retrying would consume
- * it; a service that might be reached either way has to decide for itself
- * whether to use this.
+ * Only a service reached through the trap can use this. A service called
+ * directly from a test has no instruction to go back to, and vm86_host_trap
+ * is what records where the trap was.
  */
 void vm86_service_retry(struct vm86_cpu *cpu);
+
+/*
+ * The lowest-numbered vector that is pending, or -1 when none is.
+ *
+ * Lowest rather than whichever, because that is the priority the 8259
+ * presents and the order a program sees when two devices raise at once. A
+ * loop that returned the first bit it happened to find would report them
+ * in whatever order the bitmap words are laid out.
+ */
+int vm86_next_pending(const struct vm86_cpu *cpu);
 
 /* ------------------------------------------------------------------ */
 /* The interrupt vector table                                          */

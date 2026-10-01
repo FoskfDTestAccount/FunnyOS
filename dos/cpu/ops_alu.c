@@ -959,10 +959,12 @@ static enum vm86_result op_incdec_rm8(struct vm86_cpu *cpu, uint8_t opcode)
     vm86_fetch_modrm(cpu, &mr, 8);
 
     /*
-     * FE is the byte half of the group FF is the word half of, and only
-     * two of its eight sub-opcodes exist: /0 increment and /1 decrement.
-     * The rest are not instructions on this part, and a program that
-     * probes for one expects a clean refusal rather than a plausible
+     * FE is the byte half of the group FF is the word half of. Three of
+     * its eight sub-operations do something here: /0 increment, /1
+     * decrement, and /7, which is not an instruction on any part of this
+     * family and is where the host trap lives. The rest are undefined in
+     * the same way /7 is, and are refused -- a program probing for what
+     * it is running on has to get a clean refusal rather than a plausible
      * wrong answer.
      *
      * The operand may be a register or a memory byte. Worth stating
@@ -978,9 +980,32 @@ static enum vm86_result op_incdec_rm8(struct vm86_cpu *cpu, uint8_t opcode)
      * an invalid-opcode exception. `/2` through `/6` are still refused,
      * because a hole in the map is only worth filling once.
      */
+    /*
+     * FE /7 is the host trap, and it is the only reason this group has a
+     * seventh sub-operation to think about at all.
+     *
+     * The encoding is not an instruction on the 8086, the 186, or
+     * anything since: inc and dec have no byte form with reg=7, and no
+     * assembler can be made to emit it. That is exactly what makes it
+     * safe to claim -- and it is the property the alternatives do not
+     * have. F1 and D6 really are instructions on the 8086 silicon, 0F is
+     * POP CS and is reserved as the 286 escape, and FF /7 is already the
+     * bad opcode the integration test uses.
+     *
+     * What it is for is in vm86/host.h: firmware needs a way for a guest
+     * to reach the host, an 8086 has no syscall instruction, and the way
+     * in is therefore a stub in the interrupt vector table whose first
+     * two bytes are these.
+     */
     if (mr.reg == 7)
         return vm86_host_trap(cpu, opcode);
 
+    /*
+     * /2 through /6 stay refused. They are equally undefined, and the
+     * difference is that nothing wants them: a program probing for what
+     * it is running on has to get a clean refusal rather than a
+     * plausible wrong answer.
+     */
     if (mr.reg > 1) {
         cpu->fault = VM86_VECTOR_INVALID_OPCODE;
         return VM86_FAULT;
