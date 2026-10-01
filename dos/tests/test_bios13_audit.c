@@ -734,34 +734,39 @@ static void test_verify_does_not_use_a_buffer(struct vm86_cpu *cpu)
 }
 
 /* ------------------------------------------------------------------ */
-/* 08h and the drive-type byte                                         */
+/* 08h and the drive-type byte, which three sources disagreed about       */
 /* ------------------------------------------------------------------ */
 
 /*
- * THREE SOURCES, ONE FACT, AND THEY DO NOT AGREE.
+ * THREE SOURCES DISAGREED, AND ONE OF THEM WAS THIS CASE'S OWN READING OF
+ * THE MODULE.
  *
- *   docs/dos-refs.md section 4      says BL comes back as the drive type,
- *                                   that 04h is the 1.44M floppy, and --
- *                                   in as many words -- that it is
- *                                   implemented, which is why it is not
- *                                   in that section's list of things this
- *                                   machine has not done.
- *   bios13_service()                never writes BL.
- *   docs/tasks/M4-D-report.md 5.7   says that is deliberate: the table
- *                                   has no source in this repository, and
- *                                   a made-up type is worse than an
- *                                   untouched register.
+ *   docs/dos-refs.md section 4      said BL comes back as the drive type,
+ *                                   that 04h is the 1.44M floppy, and that
+ *                                   it was implemented.
+ *   bios13_service()                did not write BL -- on the tree this
+ *                                   audit was written against, which was
+ *                                   cut before the commit that made the
+ *                                   reference file right.
+ *   docs/tasks/M4-D-report.md 5.7   said leaving it was deliberate.
  *
- * Somebody has to rule, and the audit report asks for it. This case is
- * here to pin what the module does *today*, so that whichever way the
- * ruling goes the change is a visible one rather than a silent one --
- * which is the point of pinning behaviour that is under discussion.
+ * The ruling went the module's way -- and the module had already gone
+ * that way. BL is a byte whose value is a fact about this machine, like
+ * the DL beside it; ES:DI is not, because pointing it at a parameter table
+ * means deciding where eleven bytes live in guest memory, which is an
+ * interface decision.
  *
- * ES:DI is not asserted, because nothing disagrees about it: section 4
- * lists the parameter table among the things this machine has not done,
+ * While the question was open the case pinned the opposite, on purpose:
+ * that way whichever ruling came, the change would be a visible one rather
+ * than a silent one. It is why the failure it produced named all three
+ * sources -- going red said which source had won, not merely which number
+ * had changed.
+ *
+ * ES:DI is still not asserted, because nothing disagrees about it: section
+ * 4 lists the parameter table among the things this machine has not done,
  * and bios13 does not write it either.
  */
-static void test_08h_and_the_drive_type_byte(struct vm86_cpu *cpu)
+static void test_08h_reports_the_drive_type(struct vm86_cpu *cpu)
 {
     struct bios13_disk disk;
 
@@ -778,12 +783,8 @@ static void test_08h_and_the_drive_type_byte(struct vm86_cpu *cpu)
 
     expect_outcome("08h", cpu, false, 0x00);
 
-    char detail[128];
-    snprintf(detail, sizeof(detail),
-             "BL is left as the caller had it: section 4 says 04h, "
-             "M4-D-report 5.7 says leave it (BL was 0x%02X)", cpu->bl);
-
-    vm86_expect_u16(detail, cpu->bl, 0xAB);
+    vm86_expect_u16("BL is the 1.44M drive type, as section 4 says",
+                    cpu->bl, 0x04);
 }
 
 /* ------------------------------------------------------------------ */
@@ -839,7 +840,7 @@ static const struct vm86_test tests[] = {
     { "a write reaches the image",        test_a_write_reaches_the_image_and_comes_back },
     { "08h describes the disk and feeds 02h",
                                           test_08h_describes_the_disk_and_feeds_02h },
-    { "08h and the drive-type byte",      test_08h_and_the_drive_type_byte },
+    { "08h reports the drive type",       test_08h_reports_the_drive_type },
     { "a short image fails past its end", test_a_short_image_fails_past_its_end },
     { "01h reports and keeps the status", test_01h_reports_and_keeps_the_last_status },
     { "functions this machine does not have",
