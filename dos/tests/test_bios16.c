@@ -56,50 +56,31 @@ static void press(struct vm86_cpu *cpu, struct bios16_state *st, uint8_t sc)
     bios16_irq(cpu, st);
 }
 
-/* A pointer to a vector's stub, as the firmware laid it out. */
-static uint16_t stub_ip(uint8_t vector)
-{
-    return (uint16_t)((uint32_t)vector * VM86_TRAP_STRIDE);
-}
+/*
+ * Where the program would continue once the read comes back.
+ *
+ * The guest is `int 16h; cli; hlt` at 0x100, so this is the `cli`.
+ *
+ * The blocking-read cases assert against *this* rather than against the
+ * address of a stub, and that choice is deliberate. A retry can be built
+ * two ways -- rewind the pointer to the INT and let the guest run it
+ * again, or rewind it to the trap the INT landed on -- and both leave
+ * the guest waiting, which is the only thing the guest can observe. A
+ * test that pinned the pointer to one of those addresses would be
+ * deciding an interface question by accident, and would go red the day
+ * somebody decided it the other way. "Has the read returned" is what the
+ * task asks to know, and it is what is asserted.
+ */
+#define AFTER_THE_INT (VM86_TEST_CODE_BASE + 2)
 
 /*
- * A few lines of the run loop, for the two cases that need one.
- *
- * The real loop is task A's and has not landed; this is the shape the
- * design gives it -- deliver a pending interrupt at an instruction
- * boundary where the guest can take it, otherwise execute one
- * instruction, stop when the machine halts with nothing to wake it.
- *
- * It is in the test file and not in the product on purpose: it is not a
- * second implementation of anything, it is a test fixture, and the
- * moment vm86_run() exists these cases should use it instead.
+ * The blocking-read cases run the machine with vm86_run(), the real run
+ * loop. They used to carry their own twenty-line copy of it, because the
+ * real one had not landed yet; that copy is gone, and the reason it is
+ * worth saying so is that a copy of the loop in a test file can drift
+ * from the loop the machine runs, and then the test is measuring the
+ * fixture.
  */
-static enum vm86_stop run(struct vm86_cpu *cpu, uint64_t steps)
-{
-    for (uint64_t i = 0; i < steps; i++) {
-        if (cpu->intr_shadow) {
-            cpu->intr_shadow--;
-        } else if (vm86_interruptible(cpu)) {
-            int vector = vm86_next_pending(cpu);
-
-            vm86_clear_pending(cpu, (uint8_t)vector);
-            cpu->halted = false;
-            vm86_interrupt(cpu, (uint8_t)vector);
-            continue;
-        } else if (cpu->halted) {
-            return VM86_STOP_HALT;
-        }
-
-        enum vm86_result result = vm86_step(cpu);
-
-        if (result == VM86_HALT)
-            continue;   /* the top of the next turn decides */
-        if (result != VM86_CONTINUE)
-            return VM86_STOP_FAULT;
-    }
-
-    return VM86_STOP_STEPS;
-}
 
 /*
  * Stand a machine up: vector table, keyboard service registered, data
@@ -197,16 +178,17 @@ static void test_blocking_read_waits_for_a_key(struct vm86_cpu *cpu)
     cpu->flags |= VM86_IF;
 
     vm86_expect_u16("call it and it stays blocked",
-                    run(cpu, 20), VM86_STOP_STEPS);
+                    vm86_run(cpu, 20), VM86_STOP_STEPS);
 
     /*
-     * The retry put the pointer back on the trap, not past it. That is
+     * The pointer was wound back rather than left past the INT. That is
      * the whole of what "try again" means, and it is visible: had the
-     * service returned instead, the pointer would be on the stub's IRET
-     * and the guest would be on its way out with an answer it never got.
+     * service simply returned, the guest would have carried on with an
+     * answer it never received -- and the accumulator is zero, so what
+     * it carried on with is a keystroke that does not exist.
      */
-    vm86_expect_u16("the pointer is back on the trap",
-                    cpu->ip, stub_ip(VM86_INT_KEYBOARD_BIOS));
+    vm86_expect_bool("the read has not come back",
+                     cpu->ip == AFTER_THE_INT, false);
     vm86_expect_u16("nothing was consumed",
                     bda16(cpu, VM86_BDA_KB_HEAD),
                     bda16(cpu, VM86_BDA_KB_TAIL));
@@ -221,7 +203,7 @@ static void test_blocking_read_waits_for_a_key(struct vm86_cpu *cpu)
     vm86_raise(cpu, VM86_INT_KEYBOARD);
 
     vm86_expect_u16("the guest finishes",
-                    run(cpu, 40), VM86_STOP_HALT);
+                    vm86_run(cpu, 40), VM86_STOP_HALT);
 
     vm86_expect_u16("AL is the character that arrived while it waited",
                     cpu->al, 'a');
@@ -258,29 +240,28 @@ static void test_interrupt_reaches_the_handler_while_waiting(
 
     cpu->flags |= VM86_IF;
 
-    run(cpu, 20);
+    vm86_run(cpu, 20);
 
-    vm86_expect_u16("still blocked", cpu->ip,
-                    stub_ip(VM86_INT_KEYBOARD_BIOS));
+    vm86_expect_bool("still waiting", cpu->ip == AFTER_THE_INT, false);
     vm86_expect_u16("with no shift held", bda8(cpu, VM86_BDA_KEYBOARD_FLAGS),
                     0x00);
 
     bios16_key_arrived(&st, 0x2A);   /* left shift, pressed */
     vm86_raise(cpu, VM86_INT_KEYBOARD);
 
-    run(cpu, 20);
+    vm86_run(cpu, 20);
 
     vm86_expect_u16("INT 09h ran while the guest was waiting",
                     bda8(cpu, VM86_BDA_KEYBOARD_FLAGS), 0x02);
-    vm86_expect_u16("and the guest is still on the trap, still waiting",
-                    cpu->ip, stub_ip(VM86_INT_KEYBOARD_BIOS));
+    vm86_expect_bool("and the guest is still waiting for a character",
+                     cpu->ip == AFTER_THE_INT, false);
 
     /* Now a real key, and the read that was waiting for one gets it --
      * with the shift that arrived earlier applied. */
     bios16_key_arrived(&st, 0x1E);
     vm86_raise(cpu, VM86_INT_KEYBOARD);
 
-    vm86_expect_u16("the guest finishes", run(cpu, 40), VM86_STOP_HALT);
+    vm86_expect_u16("the guest finishes", vm86_run(cpu, 40), VM86_STOP_HALT);
     vm86_expect_u16("with the shifted character", cpu->al, 'A');
     vm86_expect_u16("and the scan code", cpu->ah, 0x1E);
 }

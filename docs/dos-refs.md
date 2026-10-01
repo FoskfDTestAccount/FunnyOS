@@ -15,6 +15,8 @@
 3. **这份文件不覆盖的地方,明说没覆盖**(见第九节)。"这份表里没有"和"这事不存在"是两回事。
 4. 它的用途是**取代记忆,不是取代原件**。拿到 IBM PC Technical Reference 或 Ralf Brown 的清单之后应当逐条复核,复核过的条目在这里标注。
 
+**一处例外,写在最前面免得被埋掉:第一节里"关于 `vgabios` / `SeaBIOS`"那一小节是【源码】级的。** 2026-10-01 由任务 D 把两份源码取到本地、grep 着读完,每一条都指到**文件、函数、那一行**。它是这份文件里唯一直接读过一手材料的部分——**其余各节仍然全部是二手转述**,包括这一节的其它段落。
+
 > 这一点和 M3 的处境相同,但**风险更高**:M3 里不同的人还会因为推导路径不同而分歧;这里,一个记错的服务号会被一致地记错。
 > 相关:[[mark-inferred-vs-checked-claims]]、[[task-book-claims-need-checking]]
 
@@ -57,26 +59,62 @@ M4 只做文本模式,所以下面只列与文本模式有关的。
 - `0Eh` **不影响 `BX`/`CX`/`DX` 与段寄存器**;`SI`/`DI` **可能被改**。
 - `09h`/`0Ah` 与 `0Eh` 的区别是:`09h`/`0Ah` 是"用明确属性写、光标不动",`0Eh` 是"电传式、光标前进"。
 
-### 关于 `vgabios` / `SeaBIOS` 的几条(**依据是转述的,不是查证的**)
+### 关于 `vgabios` / `SeaBIOS` 的几条(**2026-10-01 复读源码查证**)
 
-> **勘误(2026-10-01,由任务 D 复读源码后提出)。** 这一小节原来是任务 B 读 `vgabios`(`SeaBIOS` 源码树里的 `vgabios.c`)与 `SeaBIOS` 之后的报告,我**照抄进了这份文件,并且把它升格成了"这份文件里唯一不依赖手册转述的依据"**。
+> **这一节现在是本文件里唯一直接读过一手材料的部分 —— 但不是靠"更权威",是靠"能被指出来"。**
 >
-> **那个升格是错的,而且错得比内容本身更值得记。** 我没读过那两份源码 —— 我读的是**别人对它们的转述**。读过源码的人在某种意义上更硬,但**一个没读源码的人在转述一份读源码的笔记时,硬度并没有传过来**。D 复读之后,下面表里有两条翻了过来。
+> 经过:这一小节原来是任务 B 读了源码之后的报告,协调方**照抄进来,并把它升格成"唯一不依赖手册转述的依据"**。那个升格是错的:抄的人没读过源码,读的是**别人对源码的转述**——而**硬度不随转述传递**。
 >
-> **所以这一节的等级和本文件其它部分相同:二手。** 只不过来源从"手册转述"换成了"源码转述"。
+> 然后任务 D 把它**真的查了**:两份源码 `curl` 到本地(`/var/tmp`),**用 grep 读**,所以下面每一条都能指到**文件、函数、以及那一行**;引文是复制的,不是转述的。
+>
+> **等级:【源码】。** 仍然不是原件(仓库里没有 IBM PC 技术参考手册),但它不再是任何人笔记的转述。
 
-| 问题 | 结论 | 依据 |
+| 问题 | 结论 | 出处 |
 |---|---|---|
-| `0Eh` 往哪一页写 | **活动页**,不是 `BH` | Ralf Brown 写的是 `BH`,而 vgabios 的注释明确说那份清单在这一点上错了——输出跟着显示走,想换页的程序会用 `05h` |
-| `0Eh` 的 `BS`(退格) | 列退一格,**到 0 为止**;**不**爬到上一行行尾 | vgabios。串行终端的描述给的是相反答案 |
-| `0Eh` 的 `TAB` | 补空格到下一个 8 的倍数 | **依据存疑**:D 复读 vgabios 时看到的循环条件与这条**相反**,而 SeaBIOS **根本没有 TAB 分支**。本机按这条做了,但与参考是否一致**没有再确认** |
-| `0Eh` 上滚时新行填什么属性 | **两份实现其实一致** | 见下面这条更正 |
+| `0Eh` 往哪一页写 | **活动页**,不是 `BH` | **两个仓库里是同一句注释**:`case 0x0E:`(vgabios)/ `handle_100e()`(SeaBIOS)都写着 *"Ralf Brown Interrupt list is WRONG on bh(page) / We do output only on the current page !"*。实现:vgabios 传 `0xff` 当页号,函数开头 `if (page == 0xff) page = read_byte(BIOSMEM_SEG, BIOSMEM_CURRENT_PAGE);`;SeaBIOS 用 `get_cursor_pos(GET_BDA(video_page))` |
+| `0Eh` 的 `BS` | 列退一格、**到 0 为止**,不爬到上一行 | **两份独立实现逐字一致**:vgabios `case 8: if (xcurs > 0) xcurs--;`,SeaBIOS `case 8: if (pcp->x > 0) pcp->x--;` |
+| `0Eh` 的 `TAB` | **规则作废**,见下面**注一** | 两份都不做这件事 |
+| `0Eh` 上滚时新行填什么属性 | **两份不一致**(原条目成立);vgabios 动态、SeaBIOS 固定 `0x07` | vgabios 读格子:`address = SCREEN_MEM_START(...) + (xcurs + (ycurs-1)*nbcols)*2; attr = read_byte(..., address+1);`;SeaBIOS 是常数:`vgafb_clear_chars` 里 `u16 attr = ((ca.use_attr ? ca.attr : 0x07) << 8) \| ca.car;`,滚动传的 `use_attr` 为 0 → **`0x07`** |
+| `0Eh` 文本模式下不写属性字节 | **两个仓库都证实** | SeaBIOS 传 `{regs->al, regs->bl, 0}`、vgabios 传 `NO_ATTR`;`vgafb_write_char` 在 `use_attr == 0` 时只写字符那一个字节 |
+| `00h` 的 `AL` bit 7 = 不清屏 | **规则成立** | vgabios `biosfn_set_video_mode`:`Bit8u noclearmem = mode & 0x80;` … `if (noclearmem == 0x00) { memsetw(...) }`;SeaBIOS `handle_1000`:`if (regs->al & 0x80) flags \|= MF_NOCLEARMEM;` |
+| **新:`0Fh` 返回的 `AL` 带 bit 7** | `AL = 模式 \| (0040:0087 的 bit 7)` | vgabios `biosfn_get_video_mode`(汇编:`mov bx,#BIOSMEM_VIDEO_CTL; mov ah,[bx]; and ah,#0x80; … or al,ah`);SeaBIOS `handle_100f`。**`BIOSMEM_VIDEO_CTL` = `0040:0087`、`BIOSMEM_NB_ROWS` = `0040:0084`**(`vgatables.h`) |
+| **新:`06h`/`07h` 的越界矩形是"夹取",不是"拒绝"** | 左下右下越界 → **夹到屏幕内**;左上大于右下 → 原样返回 | vgabios `biosfn_scroll` 开头:`if(rul>rlr)return; if(cul>clr)return; … if(rlr>=nbrows)rlr=nbrows-1; if(clr>=nbcols)clr=nbcols-1;`;SeaBIOS `verify_scroll` 同样:`if (lry >= nbrows) lry = nbrows-1; if (lrx >= nbcols) lrx = nbcols-1; … if (wincols <= 0 \|\| winrows <= 0) return;` |
+| **新:`06h`/`07h` 的四个寄存器** | `CL`=左上**列**、`CH`=左上**行**、`DL`=右下**列**、`DH`=右下**行** | SeaBIOS `verify_scroll`:`u8 ulx = regs->cl, uly = regs->ch, lrx = regs->dl, lry = regs->dh;` —— 两条独立实现都是这个映射 |
+| **新:窗口高度与"清窗"的分界** | `行数 >= 窗口高度` → **清窗**(不是滚动) | SeaBIOS `verify_scroll`:`if (lines >= winrows) lines = 0;`;vgabios 在行循环里用 `(i+nblines>rlr)\|\|(nblines==0)` 得到同样结果 |
 
-**更正一:SeaBIOS 和 vgabios 在上滚属性上并不分歧。** 我原来写"SeaBIOS 用固定的 `0x07`" —— D 复读当前 master 后指出,它的 `write_teletype` 滚动时传的是 `struct carattr attr = {' ', 0, 0}`,**第三个字段是"属性有效"标志且为 0,意思是不改属性**。而 vgabios 那一半这次查实了(`address + (xcurs + (ycurs-1)*nbcols)*2` 读属性)—— 滚动发生在光标刚越过底边那一刻,`ycurs-1` 就是最底行,**和 B 的实现读的是同一个格子**。所以两份一致,实现也是对的;原来那条"分歧"是我的转述错误。
+**注一:`TAB` 那条规则作废 —— 它不在任何一份源码里。**
 
-**更正二:`09h` 在屏底的位置,B 的选择是对的但理由没写。** D 读了 B 自己引的 vgabios 原文:文本模式下它**既不回绕也不停**,只按线性地址一路 `+= 2` 写下去。**差别比看起来小** —— 整页内存是线性的,所以 B 的回绕与它的线性推进**逐字节相同**;真正的差别只在**最后一行之后**(B 停住,vgabios 写进下一页的内存)。**B 的选择更安全,保留,并且要标成"决定"、写出出处。**
+- vgabios 的循环**条件是反的**:
+  ```c
+  case '\t':
+   do { biosfn_write_teletype(' ',page,attr,flag);
+        biosfn_get_cursor_pos(page,&dummy,&cursor);
+        xcurs=cursor&0x00ff; }while(xcurs%8==0);
+  ```
+  它在**列是 8 的倍数时继续**——所以从列 0 出发只写**一个**空格、停在列 1;从列 7 出发写两个、停在列 9。**这不是制表位,是 vgabios 的一个 bug**(写成 `!= 0` 才是"补到下一个制表位")。
+- SeaBIOS **根本没有 `case '\t'`**(只有 7、8、`'\r'`、`'\n'` 和 default),TAB 落到默认分支,**被当成一个字形打出去**。
+- **所以本机原来那条"补空格到下一个 8 的倍数"两边都不是。** 处置:**保留这个行为,但不再声称它有出处** —— 它是一个**我们的选择**(理由:它是终端该有的行为,而且 SeaBIOS 那样打一个字形会让光标只动一格);同时记下后果:**依赖 `0Eh` 的 TAB 的程序在真机上三种行为都不一致**,所以几乎没有程序会依赖它。
 
-**来源:** `vgabios`(`SeaBIOS` 源码树中的 `vgabios.c`)与 `SeaBIOS` —— **但这一节是转述,复读源码之前不要当查证用。**
+**注二:上滚属性那条,原条目是对的 —— 而 D(本节的查证者)中间提出的"更正"是错的,错法值得记。**
+
+D 读到 SeaBIOS 的 `write_teletype` 传 `struct carattr attr = {' ', 0, 0}`,**从 `use_attr` 这个名字推断第三个字段的含义**,断言"不改属性"。**不对**:同一个文件里的 `vgafb_clear_chars` 写的是
+
+```c
+u16 attr = ((ca.use_attr ? ca.attr : 0x07) << 8) | ca.car;
+```
+
+——**这个标志在两个函数里含义不同**:`vgafb_write_char` 里 `use_attr == 0` 是"不碰属性字节",`vgafb_clear_chars` 里是"**用 0x07**"。**读调用点、按参数名推断被调函数的语义,就被这一处抓了个正着。** 所以:**原条目(两份不一致)成立**,vgabios 动态、SeaBIOS 固定 `0x07`。
+
+**注三:`09h`/`0Ah` 走到屏底之后怎么办。** 两份都**不停**:
+
+- vgabios `biosfn_write_char_attr`(文本分支)是**一次 `memsetw` 写 `count` 个字**——不问行尾、不回绕、不停(图形分支反而有 `while ((count-- > 0) && (xcurs < nbcols))` 的边界);
+- SeaBIOS `handle_1009` 是 `while (count--) write_char(&cp, ca);`,而 `write_char` **只回绕、不上滚** —— 越过最底行之后它继续往后写。
+
+**所以差别只在"最后一行之后"**:页面内存是线性的,B 的回绕与它们的线性推进**逐字节相同**;越过之后它们写进**下一页的内存**,而 **B 停住**。B 的选择更安全,而且是**决定**不是事实——应标成决定。
+
+**注四(新):`06h`/`07h` 越界矩形,B 与两份源码都不同。** 两份都**夹取**(`rlr >= nbrows → nbrows-1`),而 B 是**拒绝**(`bottom >= BIOS10_ROWS || right >= st->columns → return`)。B 的注释给了理由("一个要求滚 rows 10..40 的程序有 bug,悄悄滚一半会掩盖它"),那是一个理由,但**现在有两条独立实现夹取**。可达的情形是具体的:**40 列模式 + `DL = 79`**(一个按 80 列写的清屏),硬件夹到 39 并清屏,B **什么都不做**。这一条应转给 B。
+
+**来源:** `qemu/vgabios` 的 `vgabios.c`(3923 行)与 `vgatables.h`、`coreboot/seabios` 的 `vgasrc/vgabios.c`(1133 行)、`vgasrc/vgafb.c`、`vgasrc/vgabios.h` —— **2026-10-01 由任务 D `curl` 到本地后逐条 grep 读取**。两者都是 LGPL 源码。仍未查证的见第九节。
 
 **来源:** [BIOS-interrupts (课程手册 PDF)](https://jyywiki.cn/pages/OS/manuals/BIOS-interrupts.pdf)、[Text Mode — UMBC CMSC 211](https://courses.cs.umbc.edu/undergraduate/CMSC211/Spring01/burt/lectures/Chap19/textmode.html)、[BIOS 中断功能调用大全(中文)](http://staff.ustc.edu.cn/~hufy/Microcomputer/%B8%BD%C2%BC/BIOS_DOS%D6%D0%B6%CF%B9%A6%C4%DC%B5%F7%D3%C3%B4%F3%C8%AB.pdf)。
 
@@ -273,6 +311,8 @@ sector := CX and 63
 | `0070h` | 字节 | 时钟回绕(午夜)标志 |
 | `0080h` | 字 | 键盘缓冲区的起始偏移(`001Eh`)——**很多机器不支持** |
 | `0082h` | 字 | 键盘缓冲区的结束偏移(`003Eh`)——同上 |
+| `0084h` | 字节 | **行数减一** —— 【源码】2026-10-01 补。VGA BIOS 用它而不是常量:`read_byte(BIOSMEM_NB_ROWS)+1`(vgabios)/ `GET_BDA(video_rows) + 1`(SeaBIOS)。`vgatables.h` 里叫 `BIOSMEM_NB_ROWS` |
+| `0087h` | 字节 | **视频控制字节,bit 7 = "上次设置模式时要求不清屏"** —— 【源码】同上。`00h` 的 `AL` bit 7 就是被记在这里(`BIOSMEM_VIDEO_CTL`),而 **`0Fh` 返回的 `AL` 是"模式 \| 这一位"**,所以程序能从 `0Fh` 把那个请求读回来 |
 
 ### `0040:0017` 的位
 
@@ -307,19 +347,20 @@ sector := CX and 63
 
 | 位置 | 分歧 | 目前的处置 |
 |---|---|---|
-| `INT 10h AH=0Eh` 上滚时新行的属性 | ~~vgabios 取上方那格的属性;SeaBIOS 用固定 `0x07`~~ **查实后两份一致** | **不是分歧** —— SeaBIOS 那个 `0x07` 是我转述错的,第三个字段是"属性有效"标志且为 0。见第一节那条更正 |
+| `INT 10h AH=0Eh` 上滚时新行的属性 | **vgabios 取"底行那一格"的属性**(动态);**SeaBIOS 用固定 `0x07`** | **确实是分歧,已查实(2026-10-01)**。中间一度被误记为"两份一致"——错在按参数名 `use_attr` 推断了被调函数的语义,而那个标志在 `vgafb_write_char` 与 `vgafb_clear_chars` 里含义不同。见第一节**注二**。本机跟 vgabios |
 | `INT 10h AH=0Eh` 的页 | Ralf Brown 说 `BH`,vgabios 的注释说那份清单错了、应当是活动页 | **用活动页** |
 | `INT 16h AH=02h` | 标志字节在 `AL` 还是 `AH` | 用 `AL`(详细资料一致,维基表格是孤例) |
 | `0040:004Ch` | 4096 还是 4000 | 用 4096(是页步长,不是内容长度),但记为不可依赖 |
 | `INT 13h` 的驱动器不可用 | 任务书坑 7 说 `0Ch`;§4 确认过的码表里**根本没有 `0Ch`**,而 `01h` 的定义是"功能号**或参数**无效" | **定为 `01h`**(2026-10-01)。驱动器号是一个**参数**,而 `0Ch` 讲的是**介质**(类型找不到 / 道不被支持),不是驱动器存在与否。任务书那条 `0Ch` 是**没有出处的** |
-| `INT 13h AH=04h` | 硬盘上是否与内存比较 | **未定** —— 由任务 D 决定并写进报告 |
-| `INT 13h` 的 `AL = 0` | 是否表示 18 扇区 | **未定**,且这批资料里没有出处 —— 由任务 D 决定 |
+| `INT 13h AH=04h` | 硬盘上是否与内存比较 | **定为"不比较"**(2026-10-01,任务 D)。只判驱动器与扇区地址,然后报成功;报告里写明它**没有真的校验**。理由:这台机器没有控制器,介质是宿主内存里的一块数组,"永远报成功"在这里与事实一致,而"可能报假失败"会破坏本来能跑的程序 |
+| `INT 13h` 的 `AL = 0` | 是否表示 18 扇区 | **定为拒绝**(2026-10-01,任务 D):`CF=1`、`AH=01h`,不搬任何扇区。§4 给的取值域是 1–128 且明说那个 18 没有出处;另外两条路都**静默**(搬 0 个扇区却报成功,或者按一个编出来的数搬 18 个扇区去踩调用方的缓冲区) |
 
 ---
 
 ## 九、这份文件**没有**覆盖的
 
 - **原件。** 一条都没有。全部是二手转述。
+- **真机 IBM BIOS 的行为。** 2026-10-01 的源码级查证查的是**两份开源 BIOS**(`qemu/vgabios` 与 `coreboot/seabios`)——它们是 PC 兼容机的实现,**不是 IBM 的固件**。所以"两份一致"不等于"真机如此";而两份不一致的地方(上滚属性、`TAB`、越界矩形),真机的答案**仍然不知道**。见第一节注一到注四。
 - **`INT 10h` 的图形模式功能**(`04h`–`06h`、`0Bh`–`0Dh`、`10h` 以后的所有 VGA 功能)。M7 才需要。
 - **`INT 14h`/`17h`/`15h`**(串口、打印机、系统服务)。M4 不实现。
 - **`INT 21h` 与整个 DOS 服务层。** M5。
