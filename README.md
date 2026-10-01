@@ -12,7 +12,7 @@ DOS 在这里扮演两重角色：**设计参照系**（继承小内核、直白
 
 ## 当前状态
 
-**M0（引导闭环）、M1（内核基础设施）与 M2（控制台与 Shell）已完成并通过验证。**
+**M0 到 M4 已完成并通过验证**——引导闭环、内核基础设施、控制台与 Shell、纯软件 8086 解释器、以及 IBM PC 兼容机的固件。最新一版作为 **Pre-release** 发布在 [Releases](../../releases) 页，ISO 可以直接下载运行。
 
 开机进入一个**交互式命令行**。Shell（FunnyCOM）是一个 **Ring 3 用户态进程**，跑在自己的地址空间里，所有能力都通过系统调用取得——它自己没有任何特权。
 
@@ -44,9 +44,9 @@ DOS 在这里扮演两重角色：**设计参照系**（继承小内核、直白
 
 **M3 已完成**：一个纯软件的 8086 解释器，全部 256 个操作码槽位，加 80186 扩展，加一个单步调试器。**它作为 Ring 3 进程运行在 FunnyOS 里**——以 `vm=1` 启动时，内核会跑起解释器，接上 16 MB 的 guest 内存，执行一段手工汇编的 guest 程序并把终态交给自动化断言（`make test-vm`）。验收标准「能执行手工汇编的二进制，寄存器与标志位状态正确」因此是可复现的，不是靠看屏幕。
 
-**M4 已完成**：IBM PC 兼容机的**固件**——中断向量表、宿主陷阱、中断投递，六个 BIOS 服务（10h/11h/12h/13h/16h/1Ah），以及那块程序可以直接读写的文本显存。验收标准「能跑一个自己写的、通过 BIOS 输出的 `.COM` 程序」达成了，而 `make test-vm` 断言的是**屏幕上那行字本身**——退出码对一台"跑了程序但什么都没画"的机器同样成立。**这一层是靠交叉审查验的**：五个模块各由一个没有写它的人独立审过，十七条发现里有四条是**作者自己的套件完全看不见**的——服务回不了 CF（`INT 13h` 的每次失败都长得像成功，而 24 个用例里 23 个看不见）、验收的断言只验了一半、语料声称的行为从没被走到、文档在代码改过之后还说反话。**它诚实地说没有证明什么，写在 DESIGN 的 M4 一节里。**
+**M4 已完成**：IBM PC 兼容机的**固件**——中断向量表、宿主陷阱、中断投递，六个 BIOS 服务（10h/11h/12h/13h/16h/1Ah），以及那块程序可以直接读写的文本显存。验收标准「能跑一个自己写的、通过 BIOS 输出的 `.COM` 程序」达成了，而 `make test-vm` 断言的是**屏幕上那行字本身**——退出码对一台"跑了程序但什么都没画"的机器同样成立。**这一层是靠交叉审查验的**：五个模块各由一个没有写它的人独立审过，十七条发现里有四条是**作者自己的套件完全看不见**的——服务回不了 CF（`INT 13h` 的每次失败都长得像成功，而 24 个用例里 23 个看不见）、验收的断言只验了一半、语料声称的行为从没被走到、文档在代码改过之后还说反话。**交叉审查也不是终点**：审查之后又发现，其中一个服务在键盘缓冲区满时去写 `0040:0071`——那个字节是 **Ctrl-Break 标志**，不是它以为的溢出标志，写进去会让每个被丢掉的按键看起来像用户在按 Break。更值得记的是它怎么活下来的：树里当时**已经有一份裁定说这个写入是错的**，而那次裁定只改了文档、头文件和一个测试，**没碰实现**——于是缺陷留在代码里，还有测试钉着它。**它诚实地说没有证明什么，写在 DESIGN 的 M4 一节里。**
 
-操作码与内存模型的那四百多个用例**在宿主上跑**，不在 QEMU 里：解释器是纯逻辑，给它一块内存和几个字节它就能执行，所以 `cd dos && make test` 是毫秒级的。但**绿灯不算证据，除非证明它会红**——所以每一层都做过**变异测试**：往实现里种一个缺陷，看对应用例变不变红。三处独立活动共种了一百二十多处，每一条用例都被至少一个变异体弄红过。
+操作码与内存模型的那四百多个用例**在宿主上跑**，不在 QEMU 里：解释器是纯逻辑，给它一块内存和几个字节它就能执行，所以 `cd dos && make test` 是毫秒级的。但**绿灯不算证据，除非证明它会红**——所以每一层都做过**变异测试**：往实现里种一个缺陷，看对应用例变不变红。三处独立活动共种了一百二十多处，每一条用例都被至少一个变异体弄红过。M4 之后这套做法有了工具：[`tools/verify-mutations.py`](tools/verify-mutations.py) 现在覆盖整个 8086 子系统，表里 **186 个变异体**。它防在三处关键的地方——基线不全绿就拒绝报告；**跑了却解析不到的套件也拒绝报告**（一个从报告里消失的套件和一个无话可说的套件长得一模一样）；以及一个**"变异体根本没改变二进制"的探针**，同一份源码编译两次必须字节一致，否则"二进制变了"什么都证明不了。**整场战役还没有跑完**，所以这里不声称任何覆盖结论。
 
 各组按编码切成互不重叠的任务，任务书在 [docs/tasks/](docs/tasks/)，其中一份是**独立验证**，交给没有参与实现的人：它回答的不是「我写的代码做了我以为它做的事吗」，而是「**有没有什么事所有人都以为做了、但没做**」——它也确实找出来了。
 
@@ -250,7 +250,7 @@ See [docs/DESIGN.md](docs/DESIGN.md) for the full architecture (written in Chine
 
 ## Status
 
-**M0 (boot chain), M1 (kernel infrastructure) and M2 (console and shell) are complete and verified.**
+**M0 through M4 are complete and verified** -- the boot chain, the kernel infrastructure, the console and shell, the software 8086 interpreter, and the firmware of an IBM PC compatible. The latest one is published as a **pre-release** on the [Releases](../../releases) page, with an ISO you can boot.
 
 The machine boots into an **interactive command line**. The shell, FunnyCOM, is a **Ring 3 user-space process** with its own address space and no privileges of its own -- everything it does goes through a system call.
 
@@ -282,9 +282,9 @@ The same ISO in **VMware Workstation** (BIOS path, not QEMU):
 
 **M3 is done.** A software 8086 interpreter, all 256 opcode slots, the 80186 additions, and a single-step debugger. **It runs inside FunnyOS as a Ring 3 process** -- boot with `vm=1` and the kernel starts the interpreter, gives it 16 MB of guest memory, runs a hand-assembled guest and hands the terminal state to automated assertions (`make test-vm`). The acceptance criterion -- execute a hand-assembled binary with the registers and flags correct -- is therefore reproducible, not something somebody looked at.
 
-**M4 is done.** The firmware of an IBM PC compatible: the interrupt vector table, the host trap, interrupt delivery, six BIOS services (10h/11h/12h/13h/16h/1Ah), and the text memory a program can read and write directly. The acceptance criterion -- run a self-written `.COM` that outputs through the BIOS -- is met, and `make test-vm` asserts **the line on the screen itself**; an exit code would be satisfied by a machine that ran the program and drew nothing. **This layer was verified by cross-review**: every module was audited by someone who did not write it, and four of the seventeen findings were invisible to the author's own suite -- a service that could not return CF (so every `INT 13h` failure looked like success to 23 of 24 cases), an acceptance assertion that checked only half of what it claimed, a sample whose stated behaviour was never exercised, and documents still describing code that had moved on. What M4 honestly does not establish is in DESIGN's M4 section.
+**M4 is done.** The firmware of an IBM PC compatible: the interrupt vector table, the host trap, interrupt delivery, six BIOS services (10h/11h/12h/13h/16h/1Ah), and the text memory a program can read and write directly. The acceptance criterion -- run a self-written `.COM` that outputs through the BIOS -- is met, and `make test-vm` asserts **the line on the screen itself**; an exit code would be satisfied by a machine that ran the program and drew nothing. **This layer was verified by cross-review**: every module was audited by someone who did not write it, and four of the seventeen findings were invisible to the author's own suite -- a service that could not return CF (so every `INT 13h` failure looked like success to 23 of 24 cases), an acceptance assertion that checked only half of what it claimed, a sample whose stated behaviour was never exercised, and documents still describing code that had moved on. **And cross-review was not the end of it either.** A later audit found one of the services writing `0040:0071` when the keyboard buffer filled. That byte is the **Ctrl-Break flag**, not the overflow flag the service took it for, and writing it makes every dropped keystroke look to a polling program like the user pressing Break. How it survived is the more useful part: the tree already contained a **ruling that the write was wrong**, and that ruling had changed the documentation, the header and one test -- but not the implementation, so the defect stayed in the code with a test pinned to it. What M4 honestly does not establish is in DESIGN's M4 section.
 
-The four hundred-odd cases covering the opcodes and the memory model **run on the host**, not in QEMU: the interpreter is pure logic, and given a block of memory and some bytes it executes, so `cd dos && make test` answers in milliseconds. But **a green light is not evidence unless it can be shown to go red** -- so every layer was put through **mutation testing**: inject one defect, watch which case turns red. Three independent campaigns injected well over a hundred, and every case was turned red by at least one of them.
+The four hundred-odd cases covering the opcodes and the memory model **run on the host**, not in QEMU: the interpreter is pure logic, and given a block of memory and some bytes it executes, so `cd dos && make test` answers in milliseconds. But **a green light is not evidence unless it can be shown to go red** -- so every layer was put through **mutation testing**: inject one defect, watch which case turns red. Three independent campaigns injected well over a hundred, and every case was turned red by at least one of them. Since M4 that practice has a tool: [`tools/verify-mutations.py`](tools/verify-mutations.py) now covers the whole 8086 subsystem, with **186 mutants** in its table. It guards three places that matter -- it refuses to report unless the pristine tree is green; it refuses if a suite ran whose output it could not parse, because a suite missing from the report looks exactly like a suite with nothing to say; and it probes whether the mutant changed the compiled code at all, since the same source built twice has to come out byte-identical and "the binary changed" otherwise says nothing. **The campaign has not been run to completion**, so no coverage claim is made here.
 
 The work was split by encoding into non-overlapping assignments, in [docs/tasks/](docs/tasks/). One of them is **independent verification**, given to somebody who wrote none of it: the question it answers is not whether the code does what its author thought, but **whether anything everybody assumed was done, wasn't** -- and it found some.
 
