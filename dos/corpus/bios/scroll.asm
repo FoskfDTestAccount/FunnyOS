@@ -66,7 +66,8 @@
 ; BX to keep the two loops reading the same way.
 ;
 ; Entry convention: the corpus convention, from replay.h -- a flat binary
-; at 0x100, CS=DS=ES=SS=0, SP=0xFFFE, FLAGS=0xF002. IF is clear; no
+; at 0x100 of its own segment, CS=DS=ES=SS=0x1000, SP=0xFFFE, FLAGS=0xF002.
+; IF is clear; no
 ; interrupt is involved.
 ;
 ; Expected at HLT, page 0, cell index = row * 80 + col:

@@ -7,7 +7,7 @@
 ;
 ;   1. AH=02h puts the cursor somewhere on a named page (DH row, DL column,
 ;      BH page) and AH=03h reads it back (DH/DL position, CX shape). The
-;      program stores what it read at 0000:0800, so the suite checks the
+;      program stores what it read at 1000:0800, so the suite checks the
 ;      value the firmware RETURNED and not the one the program believes it
 ;      set. A 03h that answered with the wrong register would be invisible
 ;      to a program that only ever sets and never asks.
@@ -37,7 +37,8 @@
 ; reading it here means this program follows whatever the firmware says.
 ;
 ; Entry convention: the corpus convention, from replay.h -- a flat binary
-; at 0x100, CS=DS=ES=SS=0, SP=0xFFFE, FLAGS=0xF002. IF is clear; no
+; at 0x100 of its own segment, CS=DS=ES=SS=0x1000, SP=0xFFFE, FLAGS=0xF002.
+; IF is clear; no
 ; interrupt is involved.
 ;
 ; Expected at HLT:
@@ -49,8 +50,8 @@
 ;   0040:0052 = 0x0203    page 1 cursor, row 2 col 3
 ;   0040:0062 = 0x01      the active page
 ;   0040:004C = 0x1000    the page stride the mode set established
-;   0000:0800 = 0x05      the row AH=03h returned
-;   0000:0801 = 0x0A      the column AH=03h returned
+;   1000:0800 = 0x05      the row AH=03h returned
+;   1000:0801 = 0x0A      the column AH=03h returned
 
         bits 16
         org 0x100
