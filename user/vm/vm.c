@@ -108,9 +108,20 @@
 #define GUEST_RAM_BYTES (16u * 1024u * 1024u)
 
 /*
- * Where a guest program is loaded, and where its stack starts. Both come
- * from the convention; neither is a decision this file makes.
+ * Where a guest program is loaded and where its stack starts.
+ *
+ * A .COM gets a segment of its own -- CS, DS, ES and SS all pointing at
+ * it -- and this is the convention dos/corpus/bios/replay.h froze for the
+ * host suite, so the same bytes run in both places with nothing kept in
+ * step by hand.
+ *
+ * The segment is not decoration. Loading at linear 0x100 with CS = 0 puts
+ * the program inside the interrupt vector table at 0x0000-0x03FF: its
+ * first 768 bytes become vector entries 64 and up, which works only until
+ * a program hooks a vector above 0x60 -- where TSRs conventionally live --
+ * and finds its own handler buried under its own code.
  */
+#define GUEST_SEGMENT      0x1000u
 #define GUEST_LOAD_ADDRESS 0x0100u
 #define GUEST_STACK_TOP    0xFFFEu
 
@@ -381,7 +392,26 @@ static const struct guest_case g_cases[] = {
  * guest that never finishes has to be reported as one that never finished.
  */
 #define VM_SLICE_STEPS 250u
-#define VM_SLICE_COUNT 400u
+
+/* How often the host asks what time it is, in turns of the slice loop.
+ * A power of two so the test is a mask. See the note where it is used. */
+#define VM_CLOCK_EVERY 512u
+
+/*
+ * How long the host will drive a machine that is not getting anywhere,
+ * in milliseconds of real time, and a turn count as a second backstop.
+ *
+ * Milliseconds, and not turns, because the thing a guest can be waiting
+ * for is real time: timer.asm waits for five ticks of a clock that is
+ * 275 ms of wall time whatever the emulator is doing. A budget in turns
+ * would be a budget that means something different on every machine --
+ * two million turns took 270 ms on the machine this was written on, which
+ * is *less* than the 275 ms the guest was waiting for, so the run failed
+ * for being too fast. Five seconds leaves seventeen times the room needed
+ * and still stops a guest that is genuinely stuck.
+ */
+#define VM_RUN_MAX_MS      5000u
+#define VM_RUN_MAX_TURNS   200000000u
 
 /* The largest page this machine has: eighty columns of twenty-five rows.
  * How many cells the host must READ is not this -- it is `columns * 25`,
@@ -414,6 +444,19 @@ static struct vm86_display g_display;
  * is not derived from anything the clock said -- which is what makes "five
  * ticks took 275 ms" a statement about the rate rather than a tautology. */
 static uint32_t g_ms_advanced;
+
+/*
+ * Ticks the clock has produced and the host has not raised yet.
+ *
+ * A vector raised while it is already pending is one interrupt and not
+ * two -- that is how the 8259 behaves and it is written into host.h -- so
+ * the host cannot hand over a batch of them at once. Holding the count
+ * here and raising one per turn as the processor becomes free is what
+ * keeps the guest's count from falling behind the clock.
+ */
+static uint32_t g_ticks_owed;
+static uint32_t g_ticks_raised;   /* diagnostic */
+static uint32_t g_clock_reads;    /* diagnostic */
 
 static bool frame_same(const uint8_t *a, const uint8_t *b, uint32_t count)
 {
@@ -502,11 +545,12 @@ static void present(const struct vm86_cpu *cpu)
 /*
  * Power the machine on and load one program into it.
  *
- * The firmware goes in BEFORE the program, and that is not cosmetic: it
- * builds the interrupt vector table at 0x0000-0x03FF, and the corpus
- * convention loads a program at linear 0x100 with CS = 0. Loading first
- * buries the program's own first bytes under the table, and the symptom is
- * a machine executing vector-table bytes.
+ * The firmware goes in before the program, which is the order the real
+ * machine does it in and which used to be load-bearing: the table is built
+ * at 0x0000-0x03FF, and under the old convention a program went to linear
+ * 0x100 with CS = 0 and landed inside it. The program has a segment of its
+ * own now -- see GUEST_SEGMENT -- so the two cannot collide, and the order
+ * stays because it is the honest one.
  *
  * The disk is registered with a NULL context, which is what bios13.h calls
  * a machine with no disk: every function answers with the status that says
@@ -523,12 +567,15 @@ static void machine_build(struct vm86_mem *mem, struct vm86_cpu *cpu,
     vm86_install_firmware(cpu);
 
     for (uint32_t i = 0; i < size; i++)
-        vm86_mem_write8(mem, GUEST_LOAD_ADDRESS + i, image[i]);
+        vm86_mem_write8(mem,
+                        ((uint32_t)GUEST_SEGMENT << 4) +
+                            GUEST_LOAD_ADDRESS + i,
+                        image[i]);
 
-    vm86_set_seg(cpu, VM86_CS, 0);
-    vm86_set_seg(cpu, VM86_DS, 0);
-    vm86_set_seg(cpu, VM86_ES, 0);
-    vm86_set_seg(cpu, VM86_SS, 0);
+    vm86_set_seg(cpu, VM86_CS, GUEST_SEGMENT);
+    vm86_set_seg(cpu, VM86_DS, GUEST_SEGMENT);
+    vm86_set_seg(cpu, VM86_ES, GUEST_SEGMENT);
+    vm86_set_seg(cpu, VM86_SS, GUEST_SEGMENT);
     vm86_flush_segments(cpu);
 
     cpu->ip = GUEST_LOAD_ADDRESS;
@@ -547,6 +594,11 @@ static void machine_build(struct vm86_mem *mem, struct vm86_cpu *cpu,
     g_screen.drawn   = false;
     g_display.present = screen_present;
     g_display.ctx     = &g_screen;
+
+    g_ticks_owed  = 0;
+    g_ms_advanced = 0;
+    g_ticks_raised = 0;
+    g_clock_reads = 0;
 
     vm86_register_service(VM86_INT_VIDEO,         bios10_service, &g_video);
     vm86_register_service(VM86_INT_KEYBOARD_BIOS, bios16_service, &g_keyboard);
@@ -822,7 +874,7 @@ static bool run_case(const struct guest_case *c)
  * here pretends to close it.
  */
 static bool run_corpus(const char *name, const uint8_t *image, uint32_t size,
-                       unsigned max_slices, struct vm86_cpu *result)
+                       struct vm86_cpu *result)
 {
     struct vm86_mem mem;
     struct vm86_cpu cpu;
@@ -840,7 +892,7 @@ static bool run_corpus(const char *name, const uint8_t *image, uint32_t size,
 
     last_ms = u_uptime_ms();
 
-    for (slices = 0; slices < max_slices; slices++) {
+    for (slices = 0; slices < VM_RUN_MAX_TURNS; slices++) {
         uint64_t retired = cpu.insn_count;
 
         stop = vm86_run(&cpu, VM_SLICE_STEPS);
@@ -870,16 +922,40 @@ static bool run_corpus(const char *name, const uint8_t *image, uint32_t size,
         if (stop == VM86_STOP_HALT && !vm86_flag_test(&cpu, VM86_IF))
             break;
 
-        unsigned long now = u_uptime_ms();
-        uint32_t delta = (uint32_t)(now - last_ms);
-        uint32_t ticks = bios1a_advance(&g_clock, delta);
+        /*
+         * Out of patience, in real time. Checked here rather than as a
+         * turn count because the clock below is what a waiting guest is
+         * waiting for -- see VM_RUN_MAX_MS.
+         */
+        if (g_ms_advanced > VM_RUN_MAX_MS)
+            break;
 
-        last_ms = now;
+        /*
+         * The clock is read every so many turns, not every one.
+         *
+         * Every reading is a system call, and a guest waiting on a tick is
+         * halted for hundreds of thousands of turns -- so at one call per
+         * turn the machine spends its time asking what time it is, and the
+         * whole run takes seconds of real time. Five hundred turns is a
+         * small fraction of a millisecond, far below the 55 ms a tick is
+         * worth, so the rate the guest sees is unchanged.
+         */
+        if ((slices & (VM_CLOCK_EVERY - 1u)) == 0u) {
+            unsigned long now = u_uptime_ms();
+            uint32_t delta = (uint32_t)(now - last_ms);
 
-        g_ms_advanced += delta;
+            last_ms = now;
+            g_ms_advanced += delta;
+            g_ticks_owed += bios1a_advance(&g_clock, delta);
+            g_clock_reads++;
+        }
 
-        for (uint32_t t = 0; t < ticks; t++)
+        /* One raise per turn, and only when nothing is still pending. */
+        if (g_ticks_owed > 0u && vm86_next_pending(&cpu) < 0) {
+            g_ticks_owed--;
+            g_ticks_raised++;
             vm86_raise(&cpu, VM86_INT_TIMER);
+        }
     }
 
     present(&cpu);
@@ -900,13 +976,15 @@ static bool run_corpus(const char *name, const uint8_t *image, uint32_t size,
     }
 
     if (stop == VM86_STOP_STEPS) {
-        uprintf("  result : RUN LIMIT reached, %u slices, the guest never "
-                "stopped\n", slices);
+        uprintf("  result : RUN LIMIT, %u turns and %u ms of real time, "
+                "and the guest never stopped\n",
+                slices, (unsigned)g_ms_advanced);
         uprintf("  VM: case %s: FAIL (runaway guest)\n", name);
         return false;
     }
 
-    uprintf("  result : halted after %u slice(s)\n", slices + 1u);
+    uprintf("  result : halted after %u slice(s), %u ms of real time\n",
+            slices + 1u, (unsigned)g_ms_advanced);
 
     return true;
 }
@@ -964,7 +1042,7 @@ static bool run_acceptance(void)
     unsigned        before;
 
     if (!run_corpus("hello", vm_corpus_hello,
-                    (uint32_t)vm_corpus_hello_size, VM_SLICE_COUNT, &cpu)) {
+                    (uint32_t)vm_corpus_hello_size, &cpu)) {
         uprintf("  VM: case hello: FAIL\n");
         return false;
     }
@@ -980,7 +1058,7 @@ static bool run_acceptance(void)
     before = failures;
 
     if (!run_corpus("direct", vm_corpus_direct,
-                    (uint32_t)vm_corpus_direct_size, VM_SLICE_COUNT, &cpu)) {
+                    (uint32_t)vm_corpus_direct_size, &cpu)) {
         uprintf("  VM: case direct: FAIL\n");
         return false;
     }
@@ -1030,24 +1108,36 @@ static bool run_acceptance(void)
  * a machine keeping time looks like when the program is waiting for the
  * clock to move.
  */
-#define VM_CLOCK_SLICES 2000000u
 
 /* 18.2 Hz: 65536 / 1.193182 MHz, the divisor the PC's timer has used since
  * 1981 and the one docs/dos-refs.md section 6 gives. Five of them is
- * 274.6 ms, and the bound has to allow for the kernel's millisecond
- * counter being quantised -- so the lower one is the tight, load-bearing
- * number and the upper one allows one more turn of the loop. */
+ * 274.6 ms.
+ *
+ * The lower bound is the load-bearing one and it is tight: a host that
+ * raised a tick per slice instead of per tick's worth of time would finish
+ * this in microseconds and fail here. The upper bound allows one tick of
+ * slack, which is what a host that hands the clock time as it passes can
+ * be ahead by -- the guest acts on its fifth tick at the turn after the
+ * one that produced it, and a turn on a slow machine can be a fraction of
+ * a tick long.
+ *
+ * A run that comes in *under* the lower bound is the interesting failure
+ * and it happened while this was being written: two million turns of this
+ * loop was 270 ms, which is less than the 275 ms the guest was waiting
+ * for, so the guest was four ticks in when the budget ran out. See
+ * VM_RUN_MAX_MS. */
 #define VM_TICKS_WANTED       5u
 #define VM_TICKS_MIN_MS       274u
-#define VM_TICKS_MAX_MS       320u
+#define VM_TICKS_MAX_MS       340u
 
-/* A bound on the whole run wide enough to only catch a hang. The kernel's
- * millisecond counter is quantised and QEMU does not schedule this process
- * on time, so a reading taken around the loop is noisier than the one
- * taken inside it -- one run of this took 370 ms and another 450 ms for
- * the same 275 ms of clock. A bound tight enough to be interesting here
- * would be a bound that fails at random. */
-#define VM_TICKS_WALL_MAX_MS  2000u
+/* A reading of wall time taken around the whole case, kept only because a
+ * number nobody can see is a number nobody can argue with. It is printed
+ * and NOT asserted: the kernel's millisecond counter is quantised and QEMU
+ * does not schedule this process on time, so one run of this took 370 ms
+ * and another 450 ms for the same 275 ms of clock. A bound tight enough to
+ * be interesting would be a bound that fails at random, and the two that
+ * are tight -- the ms handed to the clock, and VM_RUN_MAX_MS -- are taken
+ * where the numbers mean something. */
 
 static bool run_ticks_case(void)
 {
@@ -1063,7 +1153,7 @@ static bool run_ticks_case(void)
     g_ms_advanced = 0;
 
     if (!run_corpus("timer", vm_corpus_timer,
-                    (uint32_t)vm_corpus_timer_size, VM_CLOCK_SLICES, &cpu)) {
+                    (uint32_t)vm_corpus_timer_size, &cpu)) {
         uprintf("  VM: case timer: FAIL\n");
         return false;
     }
@@ -1102,15 +1192,12 @@ static bool run_ticks_case(void)
                 VM_TICKS_WANTED, (unsigned)g_ms_advanced);
     }
 
-    checks++;
-
-    if (elapsed > VM_TICKS_WALL_MAX_MS) {
-        uprintf("      FAIL  timer: the run took %lu ms of wall time\n",
-                elapsed);
-        failures++;
-    }
+    uprintf("  clock  : %u ms of clock, %u ms of wall time\n",
+            (unsigned)g_ms_advanced, (unsigned)elapsed);
 
     uprintf("  VM: case timer: %s\n", failures ? "FAIL" : "PASS");
+    uprintf("  clock  : %u clock reads, %u ticks raised\n",
+            (unsigned)g_clock_reads, (unsigned)g_ticks_raised);
     uprintf("  checks : %u ok, %u failed\n", checks - failures, failures);
 
     return failures == 0;
@@ -1120,6 +1207,8 @@ static bool run_ticks_case(void)
 
 int vm_selftest(void)
 {
+    unsigned long started = u_uptime_ms();
+
     uputs("\n[vm86 interpreter]\n");
 
     vm86_set_conflict_reporter(report_conflict, NULL);
@@ -1165,6 +1254,7 @@ int vm_selftest(void)
     ok = run_ticks_case() && ok;
 
     uprintf("\n  VM: RESULT %s\n", ok ? "PASS" : "FAIL");
+    uprintf("  VM: took %u ms\n", (unsigned)(u_uptime_ms() - started));
 
     return ok ? 0 : 1;
 }

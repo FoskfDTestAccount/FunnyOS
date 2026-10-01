@@ -50,6 +50,8 @@
 
 #include "harness.h"
 
+#include <vm86/host.h>
+
 #include "../corpus/bios/replay.h"
 
 /* ------------------------------------------------------------------ */
@@ -366,6 +368,40 @@ static void case_hello_and_direct(struct vm86_bios_machine *m)
 }
 
 /*
+ * The vector table is where it is, and the program is not on top of it.
+ *
+ * This is the whole reason the convention gives a program a segment of its
+ * own, and it is the one assertion that would have caught the old one: a
+ * program loaded at linear 0x100 with CS = 0 puts its own first 768 bytes
+ * at vector entries 64 and up. Two entries are checked -- the first the
+ * image would have covered, and one well inside -- because a TSR, which is
+ * what M5 is for, hooks whatever vector it likes, conventionally somewhere
+ * above 0x60.
+ *
+ * What is checked is the stub the firmware wrote. An entry holding program
+ * bytes is not that stub, whatever else it looks like, and the failure
+ * says so rather than reporting a bare mismatch.
+ */
+static void case_vectors(struct vm86_bios_machine *m)
+{
+    run_to_a_halt("vectors", m, corpus_hello, corpus_hello_size);
+
+    for (uint16_t vector = 64; vector <= 128; vector += 64) {
+        uint32_t entry   = (uint32_t)vector * 4u;
+        uint16_t offset  = mem16(m, entry);
+        uint16_t segment = mem16(m, entry + 2u);
+
+        if (offset == (uint16_t)(vector * VM86_TRAP_STRIDE) &&
+            segment == VM86_TRAP_SEGMENT)
+            continue;
+
+        fail("vectors: entry %u holds %04X:%04X, which is not the "
+             "firmware's stub -- the program's image is lying on the "
+             "vector table", (unsigned)vector, segment, offset);
+    }
+}
+
+/*
  * cursor.asm: where the cursor is, which page it is on, and the rule that
  * 09h does not move it while 0Eh does.
  *
@@ -413,8 +449,10 @@ static void case_cursor(struct vm86_bios_machine *m)
                  ((uint32_t)VM86_BDA_SEGMENT << 4) + VM86_BDA_ACTIVE_PAGE, 1);
 
     /* What AH=03h returned, stored by the program itself. */
-    expect_mem8("cursor: the row 03h reported",  m, 0x0800u, 0x05);
-    expect_mem8("cursor: the column 03h reported", m, 0x0801u, 0x0A);
+    /* What AH=03h returned, stored by the program itself -- addressed from
+     * the program's own segment, which is where its data is. */
+    expect_mem8("cursor: the row 03h reported",  m, VM86_BIOS_LOAD_LINEAR + 0x0800u, 0x05);
+    expect_mem8("cursor: the column 03h reported", m, VM86_BIOS_LOAD_LINEAR + 0x0801u, 0x0A);
 }
 
 /*
@@ -508,7 +546,7 @@ static void case_timer(struct vm86_bios_machine *m)
     expect_u32("timer: the firmware's tick count",
                mem32(m, ((uint32_t)VM86_BDA_SEGMENT << 4) + VM86_BDA_TICK_COUNT),
                5u);
-    expect_mem16("timer: our own INT 1Ch handler's count", m, 0x0802u, 5u);
+    expect_mem16("timer: our own INT 1Ch handler's count", m, VM86_BIOS_LOAD_LINEAR + 0x0802u, 5u);
 }
 
 /*
@@ -611,17 +649,17 @@ static void case_disk(struct vm86_bios_machine *m)
     expect_u16("disk: the cursor", vm86_bios_screen(m)->cursor, 2);
 
     /* The sector really arrived. */
-    expect_mem8("disk: the first byte of sector 1", m, 0x0600u, 0x4D);
-    expect_mem8("disk: the second byte of sector 1", m, 0x0601u, 0x34);
-    expect_mem8("disk: the third byte of sector 1", m, 0x0602u, 0x0D);
-    expect_mem8("disk: the fourth byte of sector 1", m, 0x0603u, 0x0A);
+    expect_mem8("disk: the first byte of sector 1", m, VM86_BIOS_LOAD_LINEAR + 0x0600u, 0x4D);
+    expect_mem8("disk: the second byte of sector 1", m, VM86_BIOS_LOAD_LINEAR + 0x0601u, 0x34);
+    expect_mem8("disk: the third byte of sector 1", m, VM86_BIOS_LOAD_LINEAR + 0x0602u, 0x0D);
+    expect_mem8("disk: the fourth byte of sector 1", m, VM86_BIOS_LOAD_LINEAR + 0x0603u, 0x0A);
 
     /* And the buffer the failed read was pointed at is exactly as it was
      * planted: half-filling it would be worse than failing loudly. */
-    expect_mem8("disk: the untouched buffer, byte 0", m, 0x0900u, 0xCD);
-    expect_mem8("disk: the untouched buffer, byte 1", m, 0x0901u, 0xAB);
-    expect_mem8("disk: the untouched buffer, byte 2", m, 0x0902u, 0x34);
-    expect_mem8("disk: the untouched buffer, byte 3", m, 0x0903u, 0x12);
+    expect_mem8("disk: the untouched buffer, byte 0", m, VM86_BIOS_LOAD_LINEAR + 0x0900u, 0xCD);
+    expect_mem8("disk: the untouched buffer, byte 1", m, VM86_BIOS_LOAD_LINEAR + 0x0901u, 0xAB);
+    expect_mem8("disk: the untouched buffer, byte 2", m, VM86_BIOS_LOAD_LINEAR + 0x0902u, 0x34);
+    expect_mem8("disk: the untouched buffer, byte 3", m, VM86_BIOS_LOAD_LINEAR + 0x0903u, 0x12);
 }
 
 /* ------------------------------------------------------------------ */
@@ -633,6 +671,7 @@ struct bios_case {
 
 static const struct bios_case cases[] = {
     { "hello/direct",     case_hello_and_direct },
+    { "vectors",          case_vectors },
     { "cursor",           case_cursor },
     { "scroll",           case_scroll },
     { "timer",            case_timer },
