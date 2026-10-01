@@ -113,16 +113,14 @@
  * unless it was trying to be undefined.
  *
  * ---------------------------------------------------------------------
- * MOV to a segment register, and the interrupts that are not held off
+ * MOV to a segment register, and the instruction that follows it
  *
  * `mov ss, ax` / `mov sp, stack_top` is a pair that must not be
  * interruptible in the middle: an interrupt arriving between the two
  * would run on a stack pointer half of which belongs to the old stack.
  * The pair is nevertheless written without disabling interrupts, and it
  * is correct as written, because on the 8086 the instruction after a
- * segment-register load does not recognise interrupts. By the errata
- * that inhibition is wider than intended -- it applies to every MOV and
- * POP to a segment register, not to SS alone.
+ * load of SS does not recognise interrupts.
  *
  * What is deferred is interrupt recognition, not the write. The segment
  * register holds its new value as soon as the instruction that wrote it
@@ -131,15 +129,22 @@
  * vm86_set_seg() does, is the correct implementation and not a
  * deviation from one.
  *
- * The interrupt shadow itself is left undone rather than modelled.
- * Nothing in this layer delivers an interrupt: ops.h says a fault is
- * reported and not delivered, and the only way into a handler is a guest
- * executing INT n, which is a synchronous instruction rather than a
- * recognition event. A field in struct vm86_cpu that no instruction
- * reads would be unverifiable state -- and the person writing its
- * consumer in M4 would find out only then that its semantics had been
- * guessed. It is M4's to add, along with the interrupt delivery it
- * belongs to.
+ * One instruction of grace, and only after SS. For the record, since the
+ * repository holds no 8086 manual: this is the documented behaviour of
+ * the part, and there is a further wrinkle on top of it. The inhibition
+ * Intel added is wider than the problem it fixes -- on the original 8086
+ * it applies after any MOV or POP to a segment register, not only SS.
+ * That wider reading is deliberately not implemented. struct vm86_cpu
+ * specifies the shadow as "STI or a load of SS", and everything that
+ * depends on any of this depends on the SS case, which is the one that
+ * keeps a stack switch atomic. Recorded here rather than left silent
+ * because a reader who knows the erratum would otherwise read the code
+ * as a mistake.
+ *
+ * The shadow is a count in cpu->intr_shadow: set here, decremented at
+ * each instruction boundary by the run loop, and written by nothing
+ * else. POP SS carries the same assignment, in ops_alu.c -- the segment
+ * pop encodings live in the arithmetic block, not here.
  */
 #include <vm86/ops.h>
 
@@ -383,9 +388,7 @@ static enum vm86_result op_xchg_ax(struct vm86_cpu *cpu, uint8_t opcode)
  * model does not allow: CS changes only through a far transfer, which is
  * the one place where the new value and the new IP arrive together. What
  * the part does with the encoding anyway is in the note at the top of
- * this file, and so is what it does about interrupts after a segment
- * register load -- which is nothing this layer can show, because nothing
- * here delivers an interrupt.
+ * this file.
  */
 static enum vm86_result op_mov_sreg(struct vm86_cpu *cpu, uint8_t opcode)
 {
@@ -410,6 +413,20 @@ static enum vm86_result op_mov_sreg(struct vm86_cpu *cpu, uint8_t opcode)
     uint16_t value = vm86_operand_read(cpu, &mr.operand);
 
     vm86_set_seg(cpu, (enum vm86_seg)mr.reg, value);
+
+    /*
+     * 8E /2 is MOV SS, and the instruction after it does not recognise
+     * interrupts -- which is the whole reason `mov ss, ax` / `mov sp, ...`
+     * is written without a CLI around it. See the note at the top of this
+     * file for what is deferred and what is not.
+     *
+     * The shadow is set here rather than inside vm86_set_seg() because a
+     * segment write is not the same event as a guest loading SS: the far
+     * transfers and the interrupt frame restore CS through the same
+     * helper, and neither of those is followed by a grace instruction.
+     */
+    if (mr.reg == VM86_SS)
+        cpu->intr_shadow = 1;
 
     return VM86_CONTINUE;
 }
