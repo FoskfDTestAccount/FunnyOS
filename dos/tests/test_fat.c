@@ -79,7 +79,7 @@ static void exhaustion_corruption(struct vm86_cpu *cpu)
 }
 static void search_subdir(struct vm86_cpu *cpu)
 {
-    (void)cpu; init(); uint8_t pattern[11]; uint32_t i=0,off; uint16_t dir,h;
+    (void)cpu; init(); uint8_t pattern[11]; uint32_t i=0,off,dir; uint16_t h;
     eq("wildcard",fat_parent(&v,"F:\\*.TXT",&dir,pattern,true),0);
     eq("find",fat_find(&v,dir,&i,pattern,0,&off),0); eq("directory entry",off,1536);
     eq("no more",fat_find(&v,dir,&i,pattern,0,&off),18);
@@ -123,8 +123,38 @@ static void fragmented(struct vm86_cpu *cpu)
     fixture12(image,5,2);
     eq("cycle introduced after open is rejected",fat_read(&v,h,out,1,&n),13);
 }
+static void fat32(struct vm86_cpu *cpu)
+{
+    (void)cpu;
+    const uint32_t sectors=71201, fat_sectors=600, data_sector=1+2*fat_sectors;
+    uint8_t *p=calloc(1,(size_t)sectors*512u);
+    if(!p) { eq("FAT32 allocation",0,1); return; }
+    fixture16(p+11,512); p[13]=1; fixture16(p+14,1); p[16]=2;
+    fixture16(p+17,0); fixture16(p+19,0); fixture16(p+22,0);
+    fixture32(p+32,sectors); fixture32(p+36,fat_sectors); fixture32(p+44,2);
+    p[510]=0x55; p[511]=0xAA;
+    fixture32(p+512+2*4,0x0FFFFFF8u);
+    fixture32(p+512+3*4,0x0FFFFFFFu);
+    fixture32(p+512+fat_sectors*512+2*4,0x0FFFFFF8u);
+    fixture32(p+512+fat_sectors*512+3*4,0x0FFFFFFFu);
+    uint32_t root=data_sector*512u;
+    memcpy(p+root,"BIGVOL  TXT",11); p[root+11]=0x20;
+    fixture16(p+root+26,3); fixture32(p+root+28,14);
+    memcpy(p+(data_sector+1)*512u,"FAT32 works!\r\n",14);
+    struct fat_volume volume; uint16_t h; uint32_t n,pos; uint8_t out[32];
+    eq("mount FAT32",fat_mount(&volume,p,(uint32_t)((size_t)sectors*512u)),0);
+    eq("FAT32 type",volume.bits,32); eq("FAT32 root cluster",volume.root_cluster,2);
+    eq("FAT32 read",fat_open(&volume,"F:\\BIGVOL.TXT",0,false,0,&h),0);
+    eq("FAT32 bytes",fat_read(&volume,h,out,sizeof(out),&n),0); eq("FAT32 length",n,14);
+    eq("FAT32 content",memcmp(out,"FAT32 works!\r\n",14),0); fat_close(&volume,h);
+    eq("FAT32 create",fat_open(&volume,"NEW.TXT",2,true,0,&h),0);
+    eq("FAT32 write",fat_write(&volume,h,(const uint8_t *)"created",7,&n),0); eq("FAT32 write bytes",n,7);
+    eq("FAT32 rewind",fat_seek(&volume,h,0,0,&pos),0); eq("FAT32 reread",fat_read(&volume,h,out,7,&n),0);
+    eq("FAT32 reread bytes",memcmp(out,"created",7),0); fat_close(&volume,h);
+    free(p);
+}
 static const struct vm86_test tests[]={
     {"BPB validation",mount_bad},{"read and signed seek",read_seek},{"writes/truncate/delete",writes},
-    {"exhaustion and corrupt chains",exhaustion_corruption},{"search and subdirectories",search_subdir},{"FAT16",fat16},{"fragmented cluster chains",fragmented}
+    {"exhaustion and corrupt chains",exhaustion_corruption},{"search and subdirectories",search_subdir},{"FAT16",fat16},{"FAT32",fat32},{"fragmented cluster chains",fragmented}
 };
 VM86_TEST_MAIN("fat",tests)

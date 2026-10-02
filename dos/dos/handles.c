@@ -124,7 +124,7 @@ static int rename_file(struct vm86_cpu *cpu, struct int21_state *st)
 {
     char old_name[128], new_name[128];
     uint8_t old_short[11], new_short[11];
-    uint16_t old_dir, new_dir;
+    uint32_t old_dir, new_dir;
     uint32_t index = 0, entry = 0;
     uint32_t old_at, new_at;
     if (!st->files || !path(cpu, old_name)) return 3;
@@ -181,7 +181,7 @@ void dos_handle_call(struct vm86_cpu *cpu,struct int21_state *st)
         uint16_t save=cpu->dx;cpu->dx=cpu->si;
         if(!path(cpu,text)) e=3;
         cpu->dx=save;
-        uint8_t name[11];uint16_t dir;uint32_t index=0,entry=0;
+        uint8_t name[11];uint32_t dir;uint32_t index=0,entry=0;
         int exists=!e && st->files ? fat_parent(st->files,text,&dir,name,false) : 15;
         if(!exists) exists=fat_find(st->files,dir,&index,name,0x37,&entry);
         unsigned action=exists ? ((save>>4)&15u) : (save&15u);
@@ -196,7 +196,7 @@ void dos_handle_call(struct vm86_cpu *cpu,struct int21_state *st)
         if(!path(cpu,text)) e=3;
         else if(fn==0x41) e=st->files ? fat_unlink(st->files,text) : 15;
         else if(fn==0x43) {
-            uint8_t name[11];uint16_t dir;uint32_t index=0,entry;
+            uint8_t name[11];uint32_t dir;uint32_t index=0,entry;
             e=st->files ? fat_parent(st->files,text,&dir,name,false) : 15;
             if(!e) e=fat_find(st->files,dir,&index,name,0x37,&entry);
             if(e==18) e=2;

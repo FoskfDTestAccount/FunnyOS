@@ -54,7 +54,7 @@
  * version (30h) and the two drive calls (0Eh, 19h) that the version and
  * the drive letters make meaningful together.
  *
- * W5 adds 3Ch..42h and 4Eh/4Fh over a FAT12/FAT16 byte-array mount.
+ * W5 adds 3Ch..42h and 4Eh/4Fh over a FAT12/FAT16/FAT32 byte-array mounts.
  * W6 adds 01h/06h/07h/08h/0Ah/0Bh over the BIOS keyboard ring. Only
  * acquiring the disk resource and raw set-1 stream crosses into the host.
  * Persistent block-device writes remain outside this interface's scope. FCB I/O

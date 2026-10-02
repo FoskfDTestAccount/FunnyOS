@@ -35,7 +35,7 @@ static bool name(struct vm86_cpu *c,uint32_t a,char path[20],bool wildcard)
 }
 static int entry(struct vm86_cpu *c,struct int21_state *st,uint32_t a,uint32_t *out)
 {
-    char p[20];uint8_t nm[11];uint16_t dir;uint32_t index=0;
+    char p[20];uint8_t nm[11];uint32_t dir;uint32_t index=0;
     if(!st->files || !name(c,a,p,true)) return 15;
     int e=fat_parent(st->files,p,&dir,nm,true);if(e)return e;
     return fat_find(st->files,dir,&index,nm,0x27,out);
@@ -131,20 +131,20 @@ static void parse(struct vm86_cpu *c)
 }
 static void find(struct vm86_cpu *c,struct int21_state *st,uint32_t a,bool first)
 {
-    uint32_t d=addr(st->dta_segment,st->dta_offset),index=0,e;uint16_t dir=0;uint8_t nm[11];bool ext=r8(c,addr(c->ds,c->dx))==0xFF;
+    uint32_t d=addr(st->dta_segment,st->dta_offset),index=0,e;uint32_t dir=0;uint8_t nm[11];bool ext=r8(c,addr(c->ds,c->dx))==0xFF;
     if(!st->files || !range(c,d,ext ? 44 : 37)) { c->al=0xFF;return; }
     if(first) { char p[20];if(!name(c,a,p,true) || fat_parent(st->files,p,&dir,nm,true)) { c->al=0xFF;return; } }
     else {
         uint32_t base=ext ? d+7 : d;if(r16(c,base+24)!=0xFCBF) { c->al=0xFF;return; }
         for(unsigned i=0;i<11;i++)nm[i]=r8(c,base+1+i);
-        dir=r16(c,base+26);index=r32(c,base+28);
+        dir=r32(c,base+26);index=r32(c,base+30);
     }
     if(fat_find(st->files,dir,&index,nm,ext ? r8(c,a-1) : 0,&e)) { c->al=0xFF;return; }
     uint32_t base=ext ? d+7 : d;
     if(ext) { for(unsigned i=0;i<7;i++)w8(c,d+i,0);w8(c,d,0xFF);w8(c,d+6,st->files->image[e+11]); }
     for(unsigned i=0;i<37;i++)w8(c,base+i,0);
     w8(c,base,6);for(unsigned i=0;i<11;i++)w8(c,base+1+i,st->files->image[e+i]);
-    metadata(c,st,base,e);w16(c,base+24,0xFCBF);w16(c,base+26,dir);w32(c,base+28,index);
+    metadata(c,st,base,e);w16(c,base+24,0xFCBF);w32(c,base+26,dir);w32(c,base+30,index);
     /* Preserve the pattern for FindNext in caller FCB DOS-reserved bytes. */
     for(unsigned i=0;i<11;i++)w8(c,base+1+i,nm[i]);
     c->al=0;

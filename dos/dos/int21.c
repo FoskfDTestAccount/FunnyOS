@@ -431,7 +431,7 @@ static void console_input(struct vm86_cpu *cpu,struct int21_state *st)
 }
 static void find_file(struct vm86_cpu *cpu,struct int21_state *st,bool first)
 {
-    uint16_t seg=st->dta_segment, off=st->dta_offset, dir=0;
+    uint16_t seg=st->dta_segment, off=st->dta_offset; uint32_t dir=0;
     uint8_t pattern[11], attr; uint32_t index=0, entry; int e;
     if(!guest_range(cpu,seg,off,43)) { dos_fail(cpu,13); return; }
     if(!st->files) { dos_fail(cpu,15); return; }
@@ -443,8 +443,8 @@ static void find_file(struct vm86_cpu *cpu,struct int21_state *st,bool first)
         if(vm86_mem_read8(cpu->mem,guest_address(seg,off,0))!=0xF5) { dos_fail(cpu,18); return; }
         for(unsigned i=0;i<11;i++) pattern[i]=vm86_mem_read8(cpu->mem,guest_address(seg,off,1+i));
         attr=vm86_mem_read8(cpu->mem,guest_address(seg,off,12));
-        dir=vm86_mem_read16(cpu->mem,guest_address(seg,off,13));
-        for(unsigned i=0;i<4;i++) index|=(uint32_t)vm86_mem_read8(cpu->mem,guest_address(seg,off,15+i))<<(8*i);
+        for(unsigned i=0;i<4;i++) dir|=(uint32_t)vm86_mem_read8(cpu->mem,guest_address(seg,off,13+i))<<(8*i);
+        for(unsigned i=0;i<4;i++) index|=(uint32_t)vm86_mem_read8(cpu->mem,guest_address(seg,off,17+i))<<(8*i);
     }
     e=fat_find(st->files,dir,&index,pattern,attr,&entry);
     if(e) { status(cpu,e); return; }
@@ -452,8 +452,9 @@ static void find_file(struct vm86_cpu *cpu,struct int21_state *st,bool first)
      * so two searches using different DTAs can proceed independently. */
     uint8_t result[43]={0}; result[0]=0xF5;
     for(unsigned i=0;i<11;i++) result[1+i]=pattern[i];
-    result[12]=attr; result[13]=(uint8_t)dir; result[14]=(uint8_t)(dir>>8);
-    for(unsigned i=0;i<4;i++) result[15+i]=(uint8_t)(index>>(8*i));
+    result[12]=attr;
+    for(unsigned i=0;i<4;i++) result[13+i]=(uint8_t)(dir>>(8*i));
+    for(unsigned i=0;i<4;i++) result[17+i]=(uint8_t)(index>>(8*i));
     uint8_t *p=st->files->image+entry; result[21]=p[11];
     for(unsigned i=0;i<4;i++) { result[22+i]=p[22+i]; result[26+i]=p[28+i]; }
     unsigned n=30; for(unsigned i=0;i<8 && p[i]!=' ';i++) result[n++]=p[i];
