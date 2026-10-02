@@ -1,17 +1,10 @@
 /*
  * Processes.
  *
- * "Process" here means something smaller than it does on a general-purpose
- * system: an address space, a stack, a kernel stack to land on when it
- * faults or calls a system call, and a place to resume the kernel when it
- * exits. There is no scheduler, because there is nothing to schedule --
- * a program runs until it exits, and its system calls block the CPU while
- * they wait.
- *
- * That is not a shortcut so much as the truth about M2. The DOS programs
- * this system exists to run are single-tasking, and the emulator that will
- * run them has not been written yet. A scheduler arrives when there is
- * more than one thing to run.
+ * Legacy selftest paths run blocking parent/child chains. Normal terminal
+ * boot additionally has cooperative foreground session runners, each with
+ * its own preserved kernel context. There is no arbitrary CPU preemption:
+ * switching happens at syscall and input-wait safety points, not in ISRs.
  *
  * The isolation is real, though, and it is the point: a program runs in
  * Ring 3 under its own page tables, so a wild pointer faults in a context
@@ -141,6 +134,9 @@ struct process {
     int      exit_code;
 
     struct kernel_context resume;
+
+    unsigned terminal; /* 0: legacy console, otherwise a terminal session */
+    struct process *parent; /* active blocking spawn chain */
 
     struct open_file files[PROCESS_MAX_OPEN_FILES];
 };

@@ -56,6 +56,7 @@
 #include "../bios/bios16.h"
 #include <vm86/fat.h>
 #include <stddef.h>
+#include <libk/string.h>
 
 /* ------------------------------------------------------------------ */
 /* Saying yes and no                                                   */
@@ -88,7 +89,7 @@ static void dos_ok(struct vm86_cpu *cpu)
 
 static void output_char(struct vm86_cpu *cpu, struct int21_state *st)
 {
-    bios10_tty(cpu, st->video, cpu->dl);
+    dos_output(cpu, st, cpu->dl);
 
     /* AL is left holding the character. DOS's own documentation says this
      * function returns nothing, and every MS-DOS from 2.1 to 7.0 leaves
@@ -169,7 +170,7 @@ static void print_string(struct vm86_cpu *cpu, struct int21_state *st)
         if (vm86_mem_offset(mem, at) == VM86_MEM_UNMAPPED)
             break;
 
-        bios10_tty(cpu, st->video, ch);
+        dos_output(cpu, st, ch);
         at++;
     }
 
@@ -304,12 +305,29 @@ static void select_drive(struct vm86_cpu *cpu)
  * here to name, and a program that checks for a particular one is looking
  * for a machine this is not.
  */
-static void get_version(struct vm86_cpu *cpu)
+static void get_version(struct vm86_cpu *cpu,struct int21_state *st)
 {
-    cpu->ax = VM86_DOS_VERSION;
+    cpu->ax = st->version;
     cpu->bx = 0;
     cpu->cx = 0;
 
+    dos_ok(cpu);
+}
+
+static void exec_request(struct vm86_cpu *cpu, struct int21_state *st)
+{
+    if (!st->full_services || !st->exec_request || cpu->al > 3u) {
+        dos_fail(cpu, VM86_INT21_ERR_FUNCTION);
+        return;
+    }
+    uint16_t code = 0;
+    int e = st->exec_request(cpu, st, cpu->al, cpu->es, cpu->bx, &code);
+    if (e) {
+        st->last_error = (uint16_t)e;
+        dos_fail(cpu, (uint16_t)e);
+        return;
+    }
+    st->last_exit_code = code;
     dos_ok(cpu);
 }
 
@@ -347,6 +365,12 @@ static bool console_take(struct vm86_cpu *cpu,struct int21_state *st,uint8_t *ch
 {
     if(st->extended_pending) { *ch=st->extended_key; st->extended_pending=false; return true; }
     uint16_t word;
+    if(st->jft[0]!=0xFF && st->objects[st->jft[0]].kind==2) {
+        uint32_t done=0;
+        if(dos_handle_read(cpu,st,0,ch,1,&done)) return false;
+        if(!done) *ch=0x1A;
+        return true;
+    }
     if(!bios16_take(cpu,&word)) return false;
     *ch=(uint8_t)word;
     if(!*ch) { st->extended_key=(uint8_t)(word>>8); st->extended_pending=true; }
@@ -383,13 +407,13 @@ static void console_input(struct vm86_cpu *cpu,struct int21_state *st)
             if(ch==13) {
                 vm86_mem_write8(cpu->mem,guest_address(seg,off,2+st->line_length),13);
                 vm86_mem_write8(cpu->mem,guest_address(seg,off,1),st->line_length);
-                bios10_tty(cpu,st->video,13); st->line_active=false; dos_ok(cpu); return;
+                dos_output(cpu,st,13); st->line_active=false; dos_ok(cpu); return;
             }
             if(ch==8) {
-                if(st->line_length) { st->line_length--; bios10_tty(cpu,st->video,8); bios10_tty(cpu,st->video,' '); bios10_tty(cpu,st->video,8); }
+                if(st->line_length) { st->line_length--; dos_output(cpu,st,8); dos_output(cpu,st,' '); dos_output(cpu,st,8); }
             } else if(st->line_length<max-1u) {
                 vm86_mem_write8(cpu->mem,guest_address(seg,off,2+st->line_length++),ch);
-                bios10_tty(cpu,st->video,ch);
+                dos_output(cpu,st,ch);
             }
         }
         vm86_service_retry(cpu); return;
@@ -401,40 +425,9 @@ static void console_input(struct vm86_cpu *cpu,struct int21_state *st)
     }
     cpu->al=ch;
     if(ch==3 && (fn==0x01 || fn==0x08)) { console_break(cpu,st); return; }
-    if(fn==0x01) bios10_tty(cpu,st->video,ch);
+    if(fn==0x01) dos_output(cpu,st,ch);
     if(fn==0x06) vm86_flag_set(cpu,VM86_ZF,false);
     dos_ok(cpu);
-}
-static void file_transfer(struct vm86_cpu *cpu,struct int21_state *st,bool writing)
-{
-    unsigned count=cpu->cx, total=0; uint8_t buf[512]; int error=0;
-    if(!guest_range(cpu,cpu->ds,cpu->dx,count)) { dos_fail(cpu,13); return; }
-    if(writing && (cpu->bx==1 || cpu->bx==2)) {
-        for(unsigned i=0;i<count;i++) bios10_tty(cpu,st->video,vm86_mem_read8(cpu->mem,guest_address(cpu->ds,cpu->dx,i)));
-        cpu->ax=(uint16_t)count; dos_ok(cpu); return;
-    }
-    if(!writing && cpu->bx==0) {
-        uint8_t ch;
-        if(!count) { cpu->ax=0; dos_ok(cpu); return; }
-        if(!console_take(cpu,st,&ch)) { vm86_service_retry(cpu); return; }
-        vm86_mem_write8(cpu->mem,guest_address(cpu->ds,cpu->dx,0),ch);
-        cpu->ax=1; dos_ok(cpu); return;
-    }
-    if(!st->files) { dos_fail(cpu,6); return; }
-    do {
-        uint32_t n=count-total, done=0; if(n>sizeof(buf)) n=sizeof(buf);
-        if(writing) {
-            for(unsigned i=0;i<n;i++) buf[i]=vm86_mem_read8(cpu->mem,guest_address(cpu->ds,cpu->dx,total+i));
-            error=fat_write(st->files,cpu->bx,buf,n,&done);
-        } else {
-            error=fat_read(st->files,cpu->bx,buf,n,&done);
-            if(!error) for(unsigned i=0;i<done;i++) vm86_mem_write8(cpu->mem,guest_address(cpu->ds,cpu->dx,total+i),buf[i]);
-        }
-        total+=done;
-        if(error || done<n) break;
-    } while(total<count);
-    if(error && !total) dos_fail(cpu,(uint16_t)error);
-    else { cpu->ax=(uint16_t)total; dos_ok(cpu); }
 }
 static void find_file(struct vm86_cpu *cpu,struct int21_state *st,bool first)
 {
@@ -468,39 +461,48 @@ static void find_file(struct vm86_cpu *cpu,struct int21_state *st,bool first)
     for(unsigned i=0;i<43;i++) vm86_mem_write8(cpu->mem,guest_address(seg,off,i),result[i]);
     dos_ok(cpu);
 }
-static void file_call(struct vm86_cpu *cpu,struct int21_state *st)
-{
-    uint8_t fn=cpu->ah; int e=0; char path[128]; uint16_t handle; uint32_t pos;
-    if(fn==0x3F || fn==0x40) { file_transfer(cpu,st,fn==0x40); return; }
-    if(fn==0x4E || fn==0x4F) { find_file(cpu,st,fn==0x4E); return; }
-    if(!st->files) { dos_fail(cpu,15); return; }
-    if(fn==0x3C || fn==0x3D || fn==0x41) {
-        if(!guest_path(cpu,path)) { dos_fail(cpu,3); return; }
-        if(fn==0x41) e=fat_unlink(st->files,path);
-        else {
-            uint8_t mode=fn==0x3C ? 2 : (uint8_t)(cpu->al&7);
-            e=(fn==0x3D && (cpu->al&0x78)) ? 12 : fat_open(st->files,path,mode,fn==0x3C,cpu->cx,&handle);
-            if(!e) cpu->ax=handle;
-        }
-    } else if(fn==0x3E) e=fat_close(st->files,cpu->bx);
-    else if(fn==0x42) {
-        int32_t delta=(int32_t)(((uint32_t)cpu->cx<<16)|cpu->dx);
-        e=fat_seek(st->files,cpu->bx,cpu->al,delta,&pos);
-        if(!e) { cpu->ax=(uint16_t)pos; cpu->dx=(uint16_t)(pos>>16); }
-    }
-    status(cpu,e);
-}
-
 void int21_service(struct vm86_cpu *cpu, void *ctx)
 {
     struct int21_state *st = ctx;
 
+    dos_handles_sync(cpu,st);
     switch (cpu->ah) {
+    case 0x0C: {
+        uint8_t fn=st->flush_active ? st->flush_function : cpu->al;
+        if(!st->flush_active) {
+            uint16_t ignored;while(bios16_take(cpu,&ignored)) { }
+            st->extended_pending=false;st->line_active=false;
+            st->flush_active=true;st->flush_function=fn;
+        }
+        if(fn==1 || fn==6 || fn==7 || fn==8 || fn==10) {
+            cpu->ah=fn;console_input(cpu,st);
+            /* A retry must retain 0Ch's requested input function. */
+            if(cpu->ip==cpu->insn_ip) cpu->ax=(uint16_t)(0x0C00u|fn);
+            else st->flush_active=false;
+        } else { st->flush_active=false;dos_ok(cpu); }
+        return;
+    }
     case 0x01: case 0x06: case 0x07: case 0x08: case 0x0A: case 0x0B:
         console_input(cpu, st); return;
+    case 0x4B:
+        exec_request(cpu, st); return;
     case 0x3C: case 0x3D: case 0x3E: case 0x3F: case 0x40:
-    case 0x41: case 0x42: case 0x4E: case 0x4F:
-        file_call(cpu, st); return;
+    case 0x41: case 0x42: case 0x43: case 0x44: case 0x45: case 0x46:
+    case 0x56: case 0x57: case 0x6C:
+        dos_handle_call(cpu,st);return;
+    case 0x0F: case 0x10: case 0x11: case 0x12: case 0x13: case 0x14:
+    case 0x15: case 0x16: case 0x17: case 0x21: case 0x22: case 0x23:
+    case 0x24: case 0x27: case 0x28: case 0x29:
+        dos_fcb_call(cpu,st);return;
+    case 0x48: case 0x49: case 0x4A:
+        dos_memory_call(cpu,st);return;
+    case 0x26: case 0x2A: case 0x2B: case 0x2C: case 0x2D: case 0x31:
+    case 0x33: case 0x34: case 0x36: case 0x37: case 0x38: case 0x47:
+    case 0x4D: case 0x50: case 0x51: case 0x52: case 0x55: case 0x58:
+    case 0x59: case 0x60: case 0x62: case 0x63: case 0x65:
+        dos_misc_call(cpu,st);return;
+    case 0x4E: case 0x4F:
+        find_file(cpu,st,cpu->ah==0x4E);return;
     case VM86_INT21_TERMINATE:
         /* AH=00h, the old exit. It carries no return code, and DOS 2 and
          * later treat it as AH=4Ch with AL=0 -- which is what a bare RET
@@ -547,7 +549,7 @@ void int21_service(struct vm86_cpu *cpu, void *ctx)
         return;
 
     case VM86_INT21_GET_VERSION:
-        get_version(cpu);
+        get_version(cpu,st);
         return;
 
     case VM86_INT21_GET_VECTOR:
@@ -555,6 +557,7 @@ void int21_service(struct vm86_cpu *cpu, void *ctx)
         return;
 
     case VM86_INT21_TERMINATE_CODE:
+        st->last_exit_code = cpu->al;
         /* AL is the return code and it goes to the host. Nothing is
          * restored and nothing is freed -- see docs/dos-refs-dos.md
          * section 9 for what real DOS does here and why this machine does
@@ -599,6 +602,12 @@ void int21_reset(struct int21_state *st, struct bios10_state *video,
                  uint16_t psp_segment)
 {
     st->video = video;
+    st->psp=psp_segment;st->version=VM86_DOS_VERSION;st->arena_first=st->arena_top=0;
+    st->full_services=false;st->flush_active=false;st->flush_function=0;
+    st->last_exit_code=0;st->resident_paragraphs=0;st->terminated_resident=false;st->exec_request=NULL;
+    st->last_error=0;st->break_check=false;st->switch_char='/';
+    dos_handles_reset(st);
+    memset(st->fcb,0,sizeof(st->fcb));st->fcb_next=1;
     st->files = NULL;
     st->extended_key = 0;
     st->extended_pending = false;

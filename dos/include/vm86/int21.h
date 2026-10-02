@@ -57,8 +57,9 @@
  * W5 adds 3Ch..42h and 4Eh/4Fh over a FAT12/FAT16 byte-array mount.
  * W6 adds 01h/06h/07h/08h/0Ah/0Bh over the BIOS keyboard ring. Only
  * acquiring the disk resource and raw set-1 stream crosses into the host.
- * Persistent block-device writes, file sharing, FCB I/O and EXEC remain
- * outside this interface's implemented scope.
+ * Persistent block-device writes remain outside this interface's scope. FCB I/O
+ * and EXEC are exposed through the full-services runtime; EXEC uses the
+ * re-entrant VM callback installed by user/vm.
  *
 
  * docs/dos-refs-dos.md section 9 is the reference: every function number
@@ -176,12 +177,40 @@
  * and wrong about the answer.
  */
 struct fat_volume;
+struct int21_state;
+typedef int (*vm86_dos_exec_fn)(struct vm86_cpu *cpu,
+                                struct int21_state *state,
+                                uint8_t mode,
+                                uint16_t parameter_segment,
+                                uint16_t parameter_offset,
+                                uint16_t *return_code);
+#define DOS_JFT_MAX 20u
+#define DOS_SFT_MAX 32u
+struct dos_open_object {
+    uint16_t refs, handle;
+    uint8_t kind, mode;
+};
 
 struct int21_state {
     /* Where 02h and 09h write. The same video state the INT 10h service
      * uses: there is one screen and one cursor on this machine, and two
      * cursors that could disagree is the failure this sharing prevents. */
     struct bios10_state *video;
+    uint16_t psp, version, arena_first, arena_top;
+    uint16_t last_exit_code, resident_paragraphs;
+    bool terminated_resident;
+    bool full_services, flush_active;
+    /* Non-NULL while a synchronous EXEC child borrows the parent SFT. */
+    struct int21_state *handle_parent;
+    vm86_dos_exec_fn exec_request;
+    uint8_t flush_function;
+    uint8_t jft[DOS_JFT_MAX];
+    struct dos_open_object objects[DOS_SFT_MAX];
+    uint16_t last_error;
+    bool break_check;
+    uint8_t switch_char;
+    uint16_t fcb_next;
+    struct { bool used;uint16_t token,fd; } fcb[20];
 
     uint16_t dta_segment;
     uint16_t dta_offset;
@@ -204,6 +233,33 @@ struct int21_state {
  * impossible on a real machine, and possible here because a host test can
  * build a machine and not load anything into it -- deserves to be told.
  */
+/* DOS file descriptors refer to shared open objects. Copies share offsets;
+ * devices and redirected standards are ordinary entries in the same table. */
+void dos_runtime_init(struct vm86_cpu *cpu,struct int21_state *st);
+void dos_memory_call(struct vm86_cpu *cpu,struct int21_state *st);
+int dos_memory_alloc(struct vm86_cpu *cpu,struct int21_state *st,uint16_t paragraphs,uint16_t owner,uint16_t *segment,uint16_t *largest);
+int dos_memory_free(struct vm86_cpu *cpu,struct int21_state *st,uint16_t segment);
+int dos_memory_resize(struct vm86_cpu *cpu,struct int21_state *st,uint16_t segment,uint16_t paragraphs,uint16_t *largest);
+/* Return the owned MCB size (excluding its MCB paragraph). */
+int dos_memory_block_size(struct vm86_cpu *cpu,struct int21_state *st,
+                          uint16_t segment,uint16_t *paragraphs);
+void dos_fcb_call(struct vm86_cpu *cpu,struct int21_state *st);
+void dos_misc_call(struct vm86_cpu *cpu,struct int21_state *st);
+void dos_handles_reset(struct int21_state *st);
+void dos_handles_sync(struct vm86_cpu *cpu, struct int21_state *st);
+void dos_handles_close_all(struct int21_state *st);
+int dos_handle_open(struct int21_state *st,const char *path,uint8_t mode,
+                    bool create,uint16_t attr,uint16_t *fd);
+int dos_handle_close(struct int21_state *st,uint16_t fd);
+int dos_handle_dup(struct int21_state *st,uint16_t fd,int target,uint16_t *out);
+int dos_handle_read(struct vm86_cpu *cpu,struct int21_state *st,uint16_t fd,
+                    uint8_t *buf,uint32_t count,uint32_t *done);
+int dos_handle_write(struct vm86_cpu *cpu,struct int21_state *st,uint16_t fd,
+                     const uint8_t *buf,uint32_t count,uint32_t *done);
+void dos_handle_call(struct vm86_cpu *cpu,struct int21_state *st);
+void dos_output(struct vm86_cpu *cpu,struct int21_state *st,uint8_t ch);
+int dos_redirect(struct vm86_cpu *cpu,struct int21_state *st,const char *tail,
+                 char *clean,unsigned capacity);
 void int21_reset(struct int21_state *st, struct bios10_state *video,
                  uint16_t psp_segment);
 

@@ -120,7 +120,7 @@ def read_font(path):
     text = open(path, encoding='utf-8', errors='replace').read()
     glyphs = {}
 
-    for match in re.finditer(r"/\*\s*(\d+)\s+'(.*?)'\s*\*/\s*\{([^}]*)\}",
+    for match in re.finditer(r"/\*\s*(\d+)\s+([\s\S]*?)\s*\*/\s*\{([^}]*)\}",
                              text):
         code = int(match.group(1))
         glyphs[code] = [int(v, 16)
@@ -208,11 +208,14 @@ def main():
     y0 = row0 * cell_h
     y1 = (row0 + rows) * cell_h
 
-    console_bg = pixels[0:3]
+    tab_rows = 1 if re.search(r'Tabs\s+: pages [2-9], top rows 1', log) else 0
+    # The reserved strip is verified separately by the desktop suite. Every
+    # other pixel outside the guest page retains the old strict assertion.
+    console_bg = pixels[tab_rows * cell_h * stride:tab_rows * cell_h * stride + 3]
     blank_row = console_bg * fb_w
 
     outside = 0
-    for y in range(fb_h):
+    for y in range(tab_rows * cell_h, fb_h):
         row = pixels[y * stride:(y + 1) * stride]
 
         if y < y0 or y >= y1:

@@ -106,4 +106,10 @@ void screen_release_if_held_by(const struct process *who);
  * the panic path, where the alternative is a message nobody can read. */
 void screen_take_back(void);
 
+struct mouse_event;
+/* Called at safe syscall/poll boundaries, never from a hardware ISR. */
+void screen_poll_input(void);
+void screen_request_tab(unsigned ordinal);
+bool screen_keyboard_focus(const struct process *who);
+bool screen_mouse_poll(const struct process *who,struct mouse_event *out);
 #endif /* FUNNYOS_SCREEN_H */

@@ -95,4 +95,14 @@ void fb_fill_screen(void);
 void fb_draw_page(uint64_t col, uint64_t row, uint64_t columns,
                   uint64_t rows, const uint8_t *cells, uint16_t cursor);
 
+/* Geometry and write-only compositor primitives. Rectangles restore from
+ * authoritative RAM, never by sampling WC framebuffer pixels. */
+void fb_set_overlay(void (*overlay)(void));
+void fb_set_top(unsigned rows);
+bool fb_geometry(uint64_t *width,uint64_t *height,unsigned *cell_w,unsigned *cell_h);
+void fb_background_rect(uint64_t x,uint64_t y,uint64_t w,uint64_t h);
+void fb_console_rect(uint64_t x,uint64_t y,uint64_t w,uint64_t h);
+void fb_page_rect(uint64_t col,uint64_t row,unsigned columns,const uint8_t *cells,
+                  uint16_t cursor,uint64_t x,uint64_t y,uint64_t w,uint64_t h);
+void fb_pointer(unsigned x,unsigned y);
 #endif /* FUNNYOS_FB_H */

@@ -71,7 +71,10 @@
 #define SYS_KBD_POLL    14 /* -> byte 0..255, -1 when empty, -10 overflow */
 #define SYS_KBD_RELEASE 15 /* give keyboard back, drop pending raw bytes */
 #define SYS_POLLKEY     16 /* translated key, 0 when empty; never blocks */
-#define SYS_COUNT       17
+#define SYS_MOUSE_POLL  17 /* (struct syscall_mouse_event *) -> 1 event, 0 empty */
+#define SYS_TERMINAL    18 /* 0 new, 1 close, 2 count, 3 id, 4 pages, 5 cancel, 6 heap, 7 bad-stack ticks, 8 Ring3 ticks */
+#define SYS_COUNT       19
+struct syscall_mouse_event { int16_t dx,dy; uint8_t buttons; };
 
 /* File descriptors 0, 1 and 2 are the console, so that a program can be
  * written without opening anything. Ramfs file descriptors start above

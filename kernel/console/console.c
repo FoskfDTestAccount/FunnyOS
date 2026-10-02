@@ -1,6 +1,14 @@
 #include <funnyos/console.h>
 #include <funnyos/kbd.h>
 #include <funnyos/kprintf.h>
+#include <funnyos/terminal.h>
+#include <funnyos/process.h>
+
+static void echo(const char *text,size_t size)
+{
+    if(terminal_enabled()) terminal_write(process_current(),text,size);
+    else for(size_t i=0;i<size;i++) kprintf("%c",text[i]);
+}
 
 void console_prompt(const char *text)
 {
@@ -30,7 +38,7 @@ size_t console_read_line(char *buf, size_t size)
 
         case KEY_ENTER:
             buf[length] = '\0';
-            kprintf("\n");
+            echo("\n",1);
             return length;
 
         case KEY_BACKSPACE:
@@ -40,7 +48,7 @@ size_t console_read_line(char *buf, size_t size)
             length--;
             /* Move back, overwrite with a space, move back again. A bare
              * "\b" would leave the old character on screen. */
-            kprintf("\b \b");
+            echo("\b \b",3);
             break;
 
         /* Arrows and the rest are meaningless without a line editor, and
@@ -49,7 +57,7 @@ size_t console_read_line(char *buf, size_t size)
         default:
             if (key < 0x100 && length + 1 < size) {
                 buf[length++] = (char)key;
-                kprintf("%c", (char)key);
+                char c=(char)key;echo(&c,1);
             }
             break;
         }

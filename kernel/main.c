@@ -21,6 +21,8 @@
 #include <funnyos/fb.h>
 #include <funnyos/init_image.h>
 #include <funnyos/kbd.h>
+#include <funnyos/mouse.h>
+#include <funnyos/terminal.h>
 #include <funnyos/kprintf.h>
 #include <funnyos/panic.h>
 #include <funnyos/process.h>
@@ -432,6 +434,7 @@ void kmain(void)
      * one. Both are in place by here.
      */
     bool kbd_ok = kbd_init();
+    bool mouse_ok = mouse_init();
 
     /* Both need the interrupt registry, and process_init installs the
      * hook that lets a system call end a process. */
@@ -523,6 +526,9 @@ void kmain(void)
     kprintf("  Keyboard       : %s\n",
             kbd_ok ? "PS/2, IRQ 1 routed through the IO APIC"
                    : "NOT AVAILABLE");
+
+    kprintf("  Mouse          : %s\n", mouse_ok ? "PS/2, IRQ 12 routed through the IO APIC" :
+            (kbd_ok ? "unavailable (keyboard retained)" : "NOT AVAILABLE"));
 
     kprintf("\n[self-test]\n");
     bool mem_ok = run_memory_selftest();
@@ -635,7 +641,9 @@ void kmain(void)
          * which is the thing M3 exists to deliver.
          */
         uint64_t arg = 0;
-        if (strstr(cmdline, "selftest=userfault"))
+        if (strstr(cmdline, "selftest=desktop"))
+            arg = 12;
+        else if (strstr(cmdline, "selftest=userfault"))
             arg = 1;
         else if (strstr(cmdline, "selftest=userexit"))
             arg = 2;
@@ -661,6 +669,7 @@ void kmain(void)
                 (unsigned long long)PROCESS_STACK_TOP);
         kprintf("  Startup arg    : %llu\n", (unsigned long long)arg);
 
+        if(arg==0 && fb_ok && kbd_ok) terminal_sessions_run(program);
         int code = process_run(program, arg);
 
         if (code >= PROCESS_EXIT_FAULT_BASE) {

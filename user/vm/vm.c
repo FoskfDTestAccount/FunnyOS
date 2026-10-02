@@ -74,10 +74,12 @@
 #include <vm/corpus.h>
 
 #include <libu/libu.h>
+#include <libk/string.h>
 
 #include <vm86/cpu.h>
 #include <vm86/display.h>
 #include <vm86/dos.h>
+#include <vm86/exe.h>
 #include <vm86/firmware.h>
 #include <vm86/host.h>
 #include <vm86/int21.h>
@@ -489,7 +491,7 @@ struct vm_screen {
 static struct bios10_state g_video;
 static struct bios16_state g_keyboard;
 static struct fat_volume g_files;
-static bool g_mounted, g_raw_active;
+static bool g_mounted, g_raw_active, g_full_services;
 static unsigned g_resource_hold;
 static uint8_t g_disk[720u*512u] __attribute__((section(".guestram"), aligned(4096)));
 static uint8_t g_com[65280] __attribute__((section(".guestram"), aligned(4096)));
@@ -644,6 +646,70 @@ static void present(const struct vm86_cpu *cpu)
  * firmware wrote is not the same thing. The mode, the cursor and the page
  * are these structs' until a service changes them.
  */
+#ifdef VM_DOS_TRACE
+/* Bounded, read-only service observation for real-application investigations.
+ * This is NOT an implementation of a missing call. In particular, never fix
+ * AX/CF here to let a guest progress. Serial I/O affects the wall-time budget,
+ * so the probe also runs an uninstrumented build to confirm the stop reason.
+ */
+static unsigned g_dos_trace_count;
+static unsigned g_dos_trace_calls[256];
+
+static void dos_trace_service(struct vm86_cpu *cpu, void *ctx)
+{
+    unsigned ah = cpu->ah;
+    unsigned index = ++g_dos_trace_count;
+    g_dos_trace_calls[ah]++;
+    bool log = index <= 16u;
+    if (log) {
+        uint32_t stack = ((uint32_t)cpu->ss << 4);
+        uint16_t ret_ip = vm86_mem_read16(cpu->mem, stack + cpu->sp);
+        uint16_t ret_cs = vm86_mem_read16(cpu->mem,
+                                        stack + (uint16_t)(cpu->sp + 2u));
+        uint16_t frame_flags = vm86_mem_read16(cpu->mem,
+                                        stack + (uint16_t)(cpu->sp + 4u));
+        uprintf("[DOS-TRACE] #%u AH=%02x caller=%04x:%04x "
+                "ax=%04x bx=%04x cx=%04x dx=%04x bp=%04x "
+                "ds=%04x es=%04x ss=%04x sp=%04x frame-flags=%04x\n",
+                index, ah, (unsigned)ret_cs, (unsigned)ret_ip,
+                (unsigned)cpu->ax, (unsigned)cpu->bx, (unsigned)cpu->cx,
+                (unsigned)cpu->dx, (unsigned)cpu->bp, (unsigned)cpu->ds,
+                (unsigned)cpu->es, (unsigned)cpu->ss, (unsigned)cpu->sp,
+                (unsigned)frame_flags);
+        if (ah == 0x3fu) {
+            uint32_t buffer = ((uint32_t)cpu->ds << 4) + cpu->dx;
+            uprintf("[DOS-TRACE] buffer-before %02x %02x %02x %02x %02x %02x\n",
+                    (unsigned)vm86_mem_read8(cpu->mem, buffer),
+                    (unsigned)vm86_mem_read8(cpu->mem, buffer + 1u),
+                    (unsigned)vm86_mem_read8(cpu->mem, buffer + 2u),
+                    (unsigned)vm86_mem_read8(cpu->mem, buffer + 3u),
+                    (unsigned)vm86_mem_read8(cpu->mem, buffer + 4u),
+                    (unsigned)vm86_mem_read8(cpu->mem, buffer + 5u));
+        }
+    }
+    int21_service(cpu, ctx);
+    if (log)
+        uprintf("[DOS-TRACE] #%u after ax=%04x bx=%04x cx=%04x dx=%04x "
+                "bp=%04x service-flags=%04x cf=%u\n", index,
+                (unsigned)cpu->ax, (unsigned)cpu->bx, (unsigned)cpu->cx,
+                (unsigned)cpu->dx, (unsigned)cpu->bp, (unsigned)cpu->flags,
+                (cpu->flags & VM86_CF) ? 1u : 0u);
+}
+
+static void dos_trace_summary(void)
+{
+    uprintf("[DOS-TRACE] final cs=%04x ip=%04x ss=%04x sp=%04x "
+            "flags=%04x depth=%u calls=%u\n", (unsigned)g_cpu.cs,
+            (unsigned)g_cpu.ip, (unsigned)g_cpu.ss, (unsigned)g_cpu.sp,
+            (unsigned)g_cpu.flags, (unsigned)g_cpu.intr_depth,
+            g_dos_trace_count);
+    for (unsigned i = 0; i < 256u; i++)
+        if (g_dos_trace_calls[i])
+            uprintf("[DOS-TRACE] total AH=%02x count=%u\n", i,
+                    g_dos_trace_calls[i]);
+}
+#endif
+
 static void power_on(struct vm86_mem *mem, struct vm86_cpu *cpu)
 {
     vm86_mem_attach(mem, g_guest_ram, (uint32_t)GUEST_RAM_BYTES);
@@ -691,7 +757,13 @@ static void power_on(struct vm86_mem *mem, struct vm86_cpu *cpu)
     vm86_register_service(VM86_INT_TIMER,         bios1a_irq,     &g_clock);
     vm86_register_service(VM86_INT_DISK,          bios13_service, NULL);
     vm86_register_service(VM86_INT_CTRL_BREAK, int21_break_service, NULL);
+#ifdef VM_DOS_TRACE
+    g_dos_trace_count = 0;
+    for (unsigned i = 0; i < 256u; i++) g_dos_trace_calls[i] = 0;
+    vm86_register_service(VM86_INT_DOS, dos_trace_service, &g_dos21);
+#else
     vm86_register_service(VM86_INT_DOS,           int21_service, &g_dos21);
+#endif
     vm86_register_service(VM86_INT_TERMINATE,     int21_terminate_service,
                           NULL);
 }
@@ -766,10 +838,207 @@ static const char *const g_dos_environment[] = {
  * stack, and the interrupt flag being set. See dos/include/vm86/dos.h for
  * why that last one is not a detail.
  */
+static bool load_com(const char *name, unsigned *size);
+
+static bool exec_guest_string(struct vm86_cpu *cpu, uint16_t seg,
+                               uint16_t off, char out[128])
+{
+    for (unsigned i = 0; i < 128u; ++i) {
+        uint32_t at = ((uint32_t)seg << 4) + (uint16_t)(off + i);
+        if (vm86_mem_offset(cpu->mem, at) == VM86_MEM_UNMAPPED)
+            return false;
+        out[i] = (char)vm86_mem_read8(cpu->mem, at);
+        if (!out[i])
+            return true;
+    }
+    return false;
+}
+
+static void exec_guest_tail(struct vm86_cpu *cpu, uint16_t psp,
+                            char out[128])
+{
+    uint32_t base = (uint32_t)psp << 4;
+    unsigned length = vm86_mem_read8(cpu->mem, base + VM86_PSP_TAIL_LENGTH);
+    if (length > 126u)
+        length = 126u;
+    for (unsigned i = 0; i < length; ++i)
+        out[i] = (char)vm86_mem_read8(cpu->mem,
+                                      base + VM86_PSP_TAIL + i);
+    out[length] = 0;
+}
+
+/*
+ * AH=4Bh is synchronous in DOS: the caller does not resume until the
+ * child has ended.  The VM already has a re-entrant instruction runner, so
+ * execute the child on the same guest memory while saving the parent's CPU
+ * and DOS state.  The child gets its own MCB/PSP and inherited handle table;
+ * normal termination frees that block before the parent resumes.  TSR is
+ * deliberately different: AH=31h leaves the child block in the arena.
+ */
+static int vm_exec_request(struct vm86_cpu *cpu, struct int21_state *st,
+                           uint8_t mode, uint16_t parameter_segment,
+                           uint16_t parameter_offset, uint16_t *return_code)
+{
+    /* Mode 0 is the only mode that executes a child.  The parameter block is
+     * an ABI pointer even though this small launcher currently inherits the
+     * parent's command tail and environment.  Reject an invalid pointer
+     * rather than silently treating arbitrary ES:BX as a valid block. */
+    if (mode != 0u || !st->files)
+        return VM86_INT21_ERR_FUNCTION;
+    uint32_t parameter = ((uint32_t)parameter_segment << 4) + parameter_offset;
+    if (vm86_mem_offset(cpu->mem, parameter) == VM86_MEM_UNMAPPED ||
+        vm86_mem_offset(cpu->mem, parameter + 15u) == VM86_MEM_UNMAPPED)
+        return VM86_INT21_ERR_ACCESS;
+
+    char path[128], tail[128];
+    if (!exec_guest_string(cpu, cpu->ds, cpu->dx, path))
+        return VM86_INT21_ERR_PATH;
+    unsigned image_size = 0;
+    if (!load_com(path, &image_size))
+        return VM86_INT21_ERR_NOT_FOUND;
+    exec_guest_tail(cpu, st->psp, tail);
+
+    struct vm86_cpu parent_cpu = *cpu;
+    struct int21_state parent_state = *st;
+    uint16_t parent = st->psp;
+    uint16_t parent_block = 0;
+    int e = dos_memory_block_size(cpu, st, parent, &parent_block);
+    if (e)
+        return e;
+
+    /* Prefer an already-free block.  This is what makes nested EXEC work:
+     * the child must not be forced to resize itself merely because its PSP
+     * memory-top is smaller than the arena's top. */
+    uint16_t largest = 0, child_segment = 0;
+    bool parent_shrunk = false;
+    uint16_t child_paras = 0x1000u;
+    e = dos_memory_alloc(cpu, st, child_paras, parent, &child_segment,
+                         &largest);
+    if (e) {
+        /* The initial process owns the whole arena.  Release only the tail
+         * needed for this child; use the actual MCB size, not PSP:0002,
+         * which may describe a stale or deliberately reserved range. */
+        uint16_t keep = parent_block;
+        if (keep <= (uint16_t)(child_paras + 1u))
+            return e;
+        keep = (uint16_t)(keep - child_paras - 1u);
+        if (keep < 0x1000u)
+            keep = 0x1000u;
+        e = dos_memory_resize(cpu, st, parent, keep, &largest);
+        if (e)
+            return e;
+        parent_shrunk = true;
+        e = dos_memory_alloc(cpu, st, child_paras, parent, &child_segment,
+                             &largest);
+        if (e) {
+            (void)dos_memory_resize(cpu, st, parent, parent_block, &largest);
+            return e;
+        }
+    }
+
+    /* The child MCB is no longer owned by the parent after allocation. */
+    vm86_mem_write16(cpu->mem, ((uint32_t)(child_segment - 1u) << 4) + 1u,
+                     child_segment);
+
+    struct vm86_dos_start start = {
+        .segment = child_segment,
+        .environment = 0x0E00u,
+        .parent = parent,
+        .path = path,
+        .tail = tail,
+        .vars = g_dos_environment,
+        .var_count = (uint32_t)GUEST_ENVIRONMENT_COUNT,
+    };
+    struct vm86_dos_psp child_psp;
+    struct vm86_exe_image exe;
+    bool is_exe = image_size >= 2u && g_com[0] == 'M' && g_com[1] == 'Z';
+    bool loaded;
+    if (is_exe)
+        loaded = vm86_exe_load(cpu, g_com, image_size, &start,
+                               &child_psp, &exe) == VM86_EXE_LOADED;
+    else
+        loaded = vm86_dos_load(cpu, g_com, image_size, &start,
+                               &child_psp) == VM86_DOS_LOADED;
+    if (!loaded) {
+        (void)dos_memory_free(cpu, st, child_segment);
+        if (parent_shrunk)
+            (void)dos_memory_resize(cpu, st, parent, parent_block, &largest);
+        return VM86_INT21_ERR_ACCESS;
+    }
+
+    /* The generic DOS loader has no arena parameter and therefore defaults
+     * PSP:0002 to conventional memory.  EXEC does have an arena block, so
+     * make the child see exactly the block we granted it. */
+    vm86_mem_write16(cpu->mem, ((uint32_t)child_segment << 4) +
+                     VM86_PSP_MEMORY_TOP,
+                     (uint16_t)(child_segment + child_paras));
+
+    struct int21_state child_state = *st;
+    child_state.psp = child_segment;
+    child_state.dta_segment = child_segment;
+    child_state.dta_offset = VM86_INT21_DEFAULT_DTA;
+    child_state.last_exit_code = 0;
+    child_state.resident_paragraphs = 0;
+    child_state.terminated_resident = false;
+    child_state.fcb_next = 1;
+    memset(child_state.fcb, 0, sizeof(child_state.fcb));
+
+    /* A child gets a JFT copy, while its SFT objects remain shared.  Hold a
+     * reference for every inherited entry and close only the child's copy on
+     * normal or abnormal return. */
+    child_state.handle_parent = &parent_state;
+    for (unsigned i = 0; i < DOS_JFT_MAX; ++i) {
+        uint8_t id = child_state.jft[i];
+        if (id < DOS_SFT_MAX && parent_state.objects[id].refs)
+            parent_state.objects[id].refs++;
+    }
+    *st = child_state;
+    dos_handles_sync(cpu, st);
+
+    cpu->exited = false;
+    cpu->exit_code = 0;
+    cpu->halted = false;
+    cpu->fault = VM86_NO_FAULT;
+    memset(cpu->intr_pending, 0, sizeof(cpu->intr_pending));
+    cpu->intr_shadow = 0;
+    cpu->intr_depth = 0;
+    cpu->insn_count = 0;
+
+    enum vm86_stop stop = VM86_STOP_STEPS;
+    for (unsigned guard = 0; guard < 256u && !cpu->exited; ++guard) {
+        stop = vm86_run(cpu, 20000u);
+        if (stop == VM86_STOP_FAULT || stop == VM86_STOP_BROKEN ||
+            (stop == VM86_STOP_HALT && !vm86_flag_test(cpu, VM86_IF)))
+            break;
+    }
+    uint16_t child_code = cpu->exit_code;
+    bool resident = st->terminated_resident;
+    bool child_ok = cpu->exited && stop == VM86_STOP_EXIT;
+
+    /* This VM has no resident scheduler/handle context yet.  Close the
+     * child JFT in both cases so a TSR cannot leak host FAT descriptors; the
+     * resident MCB and vectors are still retained below. */
+    dos_handles_close_all(st);
+
+    *st = parent_state;
+    *cpu = parent_cpu;
+    if (!resident) {
+        (void)dos_memory_free(cpu, st, child_segment);
+    }
+    if (parent_shrunk)
+        (void)dos_memory_resize(cpu, st, parent, parent_block, &largest);
+    dos_handles_sync(cpu, st);
+    if (!child_ok)
+        return VM86_INT21_ERR_ACCESS;
+    if (return_code)
+        *return_code = child_code;
+    return 0;
+}
+
 static enum vm86_dos_load_result
 machine_build_dos(struct vm86_mem *mem, struct vm86_cpu *cpu,
                   const uint8_t *image, uint32_t size, const char *tail,
-                  const char *path, struct vm86_dos_psp *out)
+                  const char *path, struct vm86_dos_psp *out, bool full_services)
 {
     struct vm86_dos_start start = {
         .segment     = GUEST_SEGMENT,
@@ -794,7 +1063,9 @@ machine_build_dos(struct vm86_mem *mem, struct vm86_cpu *cpu,
      */
     if (result == VM86_DOS_LOADED) {
         int21_reset(&g_dos21, &g_video, out->segment);
+        if(full_services) dos_runtime_init(cpu,&g_dos21);
         if(g_mounted) g_dos21.files=&g_files;
+        if(full_services) g_dos21.exec_request = vm_exec_request;
     }
 
     return result;
@@ -1075,8 +1346,12 @@ static bool drive(const char *name)
     unsigned        slices;
     unsigned long   last_ms = u_uptime_ms();
     bool input_ready = g_resource_hold != 6;
+    /* Interactive DOS is not an acceptance sample: a person may wait more
+     * than five seconds or switch to another terminal. Keep diagnostic
+     * budgets unchanged for every selftest/resource/probe path. */
+    bool interactive = g_raw_active && g_resource_hold==0 && u_terminal(3)>0;
 
-    for (slices = 0; slices < VM_RUN_MAX_TURNS; slices++) {
+    for (slices = 0; interactive || slices < VM_RUN_MAX_TURNS; slices++) {
         uint64_t retired = g_cpu.insn_count;
 
         /* Never overwrite the emulated 8042's one-byte latch. Prefix,
@@ -1135,7 +1410,7 @@ static bool drive(const char *name)
          * turn count because the clock below is what a waiting guest is
          * waiting for -- see VM_RUN_MAX_MS.
          */
-        if (g_ms_advanced > VM_RUN_MAX_MS)
+        if (!interactive && g_ms_advanced > VM_RUN_MAX_MS)
             break;
 
         /*
@@ -1149,6 +1424,9 @@ static bool drive(const char *name)
          * worth, so the rate the guest sees is unchanged.
          */
         if ((slices & (VM_CLOCK_EVERY - 1u)) == 0u) {
+            if(interactive && u_terminal(5)>0) {
+                uputs("  VM: stopped by user\n");return false;
+            }
             unsigned long now = u_uptime_ms();
             uint32_t delta = (uint32_t)(now - last_ms);
 
@@ -1263,7 +1541,7 @@ static bool run_dos_program(const char *name, const uint8_t *image,
     uprintf("\n  --- guest case \"%s\" ---\n", name);
 
     enum vm86_dos_load_result result =
-        machine_build_dos(&g_mem, &g_cpu, image, size, tail, path, &psp);
+        machine_build_dos(&g_mem, &g_cpu, image, size, tail, path, &psp, g_full_services);
 
     if (result != VM86_DOS_LOADED) {
         uprintf("  result : the loader refused it (reason %u)\n",
@@ -1280,6 +1558,17 @@ static bool run_dos_program(const char *name, const uint8_t *image,
             (unsigned)g_cpu.cs, (unsigned)g_cpu.ip, (unsigned)g_cpu.sp,
             (unsigned)g_cpu.flags);
 
+#ifdef VM_DOS_TRACE
+    uint32_t base = (uint32_t)psp.segment << 4;
+    unsigned length = vm86_mem_read8(g_cpu.mem, base + 0x80u);
+    char command_tail[127];
+    unsigned count = length < 126u ? length : 126u;
+    for (unsigned i = 0; i < count; i++)
+        command_tail[i] = (char)vm86_mem_read8(g_cpu.mem, base + 0x81u + i);
+    command_tail[count] = 0;
+    uprintf("[DOS-TRACE] psp-tail length=%u text=\"%s\"\n",
+            length, command_tail);
+#endif
     return drive(name);
 }
 
@@ -2108,15 +2397,42 @@ static bool load_com(const char *name,unsigned *size)
     if(e || trailing || !n) return false;
     *size=n; return true;
 }
+static enum vm86_exe_load_result machine_build_exe(struct vm86_mem *mem, struct vm86_cpu *cpu,
+                                                    const uint8_t *image, uint32_t size,
+                                                    const char *tail,const char *path,
+                                                    struct vm86_dos_psp *psp)
+{
+    struct vm86_dos_start start={.segment=GUEST_SEGMENT,.environment=GUEST_ENVIRONMENT_SEGMENT,
+        .parent=GUEST_SEGMENT,.path=path,.tail=tail,.vars=g_dos_environment,
+        .var_count=(uint32_t)GUEST_ENVIRONMENT_COUNT};
+    power_on(mem,cpu);
+    struct vm86_exe_image exe;enum vm86_exe_load_result r=vm86_exe_load(cpu,image,size,&start,psp,&exe);
+    if(r==VM86_EXE_LOADED) { int21_reset(&g_dos21,&g_video,psp->segment);dos_runtime_init(cpu,&g_dos21);if(g_mounted)g_dos21.files=&g_files;g_dos21.exec_request=vm_exec_request; }
+    return r;
+}
+static bool run_exe_program(const char *name,const uint8_t *image,unsigned size,const char *tail,const char *path)
+{
+    struct vm86_dos_psp psp;uprintf("\n  --- guest EXE case \"%s\" ---\n",name);
+    enum vm86_exe_load_result r=machine_build_exe(&g_mem,&g_cpu,image,size,tail,path,&psp);
+    if(r!=VM86_EXE_LOADED) { uprintf("  MZ loader refused image (reason %u)\n",(unsigned)r);return false; }
+    uprintf("  MZ image : %u bytes, PSP %04X, CS:IP %04X:%04X SS:SP %04X:%04X\n",
+        size,psp.segment,g_cpu.cs,g_cpu.ip,g_cpu.ss,g_cpu.sp);
+    return drive(name);
+}
 int vm_run_file(const char *name,const char *tail)
 {
     unsigned size;
     if(!mount_disk() || !load_com(name,&size)) { uprintf("  VM: cannot load %s\n",name); return 1; }
     if(!screen_take()) { g_mounted=false; return 1; }
     if(u_kbd_acquire()!=0) { screen_give_back(); g_mounted=false; return 1; }
-    g_raw_active=true;
-    bool ran=run_dos_program(name,g_com,size,tail,name);
+    g_raw_active=true;g_full_services=true;
+    bool exe=(size>=2 && g_com[0]=='M' && g_com[1]=='Z');
+    bool ran=exe ? run_exe_program(name,g_com,size,tail,name) : run_dos_program(name,g_com,size,tail,name);
+    g_full_services=false;
     int code=ran && g_cpu.exited ? g_cpu.exit_code : 1;
+#ifdef VM_DOS_TRACE
+    dos_trace_summary();
+#endif
     report_rows(g_resource_hold ? (g_resource_hold==5 ? "files" : "keys") : name,&g_cpu);
     uprintf("  screen : the cursor is at cell %u\n",(unsigned)bios10_cursor_cell(&g_cpu,&g_video));
     g_raw_active=false;

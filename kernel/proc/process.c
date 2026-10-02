@@ -10,12 +10,16 @@
 #include <funnyos/pmm.h>
 #include <funnyos/screen.h>
 #include <funnyos/kbd.h>
+#include <funnyos/terminal.h>
+#include <funnyos/init_image.h>
+#include <funnyos/arch/x86_64/io.h>
+#include <funnyos/arch/x86_64/timer.h>
 #include <funnyos/vmm.h>
 
 #include <libk/string.h>
 
 /* Provided by usermode.asm. */
-int  kernel_setjmp(struct kernel_context *ctx);
+int  kernel_setjmp(struct kernel_context *ctx) __attribute__((returns_twice));
 void kernel_longjmp(struct kernel_context *ctx, int value)
     __attribute__((noreturn));
 void usermode_enter(uint64_t entry, uint64_t stack_top, uint64_t arg)
@@ -398,6 +402,8 @@ int process_run(struct process *p, uint64_t arg)
      * caller's state here captures exactly what the caller had when it
      * called in, with nothing of the kernel's mixed in.
      */
+    bool previous_if = interrupts_enabled();
+    interrupts_disable();
     struct process *previous       = g_current;
     uint64_t        previous_pml4  = process_current_pml4();
     uint64_t        previous_stack = tss_get_kernel_stack();
@@ -405,6 +411,8 @@ int process_run(struct process *p, uint64_t arg)
     if (previous)
         fpu_save(previous->fpu_state);
 
+    p->parent = previous;
+    if (previous && !p->terminal) p->terminal = previous->terminal;
     g_current = p;
 
     /*
@@ -469,6 +477,7 @@ int process_run(struct process *p, uint64_t arg)
     tss_set_kernel_stack(previous_stack);
     g_current = previous;
 
+    if (previous_if) interrupts_enable();
     return p->exit_code;
 }
 
@@ -500,6 +509,7 @@ void process_abort_on_fault(uint64_t vector)
      * an exception is not a device interrupt, so there is nothing to
      * acknowledge, and the fault handler is already on the way out.
      */
+    interrupts_disable();
     vmm_switch_to(g_kernel_pml4);
 
     /* The code is in the structure; the longjmp value only has to be
@@ -524,8 +534,151 @@ static void process_exit_hook(void)
      * Clearing it here closes the window rather than relying on the
      * second unwind landing somewhere harmless.
      */
+    interrupts_disable();
     g_current->exited = false;
 
     vmm_switch_to(g_kernel_pml4);
     kernel_longjmp(&g_current->resume, 1);
+}
+
+
+/* Each session has a separate runner stack in addition to every process's
+ * TSS syscall stack. Cooperative yield preserves live blocking syscall and
+ * nested spawn frames, rather than retaining a pointer to overwritten rsp0. */
+struct session_runner {
+    bool used, waiting, done;
+    unsigned id;
+    void *stack;
+    struct process *root, *active;
+    struct kernel_context context;
+};
+static struct session_runner g_runners[TERMINAL_MAX];
+static struct session_runner *g_runner;
+static struct kernel_context g_scheduler;
+static uint64_t g_scheduler_stack;
+static bool g_sessions;
+
+void process_session_yield(bool waiting)
+{
+    if (!g_sessions || !g_runner || !g_current) return;
+    if (!waiting && terminal_visible()==g_runner->id && !terminal_work_pending()) return;
+    bool enabled=interrupts_enabled();
+    interrupts_disable();
+    g_runner->active=g_current;
+    g_runner->waiting=waiting;
+    fpu_save(g_current->fpu_state);
+    if (kernel_setjmp(&g_runner->context)==0) {
+        g_current=NULL;
+        vmm_switch_to(g_kernel_pml4);
+        tss_set_kernel_stack(g_scheduler_stack);
+        kernel_longjmp(&g_scheduler,1);
+    }
+    if (enabled) interrupts_enable();
+}
+
+static void session_entry(void) __attribute__((noreturn));
+static void session_entry(void)
+{
+    interrupts_enable();
+    int code=process_run(g_runner->root,0);
+    kprintf("Terminal       : session %u exited %d\n",g_runner->id,code);
+    g_runner->active=NULL;
+    interrupts_disable();
+    g_runner->done=true;
+    g_current=NULL;
+    vmm_switch_to(g_kernel_pml4);
+    tss_set_kernel_stack(g_scheduler_stack);
+    kernel_longjmp(&g_scheduler,1);
+}
+
+static bool session_add(struct process *first)
+{
+    struct session_runner *r=NULL;
+    for (unsigned i=0;i<TERMINAL_MAX;i++) if (!g_runners[i].used) { r=&g_runners[i];break; }
+    if (!r) return false;
+    struct process *p=first;
+    if (!p) p=process_create("funnycom",funnyos_init_image,
+                funnyos_init_image_size,funnyos_init_image_mem_size);
+    if (!p) return false;
+    void *stack=kmalloc(PROCESS_KERNEL_STACK_SIZE);
+    if (!stack) { if (!first) process_destroy(p);return false; }
+    unsigned id=terminal_create();
+    if (!id) { kfree(stack);if (!first) process_destroy(p);return false; }
+    *r=(struct session_runner){.used=true,.id=id,.stack=stack,.root=p};
+    p->terminal=id;
+    /* SysV function entry has RSP mod 16 == 8. This trampoline never returns. */
+    r->context.rsp=((uintptr_t)stack+PROCESS_KERNEL_STACK_SIZE)&~15ull;
+    r->context.rsp-=8;
+    r->context.rip=(uintptr_t)session_entry;
+    kprintf("Terminal       : created session %u\n",id);
+    return true;
+}
+
+static void session_remove(struct session_runner *r)
+{
+    struct process *p=r->active ? r->active : r->root;
+    while (p) {
+        struct process *parent=p->parent;
+        process_destroy(p);
+        p=parent;
+    }
+    terminal_destroy(r->id);
+    kfree(r->stack);
+    *r=(struct session_runner){0};
+}
+
+void terminal_sessions_run(struct process *first)
+{
+    interrupts_disable();
+    g_scheduler_stack=tss_get_kernel_stack();
+    terminal_enable();
+    g_sessions=true;
+    if (!session_add(first)) panic("cannot create initial terminal");
+    for (;;) {
+        /* All allocation/teardown occurs on this scheduler stack, never on
+         * the currently exiting process's stack or in a device ISR. */
+        terminal_poll();
+        unsigned close=terminal_take_close();
+        if (close) for (unsigned i=0;i<TERMINAL_MAX;i++) {
+            struct session_runner *r=&g_runners[i];
+            if (r->used && r->id==close) {
+                if (terminal_busy(close) || (r->active && r->active!=r->root))
+                    terminal_feedback("Foreground program is running; exit it before closing this tab.");
+                else session_remove(r);
+                break;
+            }
+        }
+        if (terminal_take_new() && !session_add(NULL))
+            terminal_feedback("Cannot create terminal: session limit or insufficient memory.");
+        unsigned count=0;
+        for (unsigned i=0;i<TERMINAL_MAX;i++) {
+            if (g_runners[i].used && g_runners[i].done) session_remove(&g_runners[i]);
+            if (g_runners[i].used) count++;
+        }
+        if (!count && !session_add(NULL)) {
+            terminal_feedback("Cannot replace the last terminal; use [+] to retry.");
+        }
+        struct session_runner *next=NULL;
+        for (unsigned i=0;i<TERMINAL_MAX;i++) if (g_runners[i].used &&
+            g_runners[i].id==terminal_visible() &&
+            (!g_runners[i].waiting || terminal_pending(g_runners[i].id))) {
+            next=&g_runners[i];break;
+        }
+        if (!next) {
+            /* Atomic idle: pending events cannot arrive between check and hlt. */
+            __asm__ volatile("sti; hlt; cli" ::: "memory");
+            continue;
+        }
+        g_runner=next;
+        if (kernel_setjmp(&g_scheduler)==0) {
+            g_current=next->active;
+            if (g_current) {
+                vmm_switch_to(g_current->pml4);
+                tss_set_kernel_stack((uintptr_t)g_current->kernel_stack+g_current->kernel_stack_size);
+                fpu_restore(g_current->fpu_state);
+            }
+            kernel_longjmp(&next->context,1);
+        }
+        g_runner=NULL;
+    }
 }

@@ -181,6 +181,12 @@ USER_CFLAGS := -std=c17 -g -O2 \
 USER_LDFLAGS := -T user/link.ld -nostdlib -z max-page-size=0x1000 \
                 --no-warn-rwx-segments
 
+# Opt-in investigation only. Use a separate BUILD_DIR: compiler flag changes
+# are not object dependencies. Normal builds do not contain this trace.
+ifeq ($(DOS_TRACE),1)
+USER_CFLAGS += -DVM_DOS_TRACE
+endif
+
 USER_OBJ_DIR := $(BUILD_DIR)/userobj
 
 # The 8086 interpreter is part of the user image, because that is where it
@@ -233,12 +239,18 @@ VM_CORPUS_OBJS := $(patsubst %.c,%.c.o,$(VM_CORPUS_C))
 # These samples are loaded with a Program Segment Prefix rather than by the
 # M3/M4 convention, which is why they are not in the list above: the two
 # entry conventions both exist and a sample belongs to exactly one of them.
-VM_CORPUS_DOS_SRC  := dos/corpus/dos/psp.asm dos/corpus/dos/int21.asm dos/corpus/dos/files.asm dos/corpus/dos/keys.asm
+VM_CORPUS_DOS_SRC  := dos/corpus/dos/psp.asm dos/corpus/dos/int21.asm dos/corpus/dos/files.asm dos/corpus/dos/keys.asm dos/corpus/dos/execchild.asm dos/corpus/dos/execparent.asm
+MZ_CORPUS_SRC := dos/corpus/dos/mz.asm
+MZ_CORPUS_BIN := $(BUILD_DIR)/vmcorpus/dos_mz.bin
 VM_CORPUS_DOS_BIN  := $(patsubst dos/corpus/dos/%.asm,$(BUILD_DIR)/vmcorpus/dos_%.bin,$(VM_CORPUS_DOS_SRC))
 VM_CORPUS_DOS_C    := $(patsubst dos/corpus/dos/%.asm,$(BUILD_DIR)/generated/vm_corpus_dos_%.c,$(VM_CORPUS_DOS_SRC))
 VM_CORPUS_DOS_OBJS := $(patsubst %.c,%.c.o,$(VM_CORPUS_DOS_C))
 
 $(BUILD_DIR)/vmcorpus/dos_%.bin: dos/corpus/dos/%.asm
+	@mkdir -p $(@D)
+	@echo "  NASM    $<"
+	@$(NASM) -f bin $< -o $@
+$(MZ_CORPUS_BIN): $(MZ_CORPUS_SRC)
 	@mkdir -p $(@D)
 	@echo "  NASM    $<"
 	@$(NASM) -f bin $< -o $@
@@ -313,7 +325,7 @@ DEPS := $(C_OBJS:.o=.d) $(USER_C_OBJS:.o=.d) $(VM_CORPUS_OBJS:.o=.d) \
 # ---------------------------------------------------------------------
 # Targets
 # ---------------------------------------------------------------------
-.PHONY: test-dos-resources all user run test test-uefi test-all test-fault test-input test-user test-vm test-screen check export clean distclean help
+.PHONY: test-terminals test-desktop test-dos-resources m6-app-iso all user run test test-uefi test-all test-fault test-input test-user test-vm test-screen check export clean distclean help
 
 all: $(ISO)
 
@@ -340,9 +352,17 @@ $(OBJ_DIR)/%.asm.o: %.asm
 FAT_IMAGE := $(BUILD_DIR)/dos.img
 FAT_BLOB := $(BUILD_DIR)/generated/dos_disk.c
 FAT_OBJ := $(OBJ_DIR)/generated/dos_disk.c.o
-$(FAT_IMAGE): $(TOOLS_DIR)/make-fat-image.py $(VM_CORPUS_DOS_BIN)
+
+# Optional, external application corpus for M6 acceptance. Keep it out of
+# normal builds: the upstream MS-DOS binaries are ignored, are not project
+# sources, and must never silently become release contents. Use a separate
+# BUILD_DIR when setting M6_APPS_DIR so the generated FAT image is unambiguous.
+M6_APPS_DIR ?=
+M6_APP_PATHS := $(if $(M6_APPS_DIR),$(wildcard $(M6_APPS_DIR)/EDLIN.COM) $(wildcard $(M6_APPS_DIR)/DEBUG.COM))
+M6_APP_ARGS := $(foreach f,$(M6_APP_PATHS),$(notdir $(f))=$(f))
+$(FAT_IMAGE): $(TOOLS_DIR)/make-fat-image.py $(VM_CORPUS_DOS_BIN) $(MZ_CORPUS_BIN) $(M6_APP_PATHS)
 	@mkdir -p $(@D)
-	@python3 $(TOOLS_DIR)/make-fat-image.py $@ FILES.COM=$(BUILD_DIR)/vmcorpus/dos_files.bin KEYS.COM=$(BUILD_DIR)/vmcorpus/dos_keys.bin INT21.COM=$(BUILD_DIR)/vmcorpus/dos_int21.bin PSP.COM=$(BUILD_DIR)/vmcorpus/dos_psp.bin
+	@python3 $(TOOLS_DIR)/make-fat-image.py $@ FILES.COM=$(BUILD_DIR)/vmcorpus/dos_files.bin KEYS.COM=$(BUILD_DIR)/vmcorpus/dos_keys.bin INT21.COM=$(BUILD_DIR)/vmcorpus/dos_int21.bin PSP.COM=$(BUILD_DIR)/vmcorpus/dos_psp.bin MZTEST.EXE=$(MZ_CORPUS_BIN) EXEC.COM=$(BUILD_DIR)/vmcorpus/dos_execparent.bin EXECHILD.COM=$(BUILD_DIR)/vmcorpus/dos_execchild.bin $(M6_APP_ARGS)
 $(FAT_BLOB): $(FAT_IMAGE) $(TOOLS_DIR)/bin2c.py
 	@mkdir -p $(@D)
 	@python3 $(TOOLS_DIR)/bin2c.py $< funnyos_dos_disk $@
@@ -562,6 +582,22 @@ test-screen: $(ISO)
 test-dos-resources: $(ISO)
 	@FUNYOS_BUILD_DIR=$(BUILD_DIR) python3 $(TOOLS_DIR)/run-dos-resources-test.py
 
+test-desktop: $(ISO)
+	@FUNYOS_BUILD_DIR=$(BUILD_DIR) bash $(TOOLS_DIR)/test-desktop-host.sh
+	@FUNYOS_BUILD_DIR=$(BUILD_DIR) PYTHONDONTWRITEBYTECODE=1 python3 $(TOOLS_DIR)/run-desktop-test.py bios uefi
+
+test-terminals: $(ISO)
+	@FUNYOS_BUILD_DIR=$(BUILD_DIR) PYTHONDONTWRITEBYTECODE=1 python3 $(TOOLS_DIR)/run-terminal-test.py bios uefi
+
+# Build an opt-in ISO containing the fixed MS-DOS 4.0 EDLIN/DEBUG binaries.
+# The directory must contain EDLIN.COM and DEBUG.COM; use a staging directory
+# if the upstream build places them in separate folders.
+m6-app-iso: $(ISO)
+	@test -n "$(M6_APPS_DIR)" || (echo 'M6_APPS_DIR is required' >&2; exit 2)
+	@test -f "$(M6_APPS_DIR)/EDLIN.COM" || (echo "missing $(M6_APPS_DIR)/EDLIN.COM" >&2; exit 2)
+	@test -f "$(M6_APPS_DIR)/DEBUG.COM" || (echo "missing $(M6_APPS_DIR)/DEBUG.COM" >&2; exit 2)
+	@echo "  M6 apps ISO: $(ISO)"
+
 check: $(ISO)
 	@$(MAKE) -C dos test
 	@bash $(RUN_TEST) $(ISO) bios
@@ -574,6 +610,7 @@ check: $(ISO)
 	@FUNYOS_BUILD_DIR=$(BUILD_DIR) \
 	    bash $(RUN_SCREEN_TEST) $(ISO)
 	@FUNYOS_BUILD_DIR=$(BUILD_DIR) python3 $(TOOLS_DIR)/run-dos-resources-test.py
+	@$(MAKE) test-desktop test-terminals BUILD_DIR=$(BUILD_DIR)
 
 # Copy the ISO into the project directory so other emulators on Windows
 # can open it. Output goes to dist/ rather than the project root because

@@ -68,9 +68,8 @@ void u_clear(void);
  * Run another program to completion and return its exit code.
  *
  * Blocking: control comes back when that program finishes. That is what
- * DOS does when one program runs another, and with no scheduler it is also
- * the only thing the kernel could do -- a caller that did not wait would
- * have nothing to return to.
+ * DOS does when one program runs another. Other terminal sessions may run
+ * while this caller is suspended; the caller still waits for its child.
  *
  * A negative return means the kernel would not start it at all (no such
  * image, or not enough memory). That is never a child's exit code, because
@@ -131,5 +130,8 @@ int u_kbd_acquire(void);
 int u_kbd_poll(void);
 int u_kbd_release(void);
 int u_pollkey(void);
+int u_terminal(unsigned operation);
+struct syscall_mouse_event;
+int u_mouse_poll(struct syscall_mouse_event *event);
 
 #endif /* LIBU_H */

@@ -228,12 +228,21 @@ static bool register_ioapic(uint8_t id, uint32_t phys, uint32_t gsi_base)
     if (!map_mmio_uncached(phys, &io->virt, &fresh))
         return false;
 
-    io->present  = true;
     io->id       = id;
     io->gsi_base = gsi_base;
     io->phys     = phys;
 
     uint32_t version = ioapic_read(io, IOAPIC_REG_VERSION);
+    /* Mapping an address does not prove that a device exists there. VBox
+     * with I/O APIC disabled returns all ones at this MMIO address; treating
+     * that as version 255 / 256 lines falsely advertises working ISA IRQs. */
+    if (version == 0 || version == UINT32_MAX) {
+        kprintf("apic: no usable IO APIC at %p (version %x); "
+                "enable I/O APIC in the VM settings\n", (void *)io->phys,
+                (unsigned)version);
+        return false;
+    }
+    io->present = true;
     io->entries = ((version >> 16) & 0xFF) + 1;
 
     if (io->entries > IOAPIC_MAX_ENTRIES)

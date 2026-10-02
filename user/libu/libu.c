@@ -154,3 +154,7 @@ int u_kbd_acquire(void) { return (int)u_syscall(SYS_KBD_ACQUIRE,0,0,0); }
 int u_kbd_poll(void) { return (int)u_syscall(SYS_KBD_POLL,0,0,0); }
 int u_kbd_release(void) { return (int)u_syscall(SYS_KBD_RELEASE,0,0,0); }
 int u_pollkey(void) { return (int)u_syscall(SYS_POLLKEY,0,0,0); }
+
+int u_mouse_poll(struct syscall_mouse_event *event) { return (int)u_syscall(SYS_MOUSE_POLL,(uint64_t)event,0,0); }
+
+int u_terminal(unsigned operation) { return (int)u_syscall(SYS_TERMINAL,operation,0,0); }

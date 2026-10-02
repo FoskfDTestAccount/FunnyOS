@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "id": "msdos2-more",
+  "name": "MS-DOS 2.0 MORE.COM",
+  "upstream": "https://github.com/microsoft/MS-DOS",
+  "revision": "2d04cacc5322951f187bb17e017c12920ac8ebe2",
+  "binary_path": "v2.0/bin/MORE.COM",
+  "size": 4364,
+  "sha256": "56830889fef22d56ef5938df0394bf30a8416cc06225b8dc35adc74bb13416b7",
+  "source_path": "v2.0/source/MORE.ASM",
+  "source_sha256": "b3b56fad5c9938a08de03209c21085e814b74f4299d152cd5fe2ec490c50305f",
+  "license_path": "LICENSE",
+  "reference_emulator": "DOSBox 0.74-3",
+  "invocation": "MORE < INPUT.TXT > OUTPUT.TXT",
+  "binary_int21_dependencies": ["30", "09", "45", "3E", "3F", "02", "0C"],
+  "binary_termination": "INT 20h",
+  "notes": [
+    "The published binary is authoritative; do not patch or rebuild it for acceptance.",
+    "MORE.ASM has IBMVER=TRUE, but this binary has no video-mode query and a 24-row limit; source and binary configurations differ.",
+    "Short reference cases exercise stdin redirection, stdout redirection, EOF and Ctrl-Z, not interactive pagination.",
+    "FunnyCOM currently treats redirection tokens as PSP command-tail text, not handle wiring.",
+    "This probe documents incompatibility, not completed M5 application acceptance."
+  ]
+}

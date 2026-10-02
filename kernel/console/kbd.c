@@ -5,6 +5,9 @@
 #include <funnyos/arch/x86_64/io.h>
 #include <funnyos/arch/x86_64/irq.h>
 #include <funnyos/kprintf.h>
+#include <funnyos/ps2.h>
+#include <funnyos/screen.h>
+#include <funnyos/terminal.h>
 
 #include <stddef.h>
 
@@ -235,32 +238,55 @@ static const struct process *g_raw_owner;
 static volatile uint8_t g_raw[512];
 static volatile unsigned g_raw_head, g_raw_tail;
 static volatile bool g_raw_overflow;
+static bool g_raw_prefix,g_alt_forwarded,g_alt_extended,g_hot_alt;
+static uint8_t g_alt_pending[2];
+static unsigned g_alt_count,g_consumed_digits;
+static void raw_push(uint8_t data)
+{
+    unsigned next=(g_raw_head+1)%512;
+    if(next==g_raw_tail) g_raw_overflow=true;
+    else { g_raw[g_raw_head]=data;g_raw_head=next; }
+}
+static void flush_alt(void)
+{
+    for(unsigned i=0;i<g_alt_count;i++) raw_push(g_alt_pending[i]);
+    if(g_alt_count) g_alt_forwarded=true;
+    g_alt_count=0;
+}
+
 
 bool kbd_raw_acquire(const struct process *who)
 {
+    if(terminal_enabled()) return terminal_raw_acquire(who);
     bool enabled=interrupts_enabled(); interrupts_disable();
     bool ok=who && (!g_raw_owner || g_raw_owner==who);
     if(ok && !g_raw_owner) {
         g_raw_owner=who; g_raw_head=g_raw_tail=0; g_raw_overflow=false;
         g_tail=g_head;
+        g_raw_prefix=g_alt_forwarded=g_hot_alt=false;g_alt_count=g_consumed_digits=0;
     }
     if(enabled) interrupts_enable();
     return ok;
 }
 int kbd_raw_poll(const struct process *who)
 {
+    if(terminal_enabled()) return terminal_raw_poll(who);
+    screen_poll_input();
     if(!who || g_raw_owner!=who) return -1;
+    if(!screen_keyboard_focus(who)) return -1;
     if(g_raw_overflow) return -10;
     if(g_raw_head==g_raw_tail) return -1;
     int byte=g_raw[g_raw_tail]; g_raw_tail=(g_raw_tail+1)%512; return byte;
 }
 bool kbd_raw_release(const struct process *who)
 {
+    if(terminal_enabled()) return terminal_raw_release(who);
     bool enabled=interrupts_enabled(); interrupts_disable();
     bool ok=who && g_raw_owner==who;
     if(ok) {
         g_raw_owner=NULL; g_raw_head=g_raw_tail=0; g_raw_overflow=false;
         g_tail=g_head; g_state=(struct kbd_state){0};
+        g_raw_prefix=g_alt_forwarded=g_hot_alt=false;g_alt_count=g_consumed_digits=0;
     }
     if(enabled) interrupts_enable();
     return ok;
@@ -284,6 +310,8 @@ static void queue_push(int key)
 
 int kbd_poll(void)
 {
+    screen_poll_input();
+    if(terminal_enabled()) return terminal_key_poll(process_current());
     if (g_tail == g_head)
         return KEY_NONE;
 
@@ -305,54 +333,59 @@ int kbd_getchar(void)
         if (!interrupts_enabled())
             return KEY_NONE;
 
-        cpu_halt();
+        if(terminal_enabled()) process_session_yield(true);
+        else cpu_halt();
     }
 }
 
 /* --- Interrupt handler --------------------------------------------- */
 
-static void kbd_irq(struct interrupt_frame *frame, void *ctx)
+static void kbd_receive(uint8_t data)
 {
-    (void)frame;
-    (void)ctx;
-
-    /*
-     * Drain the controller rather than reading one byte.
-     *
-     * A fast typist, a key repeat, or a stalled CPU can leave several
-     * scancodes queued, and the 8042 raises the interrupt on the
-     * transition to non-empty -- so a byte left unread may never produce
-     * another interrupt and the key is simply lost.
-     */
-    for (;;) {
-        uint8_t status = inb(KBD_STATUS);
-        if (!(status & STATUS_OUTPUT_FULL))
-            break;
-
-        uint8_t data = inb(KBD_DATA);
-
-        /* Byte came from the mouse port. There is no mouse driver, and
-         * feeding its packets to the scancode decoder types garbage. */
-        if (status & STATUS_AUX_DATA)
-            continue;
-
-        g_scancodes++;
-
-        if(g_raw_owner) {
-            unsigned next=(g_raw_head+1)%512;
-            if(next==g_raw_tail) g_raw_overflow=true;
-            else { g_raw[g_raw_head]=data; g_raw_head=next; }
-        } else {
-            int key = kbd_decode(&g_state, data);
-            if (key != KEY_NONE) queue_push(key);
-        }
+    g_scancodes++;
+    bool extended=g_state.extended;
+    int key=kbd_decode(&g_state,data);
+    if(terminal_enabled()) { terminal_keyboard(data,extended,key,&g_state);return; }
+    unsigned code=data&0x7fu;
+    bool released=(data&0x80u)!=0;
+    if(g_raw_owner && data==0xe0) { g_raw_prefix=true;return; }
+    if(!extended && released && code>=2 && code<=10 && (g_consumed_digits&(1u<<code))) {
+        g_consumed_digits&=~(1u<<code);return;
     }
+    if(!extended && !released && code>=2 && code<=10 && g_state.alt) {
+        screen_request_tab(code-1u);g_consumed_digits|=1u<<code;
+        g_alt_count=0;g_hot_alt=true;
+        if(g_raw_owner && g_alt_forwarded) { if(g_alt_extended) raw_push(0xe0);raw_push(0xb8);g_alt_forwarded=false; }
+        return;
+    }
+    if(g_raw_owner) {
+        if(code==0x38) {
+            if(!released) {
+                g_alt_count=0;g_alt_extended=g_raw_prefix;
+                if(g_raw_prefix) g_alt_pending[g_alt_count++]=0xe0;
+                g_alt_pending[g_alt_count++]=data;
+            } else {
+                if(!g_hot_alt) { flush_alt();if(g_raw_prefix) raw_push(0xe0);raw_push(data); }
+                g_alt_count=0;g_alt_forwarded=g_hot_alt=false;
+            }
+            g_raw_prefix=false;return;
+        }
+        if(g_hot_alt || !screen_keyboard_focus(g_raw_owner)) { g_raw_prefix=false;return; }
+        flush_alt();
+        if(g_raw_prefix) raw_push(0xe0);
+        g_raw_prefix=false;raw_push(data);
+    } else if(key!=KEY_NONE && screen_keyboard_focus(process_current())) queue_push(key);
 }
+static void kbd_irq(struct interrupt_frame *frame,void *ctx)
+{ (void)frame; (void)ctx; ps2_drain(); }
 
 /* --- Setup --------------------------------------------------------- */
 
 bool kbd_init(void)
 {
+    if (!lapic_ready() || !ioapic_ready())
+        return false;
+
     controller_flush();
 
     /* Take the keyboard offline while its configuration is rewritten, so
@@ -392,6 +425,7 @@ bool kbd_init(void)
         return false;
     }
 
+    ps2_set_sink(false,kbd_receive);
     ioapic_route_isa(KBD_ISA_IRQ, IRQ_VECTOR_KEYBOARD);
 
     g_ready = true;

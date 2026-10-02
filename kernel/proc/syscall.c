@@ -12,6 +12,10 @@
 #include <funnyos/process.h>
 #include <funnyos/ramfs.h>
 #include <funnyos/screen.h>
+#include <funnyos/terminal.h>
+#include <funnyos/pmm.h>
+#include <funnyos/heap.h>
+#include <funnyos/mouse.h>
 #include <funnyos/vmm.h>
 
 #include <libk/string.h>
@@ -57,8 +61,8 @@ static int64_t sys_write(int fd, uint64_t buf, uint64_t len)
      * the check above already proved every page is mapped, and reading a
      * byte at a time through the validated range is all this needs. */
     const char *text = (const char *)buf;
-    for (uint64_t i = 0; i < len; i++)
-        kputc(text[i]);
+    if(terminal_enabled()) terminal_write(process_current(),text,len);
+    else for (uint64_t i = 0; i < len; i++) kputc(text[i]);
 
     return (int64_t)len;
 }
@@ -324,12 +328,8 @@ static int64_t sys_screen_present(uint64_t cells, uint64_t columns,
     if (!screen_ready())
         return SYSCALL_ENODEV;
 
-    /*
-     * The page is read straight out of the caller's memory -- no copy into
-     * a kernel buffer first. The check above proved every byte is mapped
-     * and the page tables cannot change underneath a system call, which is
-     * the same argument sys_write makes for reading its buffer in place.
-     */
+    /* Validated user bytes are copied into a kernel-owned tab buffer.
+     * Switching tabs must not retain or dereference caller memory. */
     if (!screen_present((const uint8_t *)cells, (unsigned)columns,
                         (uint16_t)cursor))
         return SYSCALL_EPERM;
@@ -353,6 +353,8 @@ static int64_t syscall_dispatch(uint64_t number, uint64_t a0, uint64_t a1,
     (void)a4;
     (void)a5;   /* no call takes more than three arguments yet */
 
+    screen_poll_input();
+    process_session_yield(false);
     switch (number) {
     case SYS_WRITE:
         return sys_write((int)a0, a1, a2);
@@ -376,10 +378,25 @@ static int64_t syscall_dispatch(uint64_t number, uint64_t a0, uint64_t a1,
         return kbd_raw_poll(process_current());
     case SYS_KBD_RELEASE:
         return kbd_raw_release(process_current()) ? 0 : SYSCALL_EPERM;
+    case SYS_MOUSE_POLL: {
+        if(!user_pointer_ok(a0,sizeof(struct syscall_mouse_event))) return SYSCALL_EFAULT;
+        struct mouse_event event;
+        if(!screen_mouse_poll(process_current(),&event)) return 0;
+        struct syscall_mouse_event *out=(struct syscall_mouse_event *)a0;
+        *out=(struct syscall_mouse_event){.dx=event.dx,.dy=event.dy,.buttons=event.buttons};
+        return 1;
+    }
     case SYS_POLLKEY:
         return kbd_poll();
     case SYS_GETKEY:
         return kbd_getchar();
+
+    case SYS_TERMINAL:
+        if(a0==4) return (int64_t)pmm_used_pages();
+        if(a0==6) return (int64_t)heap_in_use();
+        if(a0==7) return (int64_t)timer_off_stack_ticks();
+        if(a0==8) return (int64_t)timer_ring3_ticks();
+        return terminal_control(process_current(),(unsigned)a0);
 
     case SYS_UPTIME_MS:
         /* Milliseconds since the timer came up. The tick count is the
@@ -388,7 +405,8 @@ static int64_t syscall_dispatch(uint64_t number, uint64_t a0, uint64_t a1,
         return (int64_t)timer_millis();
 
     case SYS_CLEAR:
-        fb_clear();
+        if(terminal_enabled()) terminal_clear(process_current());
+        else fb_clear();
         return 0;
 
     case SYS_SPAWN:

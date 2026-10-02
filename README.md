@@ -14,7 +14,17 @@ DOS 在这里扮演两重角色：**设计参照系**（继承小内核、直白
 
 **M0 到 M4 已完成并通过验证**——引导闭环、内核基础设施、控制台与 Shell、纯软件 8086 解释器、以及 IBM PC 兼容机的固件。最新一版作为 **Pre-release** 发布在 [Releases](../../releases) 页，ISO 可以直接下载运行。
 
-**M5 的 W1–W6 工作包已完成，还没有发布**：可重入进程与子程序启动、真实 guest 文本页、DOS `.COM` 装载器、`INT 21h` 核心、VM 内的 **FAT12/FAT16 私有镜像读写**，以及真实 **set-1 键盘输入**都已接通。Shell 的 `DOS <文件.COM> [参数]` 会从 FAT 镜像加载程序，运行结束把屏幕和键盘还回来。`make check` 包含全部宿主套件、原有七组 QEMU 回归及 W5/W6 的 BIOS/UEFI 资源与像素验收。**这不等于已经证明任意现成 DOS 应用兼容**；持久化、FAT32、MZ/EXE、FCB I/O、EXEC 等尚未做。
+**M5 的 W1–W6 工作包已完成，还没有发布**：可重入进程与子程序启动、真实 guest 文本页、DOS `.COM` 装载器、`INT 21h` 核心、VM 内的 **FAT12/FAT16 私有镜像读写**，以及真实 **set-1 键盘输入**都已接通。
+
+**M6 核心集成已经通过当前回归，但仍保留真实应用兼容性边界**：MZ 头解析/重定位、EXE 入口、共享 DOS 句柄与标准流重定向、MCB、FCB 基础服务、AH=56h/AH=57h 文件操作、AH=31h TSR 路径和阻塞式 AH=4Bh EXEC 父子闭环均已接通；`MZTEST.EXE`、`EXEC.COM`/`EXECHILD.COM` 在 BIOS/UEFI 实际终端路径通过。MS-DOS 4.0 EDLIN/DEBUG 的外部二进制已具备独立 staging 和有界 smoke 验收入口，但完整编辑、保存、调试命令兼容性尚未宣称完成。集成命令、日志归档和哈希记录见 [M6 验收与证据归档](docs/tasks/M6-acceptance.md) 和 [M6 README](docs/tasks/M6-README.md)；不把自编夹具冒充真实应用证明。
+
+**M5 的真实应用选型与摸底已完成第一轮**：固定原始 MS-DOS 2.0 `MORE.COM`，建立六组 DOSBox 字节基线，并在 BIOS/UEFI 的有/无诊断构建中复现句柄复制缺口。**MORE 尚不兼容**；问题清单与复现见 [M5 应用摸底记录](docs/tasks/M5-app-probe.md)。
+
+**多标签终端第一版已加入开发树，尚未发布。** 普通启动进入独立 FunnyCOM 会话；
+可用 `[+]` / `Ctrl+Shift+T` 新建，点击标签 / `Alt+1..8` 切换，`x` / `Ctrl+Shift+W` / `EXIT` 关闭。
+各页保留输出和未提交输入，DOS 程序属于启动它的会话，`CLS` 不影响其他页。
+这是**协作式前台会话切换**，不是窗口式 GUI 或通用抢占式后台多任务；
+完整操作、测试与限制见 [多终端实现记录](docs/tasks/M4-G-terminal-completion.md)。
 
 开机进入一个**交互式命令行**。Shell（FunnyCOM）是一个 **Ring 3 用户态进程**，跑在自己的地址空间里，所有能力都通过系统调用取得——它自己没有任何特权。
 
@@ -108,11 +118,17 @@ make test-fault # 注入一次内核异常，检查诊断输出
 make test-input # 用 QEMU 的 sendkey 敲键盘，跑一遍 Shell 会话
 make test-user  # 五种方式结束一个用户进程：正常、崩溃、主动退出、浮点自检、派生
 make test-vm    # 在 Ring 3 跑 8086 解释器并断言；退出码与终态
+make test-terminals # 普通启动的多终端输入/输出、DOS、生命周期与像素验收
+make test-desktop # 鼠标/显示页快照与标签的宿主、BIOS/UEFI 验收
 make test-screen # 截屏，把 framebuffer 的像素读回来逐格比对
 make user       # 只构建用户态程序，不构建内核
 ```
 
 `make test` 会自动优先使用 KVM 硬件加速，无 KVM 时回退到 TCG 软件模拟。
+
+VirtualBox 运行时须在“系统 → 主板”启用 **I/O APIC**；指点设备选 **PS/2 鼠标**。
+当前没有传统 PIC 输入后备或 USB Tablet 驱动。预览与实测说明见
+[`M4-G-preview.md`](docs/tasks/M4-G-preview.md)。
 
 ## 目录结构
 
@@ -285,7 +301,17 @@ See [docs/DESIGN.md](docs/DESIGN.md) for the full architecture (written in Chine
 
 **M0 through M4 are complete and verified** -- the boot chain, the kernel infrastructure, the console and shell, the software 8086 interpreter, and the firmware of an IBM PC compatible. The latest one is published as a **pre-release** on the [Releases](../../releases) page, with an ISO you can boot.
 
-**M5 is under way and not yet released.** Three pieces are done: the process model is re-entrant and a program can start another one (W1); **a guest program's text page is now drawn onto the real screen by the interpreter process itself** (W2); and a **`.COM` loader** -- a program can now be loaded the way DOS loads one, with its own 256-byte PSP, an environment block, and the zero word on the stack that turns a bare `RET` into an exit (W3; section 4 below). `make check` runs seven paths.
+**M5 is complete in the development tree and not yet released.** The process model is re-entrant, a guest text page is drawn by the interpreter process, and a **`.COM` loader** supplies the DOS-style PSP, environment block, and return stack word. The M5 service and FAT work is covered by the existing host and QEMU suites.
+
+**M6 core integration is passing, with application-compatibility limits recorded.** MZ parsing/relocation, EXE entry, shared DOS handles and redirection, MCB, basic FCB services, file metadata operations, TSR memory retention, and blocking `INT 21h/AH=4Bh` EXEC parent/child return flow are wired up. BIOS and UEFI terminal acceptance runs the MZ and EXEC guest fixtures successfully. External MS-DOS 4.0 EDLIN/DEBUG binaries have an opt-in staging/smoke path, but full editor/debugger command compatibility is not claimed. See [the M6 acceptance evidence](docs/tasks/M6-acceptance.md).
+
+**Native terminal tabs are implemented in the development tree, not released yet.**
+Normal boot starts an independent FunnyCOM session. Use `[+]` / `Ctrl+Shift+T`
+to create, click / `Alt+1..8` to switch, and `x` / `Ctrl+Shift+W` / `EXIT` to close.
+Output and partial input remain independent; DOS returns to its originating
+session. This is **cooperative foreground session switching**, not a graphical
+desktop or arbitrary preemptive background multitasking. See
+[the implementation and acceptance report](docs/tasks/M4-G-terminal-completion.md).
 
 The machine boots into an **interactive command line**. The shell, FunnyCOM, is a **Ring 3 user-space process** with its own address space and no privileges of its own -- everything it does goes through a system call.
 
@@ -369,6 +395,8 @@ make test-fault # Inject a kernel fault and check the diagnostic
 make test-input # Type a shell session through QEMU's sendkey
 make test-user  # End a user process five ways: normally, fault, exit, floating point, spawning
 make test-vm    # Run the 8086 interpreter in Ring 3 and assert on what it leaves behind
+make test-terminals # Native terminal sessions, BIOS/UEFI, input, lifecycle and pixels
+make test-desktop # Mouse/page snapshots and tab infrastructure, host + BIOS/UEFI
 make test-screen # Take a screendump and judge the framebuffer, cell by cell
 make test-dos-resources # FAT + raw keyboard + pixels, BIOS and UEFI
 make -C dos -B test # Rebuild and run all host suites
@@ -376,6 +404,10 @@ make user       # Build just the user program, without the kernel
 ```
 
 `make test` prefers KVM hardware acceleration and falls back to TCG software emulation when KVM is unavailable.
+
+In VirtualBox, enable **I/O APIC** under System → Motherboard and select
+**PS/2 Mouse**. Legacy PIC input fallback and USB Tablet drivers are not implemented.
+See [M4-G-preview.md](docs/tasks/M4-G-preview.md) for preview details and compatibility tests.
 
 ## Project layout
 

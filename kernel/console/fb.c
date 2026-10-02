@@ -86,7 +86,11 @@ static uint32_t g_fg = 0xE8E8E8;   /* near-white */
 static uint32_t g_bg = 0x101014;   /* near-black, faintly blue */
 
 /* The authoritative copy of what is on screen. */
-static char g_cells[CONSOLE_MAX_ROWS * CONSOLE_MAX_COLS];
+static uint16_t g_cells[CONSOLE_MAX_ROWS * CONSOLE_MAX_COLS];
+static unsigned g_top;
+static void (*g_overlay)(void);
+static uint64_t content_rows(void) { return g_rows > g_top ? g_rows-g_top : 1u; }
+static void finish_draw(void) { if (g_overlay) g_overlay(); }
 
 /* ------------------------------------------------------------------ */
 /* Pixel access (write-only)                                           */
@@ -164,7 +168,7 @@ static void paint_cell(uint64_t cell_x, uint64_t cell_y, char c,
                        uint32_t fg, uint32_t bg)
 {
     if (g_output)
-        draw_glyph(cell_x, cell_y, c, fg, bg);
+        draw_glyph(cell_x, cell_y + g_top, c, fg, bg);
 }
 
 /*
@@ -194,14 +198,39 @@ static const uint32_t g_text_palette[16] = {
 /* Grid operations                                                     */
 /* ------------------------------------------------------------------ */
 
+static uint8_t g_attribute=0x07;
+static uint32_t console_color(unsigned index)
+{
+    return index==0 ? 0x101014u : (index==7 ? 0xe8e8e8u : g_text_palette[index]);
+}
+static unsigned nearest_color(uint32_t rgb)
+{
+    unsigned best=0;uint64_t distance=~(uint64_t)0;
+    for(unsigned i=0;i<16;i++) {
+        uint32_t candidate=console_color(i);uint64_t d=0;
+        for(unsigned shift=0;shift<24;shift+=8) {
+            int delta=(int)((rgb>>shift)&255u)-(int)((candidate>>shift)&255u);
+            d+=(uint64_t)(delta*delta);
+        }
+        if(d<distance) { distance=d;best=i; }
+    }
+    return best;
+}
+static void console_cell(uint64_t col,uint64_t row)
+{
+    uint16_t cell=g_cells[row*g_cols+col];unsigned attribute=cell>>8;
+    draw_glyph(col,row+g_top,(char)cell,
+               pack_color(console_color(attribute&15u)),
+               pack_color(console_color((attribute>>4)&15u)));
+}
 static inline char cell_get(uint64_t col, uint64_t row)
 {
-    return g_cells[row * g_cols + col];
+    return (char)(g_cells[row * g_cols + col]&0xffu);
 }
 
 static inline void cell_set(uint64_t col, uint64_t row, char c)
 {
-    g_cells[row * g_cols + col] = c;
+    g_cells[row * g_cols + col] = (uint8_t)c | ((uint16_t)g_attribute<<8);
 }
 
 /*
@@ -214,12 +243,9 @@ static inline void cell_set(uint64_t col, uint64_t row, char c)
  */
 static void repaint(void)
 {
-    uint32_t fg = pack_color(g_fg);
-    uint32_t bg = pack_color(g_bg);
-
-    for (uint64_t r = 0; r < g_rows; r++)
+    for (uint64_t r = 0; r < content_rows(); r++)
         for (uint64_t c = 0; c < g_cols; c++)
-            draw_glyph(c, r, cell_get(c, r), fg, bg);
+            console_cell(c,r);
 }
 
 static void scroll_up(void)
@@ -228,8 +254,8 @@ static void scroll_up(void)
      * simply follows in repaint(). */
     memmove(g_cells,
             g_cells + g_cols,
-            (size_t)((g_rows - 1) * g_cols));
-    memset(g_cells + (g_rows - 1) * g_cols, ' ', (size_t)g_cols);
+            (size_t)((content_rows() - 1) * g_cols * sizeof(uint16_t)));
+    for (uint64_t c=0; c<g_cols; c++) cell_set(c,content_rows()-1u,' ');
 
     if (g_output)
         repaint();
@@ -291,18 +317,18 @@ void fb_clear(void)
     if (!g_ready)
         return;
 
-    memset(g_cells, ' ', (size_t)(g_rows * g_cols));
+    for (uint64_t i=0; i<g_rows*g_cols; i++) g_cells[i]=(uint16_t)(0x20u|((uint16_t)g_attribute<<8));
 
     if (g_output)
-        fill_rect(0, 0, g_width, g_height, pack_color(g_bg));
+        fill_rect(0, g_top*FONT8X16_HEIGHT, g_width, g_height-g_top*FONT8X16_HEIGHT, pack_color(g_bg));
 
     g_cursor_x = 0;
     g_cursor_y = 0;
 }
 
-void fb_set_fg(uint32_t rgb) { g_fg = rgb; }
-void fb_set_bg(uint32_t rgb) { g_bg = rgb; }
-void fb_reset_color(void)    { g_fg = 0xE8E8E8; g_bg = 0x101014; }
+void fb_set_fg(uint32_t rgb) { g_attribute=(uint8_t)((g_attribute&0xf0u)|nearest_color(rgb));g_fg=console_color(g_attribute&15u); }
+void fb_set_bg(uint32_t rgb) { g_attribute=(uint8_t)((g_attribute&15u)|(nearest_color(rgb)<<4));g_bg=console_color(g_attribute>>4); }
+void fb_reset_color(void)    { g_fg = 0xE8E8E8; g_bg = 0x101014;g_attribute=0x07; }
 
 void fb_set_output(bool enabled)
 {
@@ -311,8 +337,7 @@ void fb_set_output(bool enabled)
 
 void fb_repaint(void)
 {
-    if (g_ready)
-        repaint();
+    if (g_ready) { repaint(); finish_draw(); }
 }
 
 void fb_fill_screen(void)
@@ -336,7 +361,7 @@ bool fb_grid_size(uint64_t *cols, uint64_t *rows)
     return true;
 }
 
-void fb_draw_page(uint64_t col, uint64_t row, uint64_t columns,
+static void draw_page(uint64_t col, uint64_t row, uint64_t columns,
                   uint64_t rows, const uint8_t *cells, uint16_t cursor)
 {
     if (!g_ready || !cells || columns == 0)
@@ -389,7 +414,7 @@ void fb_draw_page(uint64_t col, uint64_t row, uint64_t columns,
             put_pixel(x0 + dx, y0 + dy, fg);
 }
 
-void fb_putc(char c)
+static void console_putc(char c)
 {
     if (!g_ready)
         return;
@@ -435,8 +460,74 @@ void fb_putc(char c)
         g_cursor_y++;
     }
 
-    if (g_cursor_y >= g_rows) {
+    if (g_cursor_y >= content_rows()) {
         scroll_up();
-        g_cursor_y = g_rows - 1;
+        g_cursor_y = content_rows() - 1;
+    }
+}
+
+/* Only writes to framebuffer memory. All restoration comes from RAM cells. */
+void fb_putc(char c) { console_putc(c); if (g_output) finish_draw(); }
+void fb_set_overlay(void (*overlay)(void)) { g_overlay=overlay; }
+void fb_set_top(unsigned rows)
+{
+    if (rows>=g_rows || rows==g_top) return;
+    g_top=rows;
+    if (g_cursor_y>=content_rows()) { scroll_up(); g_cursor_y=content_rows()-1u; }
+}
+bool fb_geometry(uint64_t *width,uint64_t *height,unsigned *cell_w,unsigned *cell_h)
+{
+    if (!g_ready) return false;
+    *width=g_width; *height=g_height; *cell_w=FONT8X16_WIDTH; *cell_h=FONT8X16_HEIGHT;
+    return true;
+}
+void fb_draw_page(uint64_t col,uint64_t row,uint64_t columns,uint64_t rows,
+                  const uint8_t *cells,uint16_t cursor)
+{ draw_page(col,row,columns,rows,cells,cursor); finish_draw(); }
+void fb_background_rect(uint64_t x,uint64_t y,uint64_t w,uint64_t h)
+{
+    if (!g_ready || x>=g_width || y>=g_height) return;
+    if(w>g_width-x) w=g_width-x;
+    if(h>g_height-y) h=g_height-y;
+    fill_rect(x,y,w,h,pack_color(g_bg));
+}
+void fb_console_rect(uint64_t x,uint64_t y,uint64_t w,uint64_t h)
+{
+    if (!g_ready || x>=g_width || y>=g_height || !w || !h) return;
+    if(w>g_width-x) w=g_width-x;
+    if(h>g_height-y) h=g_height-y;
+    uint64_t c0=x/FONT8X16_WIDTH, c1=(x+w-1)/FONT8X16_WIDTH;
+    uint64_t r0=y/FONT8X16_HEIGHT, r1=(y+h-1)/FONT8X16_HEIGHT;
+    for(uint64_t r=r0;r<=r1 && r<g_rows;r++)
+        for(uint64_t c=c0;c<=c1 && c<g_cols;c++)
+            if(r>=g_top) console_cell(c,r-g_top);
+}
+void fb_page_rect(uint64_t col,uint64_t row,unsigned columns,const uint8_t *cells,
+                  uint16_t cursor,uint64_t x,uint64_t y,uint64_t w,uint64_t h)
+{
+    if(!g_ready || !cells || !columns || !w || !h || x>=g_width || y>=g_height) return;
+    if(w>g_width-x) w=g_width-x;
+    if(h>g_height-y) h=g_height-y;
+    for(unsigned r=0;r<25;r++) for(unsigned c=0;c<columns;c++) {
+        uint64_t cx=(col+c)*FONT8X16_WIDTH,cy=(row+r)*FONT8X16_HEIGHT;
+        if(cx>=g_width || cy>=g_height || cx+FONT8X16_WIDTH<=x || cx>=x+w ||
+           cy+FONT8X16_HEIGHT<=y || cy>=y+h) continue;
+        uint64_t i=(r*columns+c)*2u;uint8_t a=cells[i+1];
+        draw_glyph(col+c,row+r,(char)cells[i],pack_color(g_text_palette[a&15u]),
+                   pack_color(g_text_palette[(a>>4)&7u]));
+        if(cursor==r*columns+c)
+            fill_rect(cx,cy+FONT8X16_HEIGHT-FB_CURSOR_HEIGHT,FONT8X16_WIDTH,
+                      FB_CURSOR_HEIGHT,pack_color(g_text_palette[a&15u]));
+    }
+}
+void fb_pointer(unsigned x,unsigned y)
+{
+    if(!g_ready) return;
+    /* Twelve by sixteen outlined arrow; clipping includes framebuffer edges. */
+    for(unsigned r=0;r<16;r++) for(unsigned c=0;c<12;c++) {
+        bool shape=(r<12 ? c<=r/2 : c>=3 && c<=5);
+        if(!shape || x+c>=g_width || y+r>=g_height) continue;
+        bool edge=c==0 || (r<12 && c==r/2) || r==0 || r==15 || (r>=12 && (c==3 || c==5));
+        put_pixel(x+c,y+r,pack_color(edge ? 0x000000u : 0xffffffu));
     }
 }

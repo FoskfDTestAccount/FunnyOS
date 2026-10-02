@@ -1,0 +1,303 @@
+{
+  "schema": 1,
+  "application": {
+    "schema": 1,
+    "id": "msdos2-more",
+    "name": "MS-DOS 2.0 MORE.COM",
+    "upstream": "https://github.com/microsoft/MS-DOS",
+    "revision": "2d04cacc5322951f187bb17e017c12920ac8ebe2",
+    "binary_path": "v2.0/bin/MORE.COM",
+    "size": 4364,
+    "sha256": "56830889fef22d56ef5938df0394bf30a8416cc06225b8dc35adc74bb13416b7",
+    "source_path": "v2.0/source/MORE.ASM",
+    "source_sha256": "b3b56fad5c9938a08de03209c21085e814b74f4299d152cd5fe2ec490c50305f",
+    "license_path": "LICENSE",
+    "reference_emulator": "DOSBox 0.74-3",
+    "invocation": "MORE < INPUT.TXT > OUTPUT.TXT",
+    "binary_int21_dependencies": [
+      "30",
+      "09",
+      "45",
+      "3E",
+      "3F",
+      "02",
+      "0C"
+    ],
+    "binary_termination": "INT 20h",
+    "notes": [
+      "The published binary is authoritative; do not patch or rebuild it for acceptance.",
+      "MORE.ASM has IBMVER=TRUE, but this binary has no video-mode query and a 24-row limit; source and binary configurations differ.",
+      "Short reference cases exercise stdin redirection, stdout redirection, EOF and Ctrl-Z, not interactive pagination.",
+      "FunnyCOM currently treats redirection tokens as PSP command-tail text, not handle wiring.",
+      "This probe documents incompatibility, not completed M5 application acceptance."
+    ]
+  },
+  "phase": "all",
+  "application_compatible": false,
+  "reference": {
+    "emulator": "DOSBox 0.74-3",
+    "cases": [
+      {
+        "case": "empty",
+        "input_bytes": 0,
+        "input_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "output_bytes": 2,
+        "output_sha256": "7eb70257593da06f682a3ddda54a9d260d4fc514f645237f5ca74b08f8da61a6",
+        "expected_hex": "0d0a",
+        "exact_match": true
+      },
+      {
+        "case": "short",
+        "input_bytes": 25,
+        "input_sha256": "49d2d9def5b2a3acc5cf6cadce025fe82ef9e83234b7f8672aac2808f7b5aeec",
+        "output_bytes": 27,
+        "output_sha256": "737bb7b6d7db965feb1d18f0b2f2bf963523878cf9707a89e17af48a4c467cec",
+        "expected_hex": "0d0a4669727374206c696e650d0a5365636f6e64206c696e650d0a",
+        "exact_match": true
+      },
+      {
+        "case": "controls",
+        "input_bytes": 19,
+        "input_sha256": "90fb57276b8f4dd98b06ccf7f51f29dd784d35a2b070216054745d66bf023810",
+        "output_bytes": 21,
+        "output_sha256": "fc463629e79350d64b794864cd5ae473859de90543960c1f2ee86a7b6b0d1a18",
+        "expected_hex": "0d0a6c6566740972696768740d0a61626308440d0a",
+        "exact_match": true
+      },
+      {
+        "case": "ctrlz",
+        "input_bytes": 30,
+        "input_sha256": "228b738c5127c52ee3686bda470db09bbf283e4e664dc9c4681f4f88fc8392ee",
+        "output_bytes": 14,
+        "output_sha256": "eb9b558d7d7d00ae7e913d9ac5a7cb9f0b094757d29afa1fb73bee00b6a59f4a",
+        "expected_hex": "0d0a4265666f726520454f460d0a",
+        "exact_match": true
+      },
+      {
+        "case": "wrap",
+        "input_bytes": 83,
+        "input_sha256": "04661542c0298fcf99f79ed8fb23adb9fdf51bf82e7b4a6f90eb135d8d15aa92",
+        "output_bytes": 85,
+        "output_sha256": "af6399eb388b49c8bfdc91cb9484e9af560f08894356c7957886ad797aabc954",
+        "expected_hex": "0d0a5757575757575757575757575757575757575757575757575757575757575757575757575757575757575757575757575757575757575757575757575757575757575757575757575757575757575757570d0a",
+        "exact_match": true
+      },
+      {
+        "case": "near-page",
+        "input_bytes": 198,
+        "input_sha256": "7f091ce02231d4a13e425dfa08bd7dfee0cb2f9b9a8e9234179d567180698e4b",
+        "output_bytes": 200,
+        "output_sha256": "a0be38f6e66085519536069615c28a177bd44b3f7249ee54867df5408ff611cf",
+        "expected_hex": "0d0a4c696e652030310d0a4c696e652030320d0a4c696e652030330d0a4c696e652030340d0a4c696e652030350d0a4c696e652030360d0a4c696e652030370d0a4c696e652030380d0a4c696e652030390d0a4c696e652031300d0a4c696e652031310d0a4c696e652031320d0a4c696e652031330d0a4c696e652031340d0a4c696e652031350d0a4c696e652031360d0a4c696e652031370d0a4c696e652031380d0a4c696e652031390d0a4c696e652032300d0a4c696e652032310d0a4c696e652032320d0a",
+        "exact_match": true
+      }
+    ],
+    "pagination_tested": false,
+    "guest_exit_code_observed": false,
+    "backend": "DOSBox host-directory mount, not MS-DOS 2.0 boot disk"
+  },
+  "funnyos_runs": [
+    {
+      "firmware": "bios",
+      "traced": true,
+      "invocation": "dos more.com",
+      "application_status": "incompatible",
+      "stop": "RUN LIMIT",
+      "runner_code": 1,
+      "shell_recovered": true,
+      "trace": {
+        "first_missing_call": "INT 21h AH=45h, BX=0000h",
+        "int_offset": "011Fh",
+        "return_ip": "0121h",
+        "actual_ax": "4500h",
+        "actual_cf": 1,
+        "subsequent_read_handle": "4500h",
+        "read_error_ax": "0006h",
+        "read_error_cf": 1,
+        "first_six_calls": [
+          "30",
+          "09",
+          "45",
+          "3e",
+          "45",
+          "3f"
+        ],
+        "psp_tail": ""
+      },
+      "log": "/var/tmp/funyos-build/m5-app-probe/qemu/trace-bios/run-1.log",
+      "log_sha256": "ee0b6dac5dda792f82e4bdb8240ec07d34d740bd32b05bd852bd43a0a1948ee2",
+      "run_limit_turns": 4097,
+      "run_limit_ms": 5100
+    },
+    {
+      "firmware": "bios",
+      "traced": true,
+      "invocation": "dos more.com < input.txt",
+      "application_status": "incompatible",
+      "stop": "RUN LIMIT",
+      "runner_code": 1,
+      "shell_recovered": true,
+      "trace": {
+        "first_missing_call": "INT 21h AH=45h, BX=0000h",
+        "int_offset": "011Fh",
+        "return_ip": "0121h",
+        "actual_ax": "4500h",
+        "actual_cf": 1,
+        "subsequent_read_handle": "4500h",
+        "read_error_ax": "0006h",
+        "read_error_cf": 1,
+        "first_six_calls": [
+          "30",
+          "09",
+          "45",
+          "3e",
+          "45",
+          "3f"
+        ],
+        "psp_tail": "< input.txt"
+      },
+      "log": "/var/tmp/funyos-build/m5-app-probe/qemu/trace-bios/run-2.log",
+      "log_sha256": "7f992b97e88c644fcea4980e3e4e5077316fd8446108021c82a7c7962c43dd63",
+      "run_limit_turns": 4097,
+      "run_limit_ms": 5080
+    },
+    {
+      "firmware": "uefi",
+      "traced": true,
+      "invocation": "dos more.com",
+      "application_status": "incompatible",
+      "stop": "RUN LIMIT",
+      "runner_code": 1,
+      "shell_recovered": true,
+      "trace": {
+        "first_missing_call": "INT 21h AH=45h, BX=0000h",
+        "int_offset": "011Fh",
+        "return_ip": "0121h",
+        "actual_ax": "4500h",
+        "actual_cf": 1,
+        "subsequent_read_handle": "4500h",
+        "read_error_ax": "0006h",
+        "read_error_cf": 1,
+        "first_six_calls": [
+          "30",
+          "09",
+          "45",
+          "3e",
+          "45",
+          "3f"
+        ],
+        "psp_tail": ""
+      },
+      "log": "/var/tmp/funyos-build/m5-app-probe/qemu/trace-uefi/run-1.log",
+      "log_sha256": "70d9bdf73b1e2d3b0034ff4bc9574973aeb21c136002ddf7bec87fa5adb9b827",
+      "run_limit_turns": 4609,
+      "run_limit_ms": 5570
+    },
+    {
+      "firmware": "uefi",
+      "traced": true,
+      "invocation": "dos more.com < input.txt",
+      "application_status": "incompatible",
+      "stop": "RUN LIMIT",
+      "runner_code": 1,
+      "shell_recovered": true,
+      "trace": {
+        "first_missing_call": "INT 21h AH=45h, BX=0000h",
+        "int_offset": "011Fh",
+        "return_ip": "0121h",
+        "actual_ax": "4500h",
+        "actual_cf": 1,
+        "subsequent_read_handle": "4500h",
+        "read_error_ax": "0006h",
+        "read_error_cf": 1,
+        "first_six_calls": [
+          "30",
+          "09",
+          "45",
+          "3e",
+          "45",
+          "3f"
+        ],
+        "psp_tail": "< input.txt"
+      },
+      "log": "/var/tmp/funyos-build/m5-app-probe/qemu/trace-uefi/run-2.log",
+      "log_sha256": "670d97948b82a7a598ac7f0fb6189efe8cf45cd8ff31127fcacae9828fe5423a",
+      "run_limit_turns": 4609,
+      "run_limit_ms": 5600
+    },
+    {
+      "firmware": "bios",
+      "traced": false,
+      "invocation": "dos more.com",
+      "application_status": "incompatible",
+      "stop": "RUN LIMIT",
+      "runner_code": 1,
+      "shell_recovered": true,
+      "trace": null,
+      "log": "/var/tmp/funyos-build/m5-app-probe/qemu/plain-bios/run-1.log",
+      "log_sha256": "1cb5da2c0b43342b5028669fb4ebac7b9273f61c3947aa77b195e5298dac1e6b",
+      "run_limit_turns": 4097,
+      "run_limit_ms": 5070
+    },
+    {
+      "firmware": "bios",
+      "traced": false,
+      "invocation": "dos more.com < input.txt",
+      "application_status": "incompatible",
+      "stop": "RUN LIMIT",
+      "runner_code": 1,
+      "shell_recovered": true,
+      "trace": null,
+      "log": "/var/tmp/funyos-build/m5-app-probe/qemu/plain-bios/run-2.log",
+      "log_sha256": "a03cb13ad77ba934e5bc0b20ac62b28748aeb3c4013c45c1c07c14cb848a35f5",
+      "run_limit_turns": 4609,
+      "run_limit_ms": 5560
+    },
+    {
+      "firmware": "uefi",
+      "traced": false,
+      "invocation": "dos more.com",
+      "application_status": "incompatible",
+      "stop": "RUN LIMIT",
+      "runner_code": 1,
+      "shell_recovered": true,
+      "trace": null,
+      "log": "/var/tmp/funyos-build/m5-app-probe/qemu/plain-uefi/run-1.log",
+      "log_sha256": "bcc576364ee49ba42807f6ee6dbad2743c241694e515fa72bff2a36b867b6a06",
+      "run_limit_turns": 4097,
+      "run_limit_ms": 5100
+    },
+    {
+      "firmware": "uefi",
+      "traced": false,
+      "invocation": "dos more.com < input.txt",
+      "application_status": "incompatible",
+      "stop": "RUN LIMIT",
+      "runner_code": 1,
+      "shell_recovered": true,
+      "trace": null,
+      "log": "/var/tmp/funyos-build/m5-app-probe/qemu/plain-uefi/run-2.log",
+      "log_sha256": "c5368cb7cb031e561b1ca4de9b3dc287aa0273eca41f319c6016ed4535d3c83d",
+      "run_limit_turns": 4097,
+      "run_limit_ms": 5070
+    }
+  ],
+  "investigation_checks_completed": true,
+  "snapshot_date": "2026-10-01",
+  "funnyos_base_commit": "e7c2905204c85ccbfc50254d593fd5bac4d35568",
+  "snapshot_source_sha256": {
+    "Makefile": "4e5841ce379b7e8d1aae0a6f2c525f3c7de92b7ba747b4fe469442cce44d7125",
+    "user/vm/vm.c": "d42d7eefc7c44f92140e7e6ae0870ecd40ffd26bf809565fe5fedeb100c55b9e",
+    "dos/dos/int21.c": "468dec993ad87ed6d23477253bd31943bdec20b3620ebc4c2f99a5a99f107226",
+    "dos/dos/fat.c": "fc209dd7d58373279bd2033b2d9824f3052832ccab67e4506058c0d20d57cd64",
+    "tools/probe-dos-app.py": "b01bd7d387d5cd765dcaef7d42e380c597ae04a884b64cee693d5a877882dde0"
+  },
+  "snapshot_note": "Enriched from results-all.json after verifying retained input/output and run-log hashes; no application compatibility implementation.",
+  "validation": {
+    "investigation_oracle_unittests": 18,
+    "make_check_exit_code": 0,
+    "make_check_log": "/var/tmp/funyos-m5-app-regression.log",
+    "diff_check": "passed",
+    "independent_review_performed": false
+  }
+}

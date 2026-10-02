@@ -389,7 +389,7 @@ struct command {
 
 static void cmd_dos(int argc,char **argv)
 {
-    if(argc<2) { uputs("Syntax: DOS <8.3.COM> [arguments]\n"); return; }
+    if(argc<2) { uputs("Syntax: DOS <8.3.COM|8.3.EXE> [arguments]\n"); return; }
     char tail[127]; unsigned n=0;
     for(int i=2;i<argc;i++) {
         if(n && n<126) tail[n++]=' ';
@@ -400,8 +400,34 @@ static void cmd_dos(int argc,char **argv)
     uprintf("DOS program returned %d\n",code);
 }
 
+static void run_fpu_test(void);
+static void cmd_tab(int argc,char **argv)
+{
+    if(argc>1 && same_command(argv[1],"stats")) {
+        uprintf("Terminal stats: pages=%d heap=%d ring3=%d offstack=%d\n",
+                u_terminal(4),u_terminal(6),u_terminal(8),u_terminal(7));return;
+    }
+    unsigned operation=2;
+    if(argc>1 && same_command(argv[1],"new")) operation=0;
+    else if(argc>1 && same_command(argv[1],"close")) operation=1;
+    else if(argc>1) { uputs("Syntax: TAB [NEW|CLOSE|STATS]\n");return; }
+    int result=u_terminal(operation);
+    if(result<0) uprintf("Terminal operation failed (%d)\n",result);
+    else if(operation==2) uprintf("Terminal %d, %d open tab(s)\n",u_terminal(3),result);
+}
+static void cmd_check(int argc,char **argv)
+{
+    (void)argc;(void)argv;
+    uputs("check: begin (floating point and nested process contexts)\n");
+    run_fpu_test();
+    long code=u_spawn("funnycom",14);
+    uprintf("check: nested process %s (%ld)\n",code==0 ? "PASS" : "FAIL",code);
+}
+
 static const struct command g_commands[] = {
-    { "dos", "DOS <file> [args]", "run a .COM from the FAT image", cmd_dos },
+    { "tab", "TAB [NEW|CLOSE|STATS]", "list, create or close a terminal", cmd_tab },
+    { "check", "CHECK", "check FPU and nested process contexts", cmd_check },
+    { "dos", "DOS <file> [args]", "run a .COM or MZ .EXE from the FAT image", cmd_dos },
     { "help",   "HELP",              "list the commands",              cmd_help   },
     { "dir",    "DIR",               "list the files",                 cmd_dir    },
     { "type",   "TYPE <file>",       "print a file",                   cmd_type   },
@@ -570,8 +596,25 @@ static void run_fpu_test(void)
     uprintf("  result        : %s\n", ok ? "PASS" : "FAIL");
 }
 
+int desktop_test(unsigned child);
+
 int u_main(uint64_t arg)
 {
+    if(arg==12 || arg==13) return desktop_test(arg==13);
+    if(arg==14) {
+        uputs("check: resumable child ready\n");
+        unsigned until=u_uptime_ms()+1500;
+        volatile double two=2.0;
+        unsigned wrong=0;
+        while(u_uptime_ms()<until) {
+            double value=1.0;
+            for(unsigned i=0;i<30;i++) value*=two;
+            if(value!=1073741824.0) wrong++;
+        }
+        long code=u_spawn("funnycom",ARG_SPAWN_TEST);
+        uprintf("check: resumable child %s\n",wrong==0 && code==0 ? "PASS" : "FAIL");
+        return wrong==0 && code==0 ? 0 : 1;
+    }
     /*
      * First, and on every boot rather than under a flag.
      *
